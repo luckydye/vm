@@ -51,6 +51,7 @@ apt-get install -y --no-install-recommends \
     fonts-dejavu-core \
     fonts-liberation \
     foot \
+    fuzzel \
     gdisk \
     git \
     greetd \
