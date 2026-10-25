@@ -271,6 +271,55 @@ mouse reporting, such as Ghostty, Kitty or WezTerm."
             ],
         },
         Command {
+            name: "stream",
+            group: "Screen and input",
+            usage: "varmint stream NAME [--fps N] [--no-audio]",
+            summary: "Write the screen as H.264 and the sound as Opus to stdout",
+            description: "\
+Streams the screen, and the sound unless --no-audio, until the VM stops or
+the reader goes away, for programs that show the screen elsewhere. Each
+message starts with a u8 kind; numbers are little-endian:
+
+  video  0, width u32, height u32, keyframe u8 (1 or 0), length u32,
+         then an H.264 access unit in Annex B form
+  audio  1, length u32, then an Opus packet of 20 ms, 48 kHz stereo
+
+The first video message is a keyframe with its parameter sets. Video is sent
+only when the screen changes, so a still screen sends nothing."
+                .into(),
+            options: vec![
+                ("--fps N", "Most frames per second (default 30, at most 60)".into()),
+                ("--no-audio", "Leave out the sound".into()),
+            ],
+            examples: &[
+                ("varmint stream $vm > screen.bin", ""),
+                ("varmint stream $vm --no-audio | my-viewer", ""),
+            ],
+        },
+        Command {
+            name: "input",
+            group: "Screen and input",
+            usage: "varmint input NAME",
+            summary: "Send mouse and keyboard events from stdin",
+            description: "\
+Reads one JSON event per line from stdin and sends each to the VM as it
+arrives, until stdin closes. Positions are screenshot pixels; keys and
+buttons are Linux evdev codes (BTN_LEFT 272, BTN_RIGHT 273, BTN_MIDDLE 274):
+
+  {\"move\": {\"x\": 640, \"y\": 400}}
+  {\"button\": {\"button\": 272, \"down\": true}}
+  {\"key\": {\"code\": 30, \"down\": true}}
+  {\"scroll\": {\"value\": -1, \"horizontal\": false}}
+
+A line that is not one of these stops it with an error."
+                .into(),
+            options: vec![],
+            examples: &[(
+                "echo '{\"move\": {\"x\": 640, \"y\": 400}}' | varmint input $vm",
+                "",
+            )],
+        },
+        Command {
             name: "move",
             group: "Screen and input",
             usage: "varmint move NAME X Y",

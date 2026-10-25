@@ -73,6 +73,8 @@ pub fn main() {
         "proxy" => proxy(args),
         "screenshot" => screenshot(args),
         "screen" => screen_command(args),
+        "stream" => stream(args),
+        "input" => input(args),
         "move" => move_pointer(args),
         "click" => click(args),
         "type" => type_text(args),
@@ -868,6 +870,57 @@ fn screen_command(args: &[String]) {
     };
     let error = screen::run(frames, input.into_inner(), resize).unwrap_err();
     fail(format!("VM {name}: {error}"))
+}
+
+fn stream(args: &[String]) {
+    let name = name_arg("stream", args);
+    let mut fps = 30;
+    let mut audio = true;
+    let mut options = args[1..].iter();
+    while let Some(option) = options.next() {
+        match option.as_str() {
+            "--fps" => fps = parse(options.next(), "--fps"),
+            "--no-audio" => audio = false,
+            _ => usage_error("stream"),
+        }
+    }
+
+    let (mut media, _) = request(&open(name), &Request::Stream {
+            fps,
+            codec: Codec::H264,
+            audio,
+        }).unwrap_or_else(|error| fail(error));
+    // Unbuffered, since a frame held back until the next one is a frame late.
+    let mut stdout = unsafe { File::from_raw_fd(io::stdout().as_raw_fd()) };
+    let mut buffer = vec![0; 64 * 1024];
+    loop {
+        let read = match media.read(&mut buffer) {
+            Ok(0) => std::process::exit(0),
+            Ok(read) => read,
+            Err(error) => fail(format!("VM {name}: {error}")),
+        };
+        match stdout.write_all(&buffer[..read]) {
+            Ok(()) => {}
+            // The reader went away, which is how a stream is meant to end.
+            Err(error) if error.kind() == io::ErrorKind::BrokenPipe => std::process::exit(0),
+            Err(error) => fail(error),
+        }
+    }
+}
+
+fn input(args: &[String]) {
+    let [name] = args else { usage_error("input") };
+    let (events, _) = request(&open(name), &Request::InputStream).unwrap_or_else(|error| fail(error));
+    let mut events = events.into_inner();
+    for line in io::stdin().lock().lines() {
+        let line = line.unwrap_or_else(|error| fail(error));
+        if line.trim().is_empty() {
+            continue;
+        }
+        let event: InputEvent =
+            serde_json::from_str(&line).unwrap_or_else(|error| fail(format!("not an input event: {line}: {error}")));
+        protocol::write_json(&mut events, &event).unwrap_or_else(|error| fail(format!("VM {name}: {error}")));
+    }
 }
 
 /// The first line of stdin, which `varmint run` writes once the VM is ready.

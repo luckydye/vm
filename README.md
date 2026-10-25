@@ -113,6 +113,8 @@ varmint click $vm 640 400 [--right | --middle] [--double]
 varmint type $vm "hello world"
 varmint key $vm ctrl+alt+t enter
 varmint scroll $vm -3
+varmint stream $vm | my-viewer      # the screen as H.264 and the sound as Opus, for other programs
+my-driver | varmint input $vm       # mouse and keyboard as JSON lines
 ```
 
 Graphics are hardware accelerated through the host GPU:
