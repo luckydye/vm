@@ -245,6 +245,31 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: 
 }
 .shell-pane { grid-area: main; }
 .screen-pane { grid-area: display; }
+/* The key bar under the expanded display, scrolling sideways on narrow screens. */
+.keys { position: relative; display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none; }
+.views:not([data-expanded="true"]) .keys { display: none; }
+.key-group { display: flex; gap: 4px; }
+.key {
+  flex: none;
+  display: grid;
+  place-items: center;
+  min-width: 36px;
+  height: 32px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid var(--gray-400);
+  background: var(--background);
+  font: 500 12.5px var(--mono);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.key:hover { background: var(--gray-100); border-color: var(--gray-500); }
+.key:focus-visible { outline: 2px solid var(--gray-1000); outline-offset: -2px; }
+.key[aria-pressed="true"] { background: var(--gray-1000); border-color: var(--gray-1000); color: var(--background); }
+.key svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+/* Takes the on-screen keyboard's text unseen; 16px keeps iOS from zooming in on focus. */
+.typing { position: absolute; left: 0; top: 0; width: 1px; height: 1px; padding: 0; border: 0; opacity: 0; font-size: 16px; }
+
 .shell-return { grid-area: display; }
 .facts { grid-area: facts; }
 .stopped { grid-area: main; }
@@ -286,7 +311,7 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: 
   outline: none;
   cursor: zoom-in;
 }
-.views[data-expanded="true"] .screen canvas { cursor: pointer; }
+.views[data-expanded="true"] .screen canvas { cursor: pointer; touch-action: none; }
 .views[data-expanded="true"] .screen-frame.captured canvas { cursor: default; box-shadow: 0 0 0 2px var(--gray-1000); }
 .hint {
   position: absolute;

@@ -46,6 +46,8 @@ export const state = {
   muted: localStorage.getItem(MUTED_KEY) === "true",
   // Machines whose tile plays audio; tiles start muted.
   audibleTiles: new Set(),
+  // Key codes of the modifiers latched in the screen's key bar.
+  modifiers: new Set(),
 };
 
 const listeners = new Set();
@@ -544,9 +546,9 @@ const BUTTONS = [0x110, 0x112, 0x111];
 // `x` and `y` are fractions of the displayed screen.
 export function pointerEvents(type, x, y, frame, detail) {
   const move = { move: { x: Math.floor(x * frame.width), y: Math.floor(y * frame.height) } };
-  if (type === "mousemove") return [move];
+  if (type === "pointermove") return [move];
   if (type === "wheel") return [move, { scroll: { value: -Math.sign(detail), horizontal: false } }];
-  return [move, { button: { button: BUTTONS[detail], down: type === "mousedown" } }];
+  return [move, { button: { button: BUTTONS[detail], down: type === "pointerdown" } }];
 }
 
 export function keyEvent(event, held) {
@@ -562,4 +564,71 @@ export function releaseKeys(held) {
   const events = [...held].map((code) => ({ key: { code, down: false } }));
   held.clear();
   return events;
+}
+
+// The screen's key bar, for touch screens without these keys and for
+// combinations the browser keeps for itself. A modifier stays latched until
+// the next key sent from the bar or typed on the on-screen keyboard.
+export const MODIFIERS = [
+  { label: "Ctrl", code: KEY_CODES.ControlLeft },
+  { label: "Alt", code: KEY_CODES.AltLeft },
+  { label: "Shift", code: KEY_CODES.ShiftLeft },
+  { label: "Super", code: KEY_CODES.MetaLeft },
+];
+
+export const KEYS = [
+  ["Esc", "Escape"], ["Tab", "Tab"], ["←", "ArrowLeft"], ["↑", "ArrowUp"], ["↓", "ArrowDown"], ["→", "ArrowRight"],
+  ["Home", "Home"], ["End", "End"], ["PgUp", "PageUp"], ["PgDn", "PageDown"], ["Ins", "Insert"], ["Del", "Delete"],
+  ...Array.from({ length: 12 }, (_, index) => [`F${index + 1}`, `F${index + 1}`]),
+].map(([label, name]) => ({ label, code: KEY_CODES[name] }));
+
+export function toggleModifier(code) {
+  if (!state.modifiers.delete(code)) state.modifiers.add(code);
+  changed();
+}
+
+// One press of `codes` together with the latched modifiers, which it unlatches.
+export function chord(codes) {
+  const pressed = [...new Set([...state.modifiers, ...codes])];
+  if (state.modifiers.size) {
+    state.modifiers.clear();
+    changed();
+  }
+  return [...pressed.map((code) => ({ key: { code, down: true } })), ...pressed.toReversed().map((code) => ({ key: { code, down: false } }))];
+}
+
+// The keys of each character on the guest's US layout, Shift first where it is needed.
+const CHARACTERS = new Map([[" ", [KEY_CODES.Space]], ["\n", [KEY_CODES.Enter]], ["\t", [KEY_CODES.Tab]]]);
+for (const letter of "abcdefghijklmnopqrstuvwxyz") {
+  const code = KEY_CODES[`Key${letter.toUpperCase()}`];
+  CHARACTERS.set(letter, [code]);
+  CHARACTERS.set(letter.toUpperCase(), [KEY_CODES.ShiftLeft, code]);
+}
+const SYMBOL_KEYS = [
+  "Backquote", "Digit1", "Digit2", "Digit3", "Digit4", "Digit5", "Digit6", "Digit7", "Digit8", "Digit9", "Digit0", "Minus", "Equal",
+  "BracketLeft", "BracketRight", "Backslash", "Semicolon", "Quote", "Comma", "Period", "Slash",
+];
+SYMBOL_KEYS.forEach((name, index) => {
+  CHARACTERS.set("`1234567890-=[]\\;',./"[index], [KEY_CODES[name]]);
+  CHARACTERS.set("~!@#$%^&*()_+{}|:\"<>?"[index], [KEY_CODES.ShiftLeft, KEY_CODES[name]]);
+});
+
+// The presses that turn `before`, the text in the on-screen keyboard's field,
+// into `after`: Backspace for what was taken away, then what was typed.
+export function typing(before, after) {
+  let same = 0;
+  while (same < before.length && same < after.length && before[same] === after[same]) same++;
+  const typed = [...after.slice(same)].map((character) => {
+    const codes = CHARACTERS.get(character);
+    if (!codes) throw new Error(`“${character}” has no key on the machine's US keyboard`);
+    return codes;
+  });
+  return [...[...before.slice(same)].map(() => [KEY_CODES.Backspace]), ...typed].flatMap(chord);
+}
+
+// The key of a KeyboardEvent.key that types no text into the on-screen
+// keyboard's field, like Enter or an arrow, or null. Backspace edits the
+// field, so `typing` sends it.
+export function namedKey(key) {
+  return key === "Backspace" ? null : KEY_CODES[key] ?? null;
 }
