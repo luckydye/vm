@@ -28,15 +28,21 @@ pub fn start(on_frame: impl Fn(Vec<u8>) + Send + 'static) -> io::Result<Backend>
             return Err(io::Error::last_os_error());
         }
     }
-    let process = Command::new("passt")
-        .args([
-            "--foreground",
-            "--quiet",
-            "--mtu",
-            &MTU.to_string(),
-            "--fd",
-            &fd.to_string(),
-        ])
+    let mut command = Command::new("passt");
+    command.args([
+        "--foreground",
+        "--quiet",
+        "--mtu",
+        &MTU.to_string(),
+        "--fd",
+        &fd.to_string(),
+    ]);
+    // As root passt drops to nobody, and AppArmor keeps it from looking that
+    // user up by name, so give it the IDs.
+    if unsafe { libc::geteuid() } == 0 {
+        command.args(["--runas", "65534:65534"]);
+    }
+    let process = command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .spawn()
