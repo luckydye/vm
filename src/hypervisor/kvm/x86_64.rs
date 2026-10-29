@@ -20,6 +20,9 @@ const CR4_PAE: u64 = 1 << 5;
 const EFER_LME: u64 = 1 << 8;
 const EFER_LMA: u64 = 1 << 10;
 
+/// CPUID leaf 1 ECX: running under a hypervisor.
+const CPUID_HYPERVISOR: u32 = 1 << 31;
+
 const APIC_LVT0: usize = 0x350;
 const APIC_LVT1: usize = 0x360;
 const APIC_MODE_NMI: u32 = 4 << 8;
@@ -49,7 +52,11 @@ pub fn create(kvm: &Kvm, vm: &VmFd, vcpus: usize) -> super::Result<(Vec<VcpuFd>,
             let mut cpuid = supported.clone();
             for entry in cpuid.as_mut_slice() {
                 match entry.function {
-                    1 => entry.ebx = (entry.ebx & 0x00ff_ffff) | ((id as u32) << 24),
+                    1 => {
+                        entry.ebx = (entry.ebx & 0x00ff_ffff) | ((id as u32) << 24);
+                        // The kernel looks for KVM, and so kvm-clock, only behind this bit.
+                        entry.ecx |= CPUID_HYPERVISOR;
+                    }
                     0xb | 0x1f => entry.edx = id as u32,
                     _ => {}
                 }
