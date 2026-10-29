@@ -932,24 +932,26 @@ impl<'a> Gpu<'a> {
             return Gpu::err(chain, CtrlType::RespErrInvalidParameter, hdr, mem);
         };
 
-        self.renderer
-            .transfer_write(
-                hdr.ctx_ud,
-                req.resource_id,
-                Transfer3D {
-                    x: req.r#box.x,
-                    y: req.r#box.y,
-                    z: req.r#box.z,
-                    w: req.r#box.w,
-                    h: req.r#box.h,
-                    d: req.r#box.d,
-                    level: req.level,
-                    stride: req.stride,
-                    layer_stride: req.layer_stride,
-                    offset: req.offset,
-                },
-            )
-            .unwrap();
+        let transfer_result = self.renderer.transfer_write(
+            hdr.ctx_ud,
+            req.resource_id,
+            Transfer3D {
+                x: req.r#box.x,
+                y: req.r#box.y,
+                z: req.r#box.z,
+                w: req.r#box.w,
+                h: req.r#box.h,
+                d: req.r#box.d,
+                level: req.level,
+                stride: req.stride,
+                layer_stride: req.layer_stride,
+                offset: req.offset,
+            },
+        );
+        // A guest context the renderer has marked broken fails here; only that context's client sees it.
+        if transfer_result.is_err() {
+            return Gpu::err(chain, CtrlType::RespErrUnspec, hdr, mem);
+        }
 
         Gpu::ok(chain, hdr, mem)
     }
@@ -959,24 +961,26 @@ impl<'a> Gpu<'a> {
             return Gpu::err(chain, CtrlType::RespErrInvalidParameter, hdr, mem);
         };
 
-        self.renderer
-            .transfer_read(
-                hdr.ctx_ud,
-                req.resource_id,
-                Transfer3D {
-                    x: req.r#box.x,
-                    y: req.r#box.y,
-                    z: req.r#box.z,
-                    w: req.r#box.w,
-                    h: req.r#box.h,
-                    d: req.r#box.d,
-                    level: req.level,
-                    stride: req.stride,
-                    layer_stride: req.layer_stride,
-                    offset: req.offset,
-                },
-            )
-            .unwrap();
+        let transfer_result = self.renderer.transfer_read(
+            hdr.ctx_ud,
+            req.resource_id,
+            Transfer3D {
+                x: req.r#box.x,
+                y: req.r#box.y,
+                z: req.r#box.z,
+                w: req.r#box.w,
+                h: req.r#box.h,
+                d: req.r#box.d,
+                level: req.level,
+                stride: req.stride,
+                layer_stride: req.layer_stride,
+                offset: req.offset,
+            },
+        );
+        // A guest context the renderer has marked broken fails here; only that context's client sees it.
+        if transfer_result.is_err() {
+            return Gpu::err(chain, CtrlType::RespErrUnspec, hdr, mem);
+        }
 
         Gpu::ok(chain, hdr, mem)
     }
