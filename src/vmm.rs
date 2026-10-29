@@ -5,22 +5,19 @@ use crate::{
     control,
     devices::{HostBackends, Runtime, RuntimeEvent},
     display::{DisplayBuffer, DisplayNotifier},
+    hypervisor::Vm,
     instance::{self, Launch},
-    machine::*,
+    machine::{self, MAX_SHARES},
     memory, net,
     protocol::{GuestMount, GuestSeeds},
     registry, seed,
     stdio, telemetry, virtio,
 };
-use applevisor::prelude::*;
 use std::{
     collections::BTreeMap,
-    fs,
+    fs, io,
     path::PathBuf,
-    sync::{
-        Arc, Mutex, OnceLock,
-        mpsc::{Receiver, Sender},
-    },
+    sync::{Arc, Mutex, OnceLock, mpsc::Receiver},
     thread,
 };
 
@@ -58,73 +55,35 @@ pub fn shutdown(reason: &'static str) -> ! {
 }
 
 fn vmm_thread(
-    vm: &VirtualMachineInstance<GicEnabled>,
+    vm: &Vm,
     display: &Mutex<DisplayBuffer>,
-    runtime_event_tx: Sender<RuntimeEvent>,
     runtime_event_rx: Receiver<RuntimeEvent>,
     audio_event_rx: Receiver<audio::BackendEvent>,
     display_notifier: DisplayNotifier,
     config: &VmConfig,
     boot: BootPayload,
     backends: HostBackends,
-    gicd_size: u64,
-    gicr_size: u64,
-) -> Result<()> {
-    let shares = backends.shares.len();
-    let initrd_range = Some((INITRD_START, checked_end(INITRD_START, boot.initrd.len(), "initrd")));
-    let dtb = build_fdt(
-        config.memory_size as u64,
+) -> io::Result<()> {
+    let mem = memory::GuestMemory::new(vm, machine::ram_regions(config.memory_size));
+    let entry = machine::load(
+        &mem,
+        config.memory_size,
         config.vcpus,
         &config.kernel_args,
-        initrd_range,
-        gicd_size,
-        gicr_size,
-        shares,
-    )
-    .unwrap_or_else(|error| panic!("failed to build guest FDT: {error}"));
-
-    validate_boot_layout(config.memory_size, boot.kernel.len(), &boot.initrd, dtb.len());
-
-    let mem = memory::GuestMemory::new(RAM_START, config.memory_size);
-    mem.write(IMAGE_START, &boot.kernel)?;
-    mem.write(INITRD_START, &boot.initrd)?;
-    mem.write(DTB_START, &dtb)?;
+        &boot.kernel,
+        &boot.initrd,
+        backends.shares.len(),
+    )?;
     // The VMM runs until the VM stops; the guest has its own copy now.
     drop(boot);
 
-    Runtime::new(vm, runtime_event_tx, backends, config.vcpus)?.run(
+    Runtime::new(vm, backends, config.vcpus, entry).run(
         &mem,
         display,
         runtime_event_rx,
         audio_event_rx,
         &display_notifier,
-    )?;
-
-    Ok(())
-}
-
-fn checked_end(start: u64, len: usize, name: &str) -> u64 {
-    start
-        .checked_add(len as u64)
-        .unwrap_or_else(|| panic!("{name} address range overflows"))
-}
-
-fn validate_boot_layout(memory_size: usize, image_size: usize, initrd: &[u8], dtb_size: usize) {
-    let ram_end = checked_end(RAM_START, memory_size, "guest RAM");
-    let image_end = checked_end(IMAGE_START, image_size, "kernel");
-    if image_end > INITRD_START {
-        panic!("kernel ends at 0x{image_end:x}, overlapping initrd region at 0x{INITRD_START:x}");
-    }
-
-    let initrd_end = checked_end(INITRD_START, initrd.len(), "initrd");
-    if initrd_end > DTB_START {
-        panic!("initrd ends at 0x{initrd_end:x}, overlapping FDT at 0x{DTB_START:x}");
-    }
-
-    let dtb_end = checked_end(DTB_START, dtb_size, "FDT");
-    if dtb_end > ram_end {
-        panic!("FDT ends at 0x{dtb_end:x}, past guest RAM end at 0x{ram_end:x}");
-    }
+    )
 }
 
 pub fn run(
@@ -133,7 +92,7 @@ pub fn run(
     mounts: &[Mount],
     seeds: &[Seed],
     environment: BTreeMap<String, String>,
-) -> Result<()> {
+) -> io::Result<()> {
     let Launch {
         instance,
         lock: _lock,
@@ -174,29 +133,7 @@ pub fn run(
         .unwrap_or_else(|error| panic!("failed to open VM disk {}: {error}", config.disk.display()));
     let boot = BootPayload::load(&config);
 
-    let gicd_size = GicConfig::get_distributor_size()? as u64;
-    let gicr_region_size = GicConfig::get_redistributor_region_size()? as u64;
-    let gicr_stride = GicConfig::get_redistributor_size()? as u64;
-    assert!(gicr_stride != 0);
-
-    let max_vcpus = gicr_region_size / gicr_stride;
-    if config.vcpus as u64 > max_vcpus {
-        panic!(
-            "vcpus={} exceeds the Hypervisor.framework GIC limit of {max_vcpus}",
-            config.vcpus
-        );
-    }
-    assert!(GICR_START > GICD_START + gicd_size);
-    let gicr_size = gicr_stride * config.vcpus as u64;
-    assert!(UART_START >= GICR_START + gicr_size);
-
-    let mut gic_config = GicConfig::new();
-    gic_config.set_distributor_base(GICD_START)?;
-    gic_config.set_redistributor_base(GICR_START)?;
-
-    let mut vm_cfg = VirtualMachineConfig::new();
-    vm_cfg.set_ipa_granule(IpaGranule::HV_IPA_GRANULE_4KB)?;
-    let vm = VirtualMachine::with_gic(vm_cfg, gic_config)?;
+    let vm = Vm::new(config.vcpus).unwrap_or_else(|error| panic!("failed to create the VM: {error}"));
 
     let display = Mutex::new(DisplayBuffer::new());
 
@@ -249,7 +186,7 @@ pub fn run(
     let network = net::start(move |frame| {
         let _ = net_rx_tx.send(RuntimeEvent::NetRx(frame));
     })
-    .unwrap_or_else(|error| panic!("failed to start vmnet networking: {error}"));
+    .unwrap_or_else(|error| panic!("failed to start networking: {error}"));
 
     // Only a VM with a window plays on the host's speakers; every VM streams its
     // audio to control clients.
@@ -299,7 +236,6 @@ pub fn run(
     };
 
     thread::scope(|scope| {
-        let vmm_runtime_event_tx = runtime_event_tx.clone();
         let vm = &vm;
         let display = &display;
         let config = &config;
@@ -307,15 +243,12 @@ pub fn run(
             vmm_thread(
                 vm,
                 display,
-                vmm_runtime_event_tx,
                 runtime_event_rx,
                 audio_event_rx,
                 display_notifier,
                 config,
                 boot,
                 backends,
-                gicd_size,
-                gicr_size,
             )
             .unwrap_or_else(|error| panic!("VM failed: {error:?}"));
             shutdown("exited")

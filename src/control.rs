@@ -161,11 +161,24 @@ fn handle(connection: UnixStream, context: &Context<'_>) -> io::Result<()> {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn footprint() -> u64 {
     let mut usage: libc::rusage_info_v2 = unsafe { mem::zeroed() };
     let result = unsafe { libc::proc_pid_rusage(libc::getpid(), libc::RUSAGE_INFO_V2, (&raw mut usage).cast()) };
     assert_eq!(result, 0, "proc_pid_rusage failed: {}", io::Error::last_os_error());
     usage.ri_phys_footprint
+}
+
+/// The resident memory of the VM process, guest RAM included.
+#[cfg(target_os = "linux")]
+fn footprint() -> u64 {
+    let statm = std::fs::read_to_string("/proc/self/statm").expect("failed to read /proc/self/statm");
+    let resident_pages: u64 = statm
+        .split_whitespace()
+        .nth(1)
+        .and_then(|pages| pages.parse().ok())
+        .expect("malformed /proc/self/statm");
+    resident_pages * unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64
 }
 
 fn cpu_ms() -> u64 {

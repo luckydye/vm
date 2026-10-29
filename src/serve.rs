@@ -31,14 +31,12 @@ use std::{
     env,
     fs::{self, OpenOptions},
     io::{self, BufRead, BufReader, Read, Write},
-    mem,
     net::{Shutdown, SocketAddr, TcpListener, TcpStream},
     os::unix::{
         fs::{OpenOptionsExt, PermissionsExt},
         net::UnixStream,
     },
     path::PathBuf,
-    ptr, slice,
     process::{Command, Stdio},
     sync::Arc,
     thread,
@@ -153,7 +151,7 @@ struct Vm {
 #[derive(Serialize)]
 struct Host {
     memory_bytes: u64,
-    /// Counted like Activity Monitor's "Memory Used": app memory, wired and compressed.
+    /// Counted like Activity Monitor's "Memory Used" on macOS: app memory, wired and compressed.
     used_bytes: u64,
     /// CPU time of all cores since boot: busy, and busy plus idle.
     cpu_busy_ms: u64,
@@ -588,7 +586,9 @@ fn usage(instance: &instance::Instance) -> Result<Option<protocol::Reply>, Strin
     }
 }
 
+#[cfg(target_os = "macos")]
 fn host() -> Host {
+    use std::{mem, ptr, slice};
     let mut memory_bytes: u64 = 0;
     let mut size = size_of::<u64>();
     let result = unsafe {
@@ -648,6 +648,43 @@ fn host() -> Host {
     Host {
         memory_bytes,
         used_bytes: pages * page_bytes,
+        cpu_busy_ms: busy_ticks * tick_ms,
+        cpu_total_ms: total_ticks * tick_ms,
+    }
+}
+
+/// Memory in use counts what is not available to start programs with, as `free` does.
+#[cfg(target_os = "linux")]
+fn host() -> Host {
+    let meminfo = fs::read_to_string("/proc/meminfo").expect("failed to read /proc/meminfo");
+    let kib = |field: &str| -> u64 {
+        meminfo
+            .lines()
+            .find_map(|line| line.strip_prefix(field)?.strip_prefix(':'))
+            .and_then(|value| value.trim().trim_end_matches(" kB").parse().ok())
+            .unwrap_or_else(|| panic!("/proc/meminfo has no {field}"))
+    };
+    let memory_bytes = kib("MemTotal") * 1024;
+    let used_bytes = memory_bytes - kib("MemAvailable") * 1024;
+
+    // user nice system idle iowait irq softirq steal, in clock ticks.
+    let stat = fs::read_to_string("/proc/stat").expect("failed to read /proc/stat");
+    let ticks: Vec<u64> = stat
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("cpu "))
+        .expect("/proc/stat has no cpu line")
+        .split_whitespace()
+        .take(8)
+        .map(|value| value.parse().expect("malformed /proc/stat"))
+        .collect();
+    let total_ticks: u64 = ticks.iter().sum();
+    let busy_ticks = total_ticks - ticks[3] - ticks[4];
+    let tick_ms = 1000 / unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as u64;
+
+    Host {
+        memory_bytes,
+        used_bytes,
         cpu_busy_ms: busy_ticks * tick_ms,
         cpu_total_ms: total_ticks * tick_ms,
     }

@@ -1,5 +1,6 @@
 //! https://docs.oasis-open.org/virtio/virtio/v1.3/csd01/virtio-v1.3-csd01.html#x1-4040006
 use crate::{
+    hypervisor::Vm,
     memory::GuestMemory,
     virtio::{
         chain::ChainData,
@@ -11,9 +12,8 @@ use crate::{
         },
     },
 };
-use applevisor_sys::{hv_vm_map, hv_vm_unmap};
 use num_enum::TryFromPrimitive;
-use std::{collections::HashMap, ffi::c_void, mem::offset_of};
+use std::{collections::HashMap, ffi::c_void, io, mem::offset_of};
 use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes};
 
 mod edid;
@@ -29,7 +29,7 @@ const EVENT_DISPLAY: u32 = 1;
 const HOST_VISIBLE_SHM_ID: u64 = 1;
 const HOST_VISIBLE_SHM_BASE: u64 = 0xE_0000_0000;
 const HOST_VISIBLE_SHM_SIZE: u64 = 4 * 1024 * 1024 * 1024;
-const APPLE_HV_PAGE_SIZE: usize = 0x1000;
+const PAGE_SIZE: usize = 0x1000;
 
 const MAP_CACHE_MASK: u32 = 0x0f;
 
@@ -464,14 +464,15 @@ struct BlobResource {
 }
 
 struct BlobMapping {
+    vm: Vm,
     guest_addr: u64,
     size: usize,
     mapped: bool,
 }
 
 impl BlobMapping {
-    fn map(host_addr: u64, guest_addr: u64, size: usize) -> Result<BlobMapping, i32> {
-        let page_size = APPLE_HV_PAGE_SIZE as u64;
+    fn map(vm: &Vm, host_addr: u64, guest_addr: u64, size: usize) -> io::Result<BlobMapping> {
+        let page_size = PAGE_SIZE as u64;
 
         let host_base = align_down_u64(host_addr, page_size);
         let guest_base = align_down_u64(guest_addr, page_size);
@@ -480,45 +481,32 @@ impl BlobMapping {
         let guest_delta = guest_addr - guest_base;
 
         if host_delta != guest_delta {
-            eprintln!(
-                "blob mapping alignment mismatch: host_addr={:#x} guest_addr={:#x} host_delta={:#x} guest_delta={:#x}",
-                host_addr, guest_addr, host_delta, guest_delta,
-            );
-            return Err(-1);
+            return Err(io::Error::other(format!(
+                "alignment mismatch: host_addr={host_addr:#x} guest_addr={guest_addr:#x} host_delta={host_delta:#x} guest_delta={guest_delta:#x}"
+            )));
         }
 
-        let map_size = align_up(size.checked_add(host_delta as usize).ok_or(-1)?, APPLE_HV_PAGE_SIZE).ok_or(-1)?;
+        let map_size = size
+            .checked_add(host_delta as usize)
+            .and_then(|size| align_up(size, PAGE_SIZE))
+            .ok_or_else(|| io::Error::other("blob size overflows"))?;
 
-        let ret = unsafe {
-            hv_vm_map(
-                host_base as *const c_void,
-                guest_base,
-                map_size,
-                HV_MEMORY_READ | HV_MEMORY_WRITE,
-            )
-        };
-
-        if ret != HV_SUCCESS {
-            return Err(ret);
-        }
+        vm.map(host_base as *mut u8, guest_base, map_size, false)?;
 
         Ok(BlobMapping {
+            vm: vm.clone(),
             guest_addr: guest_base,
             size: map_size,
             mapped: true,
         })
     }
 
-    fn unmap(&mut self) -> Result<(), i32> {
+    fn unmap(&mut self) -> io::Result<()> {
         if !self.mapped {
             return Ok(());
         }
 
-        let ret = unsafe { hv_vm_unmap(self.guest_addr, self.size) };
-        if ret != HV_SUCCESS {
-            return Err(ret);
-        }
-
+        self.vm.unmap(self.guest_addr, self.size)?;
         self.mapped = false;
         Ok(())
     }
@@ -528,8 +516,8 @@ impl Drop for BlobMapping {
     fn drop(&mut self) {
         if let Err(err) = self.unmap() {
             eprintln!(
-                "BlobMapping cleanup FAILED: hv_vm_unmap guest_addr={:#x} size={} err={:#x}",
-                self.guest_addr, self.size, err,
+                "BlobMapping cleanup FAILED: unmap guest_addr={:#x} size={} err={err}",
+                self.guest_addr, self.size,
             );
         }
     }
@@ -1104,6 +1092,15 @@ impl<'a> Gpu<'a> {
 
                 None
             }
+            #[cfg(target_os = "linux")]
+            ResourceKind::Renderer3d | ResourceKind::RendererBlob(_) => {
+                if !self.readback_renderer_scanout(resource_id) {
+                    return Gpu::err(chain, CtrlType::RespErrUnspec, hdr, mem);
+                }
+
+                None
+            }
+            #[cfg(target_os = "macos")]
             ResourceKind::Renderer3d | ResourceKind::RendererBlob(_) => {
                 let Some(texture) = self.renderer.native_texture(resource_id) else {
                     eprintln!(
@@ -1596,6 +1593,36 @@ impl<'a> Gpu<'a> {
         true
     }
 
+    /// Reads the renderer's scanout resource back into its framebuffer, sized
+    /// like the scanout's framebuffer for blobs and like the resource otherwise.
+    #[cfg(target_os = "linux")]
+    fn readback_renderer_scanout(&mut self, resource_id: u32) -> bool {
+        let Some(resource) = self.resources.get_mut(&resource_id) else {
+            return false;
+        };
+        let (width, height) = match self.scanout.as_ref().map(|scanout| &scanout.source) {
+            Some(ScanoutSource::Blob {
+                framebuffer_width,
+                framebuffer_height,
+                ..
+            }) => (*framebuffer_width, *framebuffer_height),
+            _ => (resource.width, resource.height),
+        };
+        resource
+            .framebuffer
+            .resize(width as usize * height as usize * BYTES_PER_PIXEL, 0);
+        match self
+            .renderer
+            .read_pixels(resource_id, width, height, &mut resource.framebuffer)
+        {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("virtio-gpu: scanout readback failed resource={resource_id} err={error:?}");
+                false
+            }
+        }
+    }
+
     fn configure_presentation(&mut self) {
         let Some(scanout) = self.scanout.as_ref() else {
             return;
@@ -1758,7 +1785,7 @@ impl<'a> Gpu<'a> {
             return Gpu::err(chain, CtrlType::RespErrUnspec, hdr, mem);
         }
 
-        let align = APPLE_HV_PAGE_SIZE as u64;
+        let align = PAGE_SIZE as u64;
 
         if offset & (align - 1) != 0 {
             eprintln!(
@@ -1768,7 +1795,7 @@ impl<'a> Gpu<'a> {
             return Gpu::err(chain, CtrlType::RespErrInvalidParameter, hdr, mem);
         }
 
-        let rounded_size = match align_up(size as usize, APPLE_HV_PAGE_SIZE) {
+        let rounded_size = match align_up(size as usize, PAGE_SIZE) {
             Some(v) => v as u64,
             None => {
                 eprintln!(
@@ -1814,11 +1841,11 @@ impl<'a> Gpu<'a> {
 
         let guest_addr = HOST_VISIBLE_SHM_BASE + offset;
 
-        let mapping = match BlobMapping::map(map_ptr, guest_addr, size as usize) {
+        let mapping = match BlobMapping::map(mem.vm(), map_ptr, guest_addr, size as usize) {
             Ok(mapping) => mapping,
             Err(err) => {
                 eprintln!(
-                    "ResourceMapBlob FAILED: hv_vm_map resource_id={} map_ptr={:#x} guest_addr={:#x} size={} err={:#x}",
+                    "ResourceMapBlob FAILED: map resource_id={} map_ptr={:#x} guest_addr={:#x} size={} err={}",
                     resource_id, map_ptr, guest_addr, size, err,
                 );
 
@@ -1868,7 +1895,7 @@ impl<'a> Gpu<'a> {
 
         if let Err(err) = mapping.unmap() {
             eprintln!(
-                "ResourceUnmapBlob FAILED: hv_vm_unmap resource_id={} guest_addr={:#x} size={} err={:#x}",
+                "ResourceUnmapBlob FAILED: unmap resource_id={} guest_addr={:#x} size={} err={}",
                 resource_id, mapping.guest_addr, mapping.size, err,
             );
             blob.mapping = Some(mapping);
@@ -1992,10 +2019,6 @@ impl<'a> ExternalEventHandler for Gpu<'a> {
 fn gpa_to_host(mem: &GuestMemory, gpa: u64, len: u64) -> Option<*mut c_void> {
     mem.checked_host_addr(gpa, len as usize).ok().map(|host_addr| host_addr.cast())
 }
-
-const HV_SUCCESS: i32 = 0;
-const HV_MEMORY_READ: u64 = 1 << 0;
-const HV_MEMORY_WRITE: u64 = 1 << 1;
 
 fn align_up(value: usize, align: usize) -> Option<usize> {
     let mask = align.checked_sub(1)?;

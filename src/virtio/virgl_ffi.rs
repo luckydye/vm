@@ -1,9 +1,14 @@
+#[cfg(target_os = "macos")]
+mod angle;
+
+#[cfg(target_os = "macos")]
+use angle::*;
+#[cfg(target_os = "macos")]
+use std::ptr::NonNull;
 use std::{
     collections::HashMap,
     ffi::{CStr, c_char, c_int, c_void},
     os::raw::c_uint,
-    ptr::NonNull,
-    sync::OnceLock,
 };
 
 #[repr(C)]
@@ -46,6 +51,12 @@ pub struct ResourceCreateBlob {
     pub size: u64,
 }
 
+/// Scanouts are never native textures on Linux.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Copy, Clone)]
+pub enum NativeTexture {}
+
+#[cfg(target_os = "macos")]
 #[derive(Debug, Copy, Clone)]
 pub struct NativeTexture {
     handle: NonNull<c_void>,
@@ -53,6 +64,7 @@ pub struct NativeTexture {
     height: u32,
 }
 
+#[cfg(target_os = "macos")]
 impl NativeTexture {
     pub fn as_ptr(self) -> *mut c_void {
         self.handle.as_ptr()
@@ -95,6 +107,7 @@ struct ResourceCreateArgs {
     flags: u32,
 }
 
+#[cfg(target_os = "macos")]
 #[repr(C)]
 #[derive(Default, Clone, Copy)]
 struct VirglRendererResourceInfo {
@@ -110,6 +123,7 @@ struct VirglRendererResourceInfo {
     fd: c_int,
 }
 
+#[cfg(target_os = "macos")]
 #[repr(C)]
 #[derive(Clone, Copy)]
 union VirglRendererNativeHandleUnion {
@@ -117,6 +131,7 @@ union VirglRendererNativeHandleUnion {
     native_handle: *mut c_void,
 }
 
+#[cfg(target_os = "macos")]
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct VirglRendererResourceInfoExt {
@@ -129,7 +144,9 @@ struct VirglRendererResourceInfoExt {
     native_type: c_int,
 }
 
+#[cfg(target_os = "macos")]
 const VIRGL_RENDERER_RESOURCE_INFO_EXT_VERSION: c_int = 1;
+#[cfg(target_os = "macos")]
 const VIRGL_NATIVE_HANDLE_METAL_TEXTURE: c_int = 2;
 
 #[repr(C)]
@@ -175,15 +192,23 @@ pub const CAPSET_VIRGL: u32 = 1;
 pub const CAPSET_VIRGL2: u32 = 2;
 pub const CAPSET_VENUS: u32 = 4;
 
+#[cfg(target_os = "linux")]
+const VIRGL_RENDERER_USE_EGL: c_int = 1 << 0;
 const VIRGL_RENDERER_THREAD_SYNC: c_int = 1 << 1;
 const VIRGL_RENDERER_USE_SURFACELESS: c_int = 1 << 3;
+#[cfg(target_os = "macos")]
 const VIRGL_RENDERER_USE_GLES: c_int = 1 << 4;
+#[cfg(target_os = "macos")]
 const VIRGL_RENDERER_USE_EXTERNAL_BLOB: c_int = 1 << 5;
 const VIRGL_RENDERER_VENUS: c_int = 1 << 6;
 const VIRGL_RENDERER_RENDER_SERVER: c_int = 1 << 9;
+#[cfg(target_os = "macos")]
 const VIRGL_RENDERER_NATIVE_SHARE_TEXTURE: c_int = 1 << 12;
 const VIRGL_RENDERER_ASYNC_FENCE_CB: c_int = 1 << 8;
 
+/// ANGLE on Metal renders GLES, in contexts varmint creates, and shares
+/// scanouts as Metal textures.
+#[cfg(target_os = "macos")]
 const BASE_INIT_FLAGS: c_int = VIRGL_RENDERER_THREAD_SYNC
     | VIRGL_RENDERER_USE_SURFACELESS
     | VIRGL_RENDERER_USE_GLES
@@ -191,6 +216,16 @@ const BASE_INIT_FLAGS: c_int = VIRGL_RENDERER_THREAD_SYNC
     | VIRGL_RENDERER_VENUS
     | VIRGL_RENDERER_ASYNC_FENCE_CB
     | VIRGL_RENDERER_NATIVE_SHARE_TEXTURE
+    | VIRGL_RENDERER_RENDER_SERVER;
+
+/// virglrenderer creates its own surfaceless EGL contexts on the host's GPU,
+/// and maps blobs itself.
+#[cfg(target_os = "linux")]
+const BASE_INIT_FLAGS: c_int = VIRGL_RENDERER_USE_EGL
+    | VIRGL_RENDERER_THREAD_SYNC
+    | VIRGL_RENDERER_USE_SURFACELESS
+    | VIRGL_RENDERER_VENUS
+    | VIRGL_RENDERER_ASYNC_FENCE_CB
     | VIRGL_RENDERER_RENDER_SERVER;
 
 #[link(name = "virglrenderer")]
@@ -257,6 +292,7 @@ unsafe extern "C" {
 
     fn virgl_renderer_resource_get_map_info(res_handle: u32, map_info: *mut u32) -> c_int;
 
+    #[cfg(target_os = "macos")]
     fn virgl_renderer_resource_get_info_ext(res_handle: c_int, info: *mut VirglRendererResourceInfoExt) -> c_int;
 }
 
@@ -267,287 +303,6 @@ extern "C" fn virgl_log_trampoline(level: c_int, message: *const c_char, _user_d
 
     let msg = unsafe { CStr::from_ptr(message) }.to_string_lossy();
     eprintln!("virglrenderer[{level}]: {msg}");
-}
-
-// ---- ANGLE/EGL caller winsys ----
-
-type EglDisplay = *mut c_void;
-type EglContext = *mut c_void;
-type EglSurface = *mut c_void;
-type EglConfig = *mut c_void;
-type EglBoolean = c_uint;
-type EglInt = c_int;
-type EglEnum = c_uint;
-
-const EGL_FALSE: EglBoolean = 0;
-const EGL_NONE: EglInt = 0x3038;
-const EGL_OPENGL_ES_API: EglEnum = 0x30A0;
-const EGL_DEFAULT_DISPLAY: *mut c_void = std::ptr::null_mut();
-
-const EGL_PLATFORM_ANGLE_ANGLE: EglEnum = 0x3202;
-const EGL_PLATFORM_ANGLE_TYPE_ANGLE: EglInt = 0x3203;
-const EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE: EglInt = 0x3489;
-
-const EGL_SURFACE_TYPE: EglInt = 0x3033;
-const EGL_PBUFFER_BIT: EglInt = 0x0001;
-const EGL_RENDERABLE_TYPE: EglInt = 0x3040;
-const EGL_OPENGL_ES2_BIT: EglInt = 0x0004;
-const EGL_RED_SIZE: EglInt = 0x3024;
-const EGL_GREEN_SIZE: EglInt = 0x3023;
-const EGL_BLUE_SIZE: EglInt = 0x3022;
-const EGL_ALPHA_SIZE: EglInt = 0x3021;
-const EGL_WIDTH: EglInt = 0x3057;
-const EGL_HEIGHT: EglInt = 0x3056;
-const EGL_CONTEXT_CLIENT_VERSION: EglInt = 0x3098;
-
-type EglGetPlatformDisplayExt = unsafe extern "C" fn(EglEnum, *mut c_void, *const EglInt) -> EglDisplay;
-
-#[link(name = "EGL")]
-unsafe extern "C" {
-    fn eglGetProcAddress(name: *const c_char) -> *const c_void;
-    fn eglGetError() -> EglInt;
-    fn eglInitialize(dpy: EglDisplay, major: *mut EglInt, minor: *mut EglInt) -> EglBoolean;
-    fn eglBindAPI(api: EglEnum) -> EglBoolean;
-    fn eglChooseConfig(
-        dpy: EglDisplay,
-        attribs: *const EglInt,
-        configs: *mut EglConfig,
-        config_size: EglInt,
-        num_config: *mut EglInt,
-    ) -> EglBoolean;
-    fn eglCreatePbufferSurface(dpy: EglDisplay, config: EglConfig, attribs: *const EglInt) -> EglSurface;
-    fn eglCreateContext(
-        dpy: EglDisplay,
-        config: EglConfig,
-        share_context: EglContext,
-        attribs: *const EglInt,
-    ) -> EglContext;
-    fn eglDestroyContext(dpy: EglDisplay, ctx: EglContext) -> EglBoolean;
-    fn eglMakeCurrent(dpy: EglDisplay, draw: EglSurface, read: EglSurface, ctx: EglContext) -> EglBoolean;
-}
-
-#[derive(Clone, Copy)]
-struct AngleGlobals {
-    display: EglDisplay,
-    config: EglConfig,
-    surface: EglSurface,
-    share_context: EglContext,
-}
-
-unsafe impl Send for AngleGlobals {}
-unsafe impl Sync for AngleGlobals {}
-
-static ANGLE_GLOBAL: OnceLock<Result<AngleGlobals, EglInt>> = OnceLock::new();
-
-fn angle_globals() -> Option<AngleGlobals> {
-    ANGLE_GLOBAL.get().and_then(|r| r.ok())
-}
-
-fn angle_display() -> EglDisplay {
-    angle_globals().map_or(std::ptr::null_mut(), |g| g.display)
-}
-
-fn angle_config() -> EglConfig {
-    angle_globals().map_or(std::ptr::null_mut(), |g| g.config)
-}
-
-fn angle_surface() -> EglSurface {
-    angle_globals().map_or(std::ptr::null_mut(), |g| g.surface)
-}
-
-fn angle_share_context() -> EglContext {
-    angle_globals().map_or(std::ptr::null_mut(), |g| g.share_context)
-}
-
-fn angle_init_once() -> Result<(), EglInt> {
-    match ANGLE_GLOBAL.get_or_init(|| angle_init_impl()) {
-        Ok(_) => Ok(()),
-        Err(e) => Err(*e),
-    }
-}
-
-fn angle_init_impl() -> Result<AngleGlobals, EglInt> {
-    let proc_name = b"eglGetPlatformDisplayEXT\0";
-    let proc = unsafe { eglGetProcAddress(proc_name.as_ptr() as *const c_char) };
-    if proc.is_null() {
-        eprintln!("ANGLE: eglGetPlatformDisplayEXT not found");
-        return Err(-1);
-    }
-
-    let get_platform_display: EglGetPlatformDisplayExt = unsafe { std::mem::transmute(proc) };
-
-    let display_attribs = [
-        EGL_PLATFORM_ANGLE_TYPE_ANGLE,
-        EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE,
-        EGL_NONE,
-    ];
-
-    let dpy = unsafe { get_platform_display(EGL_PLATFORM_ANGLE_ANGLE, EGL_DEFAULT_DISPLAY, display_attribs.as_ptr()) };
-    if dpy.is_null() {
-        let err = unsafe { eglGetError() };
-        eprintln!("ANGLE: eglGetPlatformDisplayEXT failed error={:#x}", err);
-        return Err(err);
-    }
-
-    let mut major = 0;
-    let mut minor = 0;
-    if unsafe { eglInitialize(dpy, &mut major, &mut minor) } == EGL_FALSE {
-        let err = unsafe { eglGetError() };
-        eprintln!("ANGLE: eglInitialize failed error={:#x}", err);
-        return Err(err);
-    }
-
-    if unsafe { eglBindAPI(EGL_OPENGL_ES_API) } == EGL_FALSE {
-        let err = unsafe { eglGetError() };
-        eprintln!("ANGLE: eglBindAPI failed error={:#x}", err);
-        return Err(err);
-    }
-
-    let cfg_attribs = [
-        EGL_SURFACE_TYPE,
-        EGL_PBUFFER_BIT,
-        EGL_RENDERABLE_TYPE,
-        EGL_OPENGL_ES2_BIT,
-        EGL_RED_SIZE,
-        8,
-        EGL_GREEN_SIZE,
-        8,
-        EGL_BLUE_SIZE,
-        8,
-        EGL_ALPHA_SIZE,
-        8,
-        EGL_NONE,
-    ];
-
-    let mut cfg: EglConfig = std::ptr::null_mut();
-    let mut ncfg = 0;
-    if unsafe { eglChooseConfig(dpy, cfg_attribs.as_ptr(), &mut cfg, 1, &mut ncfg) } == EGL_FALSE
-        || ncfg < 1
-        || cfg.is_null()
-    {
-        let err = unsafe { eglGetError() };
-        eprintln!("ANGLE: eglChooseConfig failed error={:#x}", err);
-        return Err(err);
-    }
-
-    let surf_attribs = [EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE];
-    let surf = unsafe { eglCreatePbufferSurface(dpy, cfg, surf_attribs.as_ptr()) };
-    if surf.is_null() {
-        let err = unsafe { eglGetError() };
-        eprintln!("ANGLE: eglCreatePbufferSurface failed error={:#x}", err);
-        return Err(err);
-    }
-
-    let ctx_attribs = [EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE];
-    let share = unsafe { eglCreateContext(dpy, cfg, std::ptr::null_mut(), ctx_attribs.as_ptr()) };
-    if share.is_null() {
-        let err = unsafe { eglGetError() };
-        eprintln!("ANGLE: eglCreateContext(share) failed error={:#x}", err);
-        return Err(err);
-    }
-
-    eprintln!(
-        "ANGLE: initialized EGL {}.{} backend=metal display={:?} surface={:?} share_ctx={:?}",
-        major, minor, dpy, surf, share
-    );
-
-    Ok(AngleGlobals {
-        display: dpy,
-        config: cfg,
-        surface: surf,
-        share_context: share,
-    })
-}
-
-extern "C" fn create_gl_context_trampoline(
-    _cookie: *mut c_void,
-    scanout_idx: c_int,
-    param: *mut VirglRendererGlCtxParam,
-) -> *mut c_void {
-    if let Err(err) = angle_init_once() {
-        eprintln!("ANGLE: init failed in create_gl_context err={:#x}", err);
-        return std::ptr::null_mut();
-    }
-
-    let (major, requested_shared) = unsafe {
-        if param.is_null() {
-            (3, true)
-        } else {
-            let p = &*param;
-            let major = if p.major_ver > 0 { p.major_ver.min(3) } else { 3 };
-            (major, p.shared)
-        }
-    };
-
-    let dpy = angle_display();
-    let cfg = angle_config();
-
-    // shared=true is mandatory: an isolated context breaks
-    // transfer/sync with "Wait sync failed: illegal fence object".
-    let share = angle_share_context();
-    let shared = true;
-
-    let ctx_attribs = [EGL_CONTEXT_CLIENT_VERSION, major, EGL_NONE];
-
-    let ctx = unsafe { eglCreateContext(dpy, cfg, share, ctx_attribs.as_ptr()) };
-    if ctx.is_null() {
-        let err = unsafe { eglGetError() };
-        eprintln!(
-            "ANGLE: create_gl_context failed scanout_idx={} major={} shared={} requested_shared={} error={:#x}",
-            scanout_idx, major, shared, requested_shared, err
-        );
-    } else {
-        eprintln!(
-            "ANGLE: create_gl_context scanout_idx={} major={} shared={} requested_shared={} ctx={:?}",
-            scanout_idx, major, shared, requested_shared, ctx
-        );
-    }
-
-    ctx
-}
-
-extern "C" fn destroy_gl_context_trampoline(_cookie: *mut c_void, ctx: *mut c_void) {
-    if ctx.is_null() {
-        return;
-    }
-
-    let dpy = angle_display();
-    let ret = unsafe { eglDestroyContext(dpy, ctx as EglContext) };
-    if ret == EGL_FALSE {
-        let err = unsafe { eglGetError() };
-        eprintln!("ANGLE: destroy_gl_context {:?} failed error={:#x}", ctx, err);
-    } else {
-        eprintln!("ANGLE: destroy_gl_context {:?}", ctx);
-    }
-}
-
-extern "C" fn make_current_trampoline(_cookie: *mut c_void, scanout_idx: c_int, ctx: *mut c_void) -> c_int {
-    let dpy = angle_display();
-    if dpy.is_null() {
-        eprintln!("ANGLE: make_current with uninitialised display");
-        return -1;
-    }
-
-    let ok = if ctx.is_null() {
-        unsafe { eglMakeCurrent(dpy, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) }
-    } else {
-        unsafe { eglMakeCurrent(dpy, angle_surface(), angle_surface(), ctx as EglContext) }
-    };
-
-    if ok == EGL_FALSE {
-        let err = unsafe { eglGetError() };
-        eprintln!(
-            "ANGLE: make_current failed scanout_idx={} ctx={:?} error={:#x}",
-            scanout_idx, ctx, err
-        );
-        -1
-    } else {
-        0
-    }
-}
-
-extern "C" fn get_egl_display_trampoline(_cookie: *mut c_void) -> *mut c_void {
-    angle_display()
 }
 
 #[derive(Debug)]
@@ -605,9 +360,18 @@ impl VirglRenderer {
             version: 4,
             write_fence: Some(write_fence_trampoline),
 
+            #[cfg(target_os = "macos")]
             create_gl_context: Some(create_gl_context_trampoline),
+            #[cfg(target_os = "macos")]
             destroy_gl_context: Some(destroy_gl_context_trampoline),
+            #[cfg(target_os = "macos")]
             make_current: Some(make_current_trampoline),
+            #[cfg(target_os = "linux")]
+            create_gl_context: None,
+            #[cfg(target_os = "linux")]
+            destroy_gl_context: None,
+            #[cfg(target_os = "linux")]
+            make_current: None,
 
             get_drm_fd: None,
 
@@ -615,7 +379,10 @@ impl VirglRenderer {
 
             get_server_fd: None,
 
+            #[cfg(target_os = "macos")]
             get_egl_display: Some(get_egl_display_trampoline),
+            #[cfg(target_os = "linux")]
+            get_egl_display: None,
         });
 
         unsafe {
@@ -632,6 +399,7 @@ impl VirglRenderer {
             callbacks.get_egl_display.is_some(),
         );
 
+        #[cfg(target_os = "macos")]
         let _ = angle_init_once();
 
         let init_flags = BASE_INIT_FLAGS;
@@ -906,6 +674,7 @@ impl VirglRenderer {
         check(ret)
     }
 
+    #[cfg(target_os = "macos")]
     pub fn native_texture(&self, resource_id: u32) -> Option<NativeTexture> {
         let mut info: VirglRendererResourceInfoExt = unsafe { std::mem::zeroed() };
         info.version = VIRGL_RENDERER_RESOURCE_INFO_EXT_VERSION;
@@ -920,6 +689,28 @@ impl VirglRenderer {
             width: info.base.width,
             height: info.base.height,
         })
+    }
+
+    /// Copies the first level of 2D resource `resource_id` into `pixels`, rows of
+    /// `width` pixels back to back.
+    #[cfg(target_os = "linux")]
+    pub fn read_pixels(&self, resource_id: u32, width: u32, height: u32, pixels: &mut [u8]) -> VirglResult<()> {
+        let stride = width * 4;
+        assert!(pixels.len() >= (stride * height) as usize, "pixel buffer is too small");
+        let mut b = VirglBox {
+            x: 0,
+            y: 0,
+            z: 0,
+            w: width,
+            h: height,
+            d: 1,
+        };
+        let mut iov = Iovec {
+            iov_base: pixels.as_mut_ptr().cast(),
+            iov_len: pixels.len(),
+        };
+        let ret = unsafe { virgl_renderer_transfer_read_iov(resource_id, 0, 0, stride, 0, &mut b, 0, &mut iov, 1) };
+        check(ret)
     }
 
     pub fn transfer_read(&self, ctx_id: u32, resource_id: u32, t: Transfer3D) -> VirglResult<()> {

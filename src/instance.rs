@@ -7,10 +7,12 @@
 use crate::config::{GIB, Hardware, Resources};
 use std::{
     env,
-    ffi::CString,
     fs::{self, File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
-    os::unix::{ffi::OsStrExt, fs::MetadataExt, net::UnixListener, net::UnixStream},
+    os::{
+        fd::AsRawFd,
+        unix::{fs::MetadataExt, net::UnixListener, net::UnixStream},
+    },
     path::{Path, PathBuf},
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
@@ -411,7 +413,9 @@ fn write_sparse(input: &mut impl Read, output: &mut File) -> io::Result<()> {
 }
 
 /// Copy-on-write APFS clone; takes milliseconds regardless of size.
+#[cfg(target_os = "macos")]
 fn clone_file(source: &Path, destination: &Path) -> Result<(), String> {
+    use std::{ffi::CString, os::unix::ffi::OsStrExt};
     let source_c = CString::new(source.as_os_str().as_bytes()).unwrap();
     let destination_c = CString::new(destination.as_os_str().as_bytes()).unwrap();
     if unsafe { libc::clonefile(source_c.as_ptr(), destination_c.as_ptr(), 0) } != 0 {
@@ -423,6 +427,34 @@ fn clone_file(source: &Path, destination: &Path) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Copy-on-write reflink clone; takes milliseconds regardless of size.
+#[cfg(target_os = "linux")]
+fn clone_file(source: &Path, destination: &Path) -> Result<(), String> {
+    let clone = || -> io::Result<()> {
+        let source = File::open(source)?;
+        let destination_file = File::create_new(destination)?;
+        let cloned = destination_file
+            .set_permissions(source.metadata()?.permissions())
+            .and_then(|()| {
+                match unsafe { libc::ioctl(destination_file.as_raw_fd(), libc::FICLONE, source.as_raw_fd()) } {
+                    0 => Ok(()),
+                    _ => Err(io::Error::last_os_error()),
+                }
+            });
+        if cloned.is_err() {
+            fs::remove_file(destination)?;
+        }
+        cloned
+    };
+    clone().map_err(|error| {
+        format!(
+            "failed to clone {} to {}: {error} (VMs must live on the same reflink-capable filesystem as the base image, such as Btrfs or XFS)",
+            source.display(),
+            destination.display(),
+        )
+    })
 }
 
 /// SSH key `varmint ssh` uses, created on first use.

@@ -3,20 +3,16 @@ mod gpu;
 
 use crate::{
     agent, audio, clipboard,
-    cpu::CpuRuntime,
     display::{DisplayBuffer, DisplayNotifier},
-    irq,
+    hypervisor::Vm,
     machine::*,
     memory::GuestMemory,
     net, stdio, uart, virtio,
 };
-use applevisor::prelude::*;
 pub use events::{RuntimeEvent, RuntimeInputEvent};
 use std::{
-    sync::{
-        Mutex,
-        mpsc::{Receiver, Sender},
-    },
+    io,
+    sync::{Mutex, mpsc::Receiver},
     thread,
 };
 
@@ -45,15 +41,17 @@ pub struct Devices {
 }
 
 pub struct Runtime<'a> {
-    vm: &'a VirtualMachineInstance<GicEnabled>,
+    vm: &'a Vm,
+    vcpus: usize,
+    boot: Boot,
     devices: Devices,
-    cpus: CpuRuntime,
     gpu_worker: gpu::Worker,
     share_workers: Vec<virtio::FsWorker>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum MmioDevice {
+    #[cfg(target_arch = "aarch64")]
     Uart,
     VirtioBlk,
     VirtioNet,
@@ -79,6 +77,7 @@ struct MmioRegion {
 }
 
 const MMIO_REGIONS: &[MmioRegion] = &[
+    #[cfg(target_arch = "aarch64")]
     MmioRegion {
         base: UART_START,
         size: UART_SIZE,
@@ -132,59 +131,46 @@ const MMIO_REGIONS: &[MmioRegion] = &[
 ];
 
 impl<'a> Runtime<'a> {
-    pub fn new(
-        vm: &'a VirtualMachineInstance<GicEnabled>,
-        runtime_event_tx: Sender<RuntimeEvent>,
-        backends: HostBackends,
-        vcpus: usize,
-    ) -> Result<Self> {
-        let (spi_int_start, _) = GicConfig::get_spi_interrupt_range()?;
+    pub fn new(vm: &'a Vm, backends: HostBackends, vcpus: usize, boot: Boot) -> Self {
+        let uart = Mutex::new(uart::Uart::new(vm.irq_line(UART_IRQ), backends.serial));
 
-        let uart = Mutex::new(uart::Uart::new(
-            irq::IrqLine::new(vm, spi_int_start + UART_SPI_OFFSET),
-            backends.serial,
-        ));
-
-        let blk = Mutex::new(virtio::MmioTransport::new(
-            backends.disk,
-            irq::IrqLine::new(vm, spi_int_start + VIRTBLK_SPI_OFFSET),
-        ));
+        let blk = Mutex::new(virtio::MmioTransport::new(backends.disk, vm.irq_line(VIRTBLK_IRQ)));
 
         let net = Mutex::new(virtio::MmioTransport::new(
             virtio::Net::new(backends.net.mac(), backends.net),
-            irq::IrqLine::new(vm, spi_int_start + VIRTNET_SPI_OFFSET),
+            vm.irq_line(VIRTNET_IRQ),
         ));
 
-        let (gpu, gpu_worker) = gpu::channel(irq::IrqLine::new(vm, spi_int_start + VIRTGPU_SPI_OFFSET));
+        let (gpu, gpu_worker) = gpu::channel(vm.irq_line(VIRTGPU_IRQ));
 
         let keyboard = Mutex::new(virtio::MmioTransport::new(
             virtio::Input::keyboard(),
-            irq::IrqLine::new(vm, spi_int_start + VIRTINPUT_KEYBOARD_SPI_OFFSET),
+            vm.irq_line(VIRTINPUT_KEYBOARD_IRQ),
         ));
 
         let tablet = Mutex::new(virtio::MmioTransport::new(
             virtio::Input::tablet(),
-            irq::IrqLine::new(vm, spi_int_start + VIRTINPUT_TABLET_SPI_OFFSET),
+            vm.irq_line(VIRTINPUT_TABLET_IRQ),
         ));
 
         let mouse = Mutex::new(virtio::MmioTransport::new(
             virtio::Input::mouse(),
-            irq::IrqLine::new(vm, spi_int_start + VIRTINPUT_MOUSE_SPI_OFFSET),
+            vm.irq_line(VIRTINPUT_MOUSE_IRQ),
         ));
 
         let snd = Mutex::new(virtio::MmioTransport::new(
             virtio::Snd::new(backends.audio),
-            irq::IrqLine::new(vm, spi_int_start + VIRTSND_SPI_OFFSET),
+            vm.irq_line(VIRTSND_IRQ),
         ));
 
         let console = Mutex::new(virtio::MmioTransport::new(
             virtio::Console::new(backends.clipboard, backends.agent),
-            irq::IrqLine::new(vm, spi_int_start + VIRTCONSOLE_SPI_OFFSET),
+            vm.irq_line(VIRTCONSOLE_IRQ),
         ));
 
         let balloon = Mutex::new(virtio::MmioTransport::new(
             virtio::Balloon,
-            irq::IrqLine::new(vm, spi_int_start + VIRTBALLOON_SPI_OFFSET),
+            vm.irq_line(VIRTBALLOON_IRQ),
         ));
 
         let (shares, share_workers): (Vec<_>, Vec<_>) = backends
@@ -194,14 +180,16 @@ impl<'a> Runtime<'a> {
             .map(|(index, (share, worker))| {
                 let transport = Mutex::new(virtio::MmioTransport::new(
                     share,
-                    irq::IrqLine::new(vm, spi_int_start + VIRTFS_SPI_OFFSET + index as u32),
+                    vm.irq_line(VIRTFS_IRQ + index as u32),
                 ));
                 (transport, worker)
             })
             .unzip();
 
-        Ok(Self {
+        Self {
             vm,
+            vcpus,
+            boot,
             devices: Devices {
                 uart,
                 blk,
@@ -215,10 +203,9 @@ impl<'a> Runtime<'a> {
                 balloon,
                 shares,
             },
-            cpus: CpuRuntime::new(vm, IMAGE_START, DTB_START, vcpus)?,
             gpu_worker,
             share_workers,
-        })
+        }
     }
 
     pub fn run(
@@ -228,8 +215,8 @@ impl<'a> Runtime<'a> {
         runtime_event_rx: Receiver<RuntimeEvent>,
         audio_event_rx: Receiver<audio::BackendEvent>,
         display_notifier: &DisplayNotifier,
-    ) -> Result<()> {
-        thread::scope(|scope| -> Result<()> {
+    ) -> io::Result<()> {
+        thread::scope(|scope| {
             scope.spawn(|| self.gpu_worker.run(mem, display, display_notifier));
 
             for (worker, transport) in self.share_workers.into_iter().zip(&self.devices.shares) {
@@ -246,7 +233,7 @@ impl<'a> Runtime<'a> {
                 audio_events.run();
             });
 
-            self.cpus.run(self.vm, mem, &self.devices)
+            self.vm.run(self.boot, self.vcpus, mem, &self.devices)
         })
     }
 }
@@ -272,6 +259,7 @@ impl Devices {
         };
 
         let result = match route.device {
+            #[cfg(target_arch = "aarch64")]
             MmioDevice::Uart => {
                 if is_write {
                     self.uart.lock().unwrap().write(route.offset, value as u32);
@@ -294,6 +282,28 @@ impl Devices {
         };
 
         Ok(result)
+    }
+
+    /// Port I/O: the serial port and the ACPI sleep and reset register. Ports
+    /// with nothing behind them read as all ones, like an empty ISA bus.
+    #[cfg(target_arch = "x86_64")]
+    pub fn handle_pio(&self, port: u16, is_write: bool, value: u32) -> u32 {
+        match port {
+            UART_PORT..UART_PORT_END => {
+                let offset = (port - UART_PORT) as u64;
+                if is_write {
+                    self.uart.lock().unwrap().write(offset, value);
+                    0
+                } else {
+                    self.uart.lock().unwrap().read(offset)
+                }
+            }
+            // A sleep request or reset: both stop the VM, like PSCI SYSTEM_OFF and SYSTEM_RESET.
+            ACPI_PORT if is_write && (value & ACPI_SLEEP_ENABLE != 0 || value == ACPI_RESET_VALUE) => {
+                crate::vmm::shutdown("guest-poweroff")
+            }
+            _ => u32::MAX,
+        }
     }
 }
 
