@@ -22,9 +22,11 @@ On Linux, unpack `varmint-linux-ARCH.tar.gz` from the build artifacts into a pre
 
 ```sh
 sudo tar -xzf varmint-linux-$(uname -m).tar.gz -C /usr/local --strip-components=1
-sudo apt install libvirglrenderer1 libx264-164 libopus0 libpulse0 libsqlite3-0 passt   # Debian and Ubuntu
+sudo apt install libvirglrenderer1 virgl-server libx264-164 libopus0 libpulse0 libsqlite3-0 passt   # Debian and Ubuntu
 sudo usermod -aG kvm $USER
 ```
+
+The guest renders with the host's OpenGL and Vulkan drivers, Mesa's software renderers on machines without a GPU. `virgl-server` runs the guest's Vulkan, and passt needs a network interface with a default route.
 
 VMs clone the base image with reflinks, so `~/.varmint` must be on a filesystem that has them, such as Btrfs or XFS, like APFS on macOS.
 
