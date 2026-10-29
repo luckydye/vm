@@ -305,6 +305,7 @@ function renderMachine(state) {
     $("volume").value = level;
     $("volume").style.setProperty("--level", `${level * 100}%`);
     $("screen").tabIndex = state.screenExpanded ? 0 : -1;
+    for (const button of $("modifier-keys").children) button.ariaPressed = state.modifiers.has(Number(button.dataset.code));
     if (!state.screenExpanded && document.activeElement === $("screen")) $("screen").blur();
   }
   if (session?.name !== (vm?.running ? vm.name : null)) {
@@ -313,6 +314,18 @@ function renderMachine(state) {
   }
   session?.hint();
 }
+
+function keyButton({ label, code }) {
+  const button = element("button", "key", label);
+  button.dataset.code = code;
+  return button;
+}
+
+$("modifier-keys").append(...data.MODIFIERS.map(keyButton));
+$("named-keys").append(...data.KEYS.map(keyButton));
+// Pressing a key keeps the focus where it is, so the screen keeps the keyboard
+// and the on-screen keyboard stays open.
+$("keys").addEventListener("pointerdown", (event) => event.target !== $("typing") && event.preventDefault());
 
 confirming(
   $("machine-power"),
@@ -330,7 +343,7 @@ $("volume").oninput = (event) => data.setVolume(Number(event.target.value));
 document.addEventListener("pointerdown", data.resumeAudio);
 document.addEventListener("keydown", data.resumeAudio);
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && data.state.screenExpanded && !event.target.closest("canvas, .xterm, dialog")) {
+  if (event.key === "Escape" && data.state.screenExpanded && !event.target.closest("canvas, .xterm, .typing, dialog")) {
     data.setScreenExpanded(false);
   }
 });
@@ -384,21 +397,24 @@ function openSession(name) {
   const input = data.inputStream(name);
   input.ready.then(() => {
     const held = new Set();
+    const typing = $("typing");
     const pointer = (event) => {
       event.preventDefault();
       // The preview is too small to aim at, so a click there only expands it.
       if (!data.state.screenExpanded) {
-        if (event.type === "mousedown") data.setScreenExpanded(true);
+        if (event.type === "pointerdown") data.setScreenExpanded(true);
         return;
       }
-      if (event.type === "mousedown") canvas.focus();
+      // A touch keeps the on-screen keyboard open while it is in use.
+      if (event.type === "pointerdown" && document.activeElement !== typing) canvas.focus();
+      if (event.type === "pointerdown") canvas.setPointerCapture(event.pointerId);
       if (!frame) return;
       const box = canvas.getBoundingClientRect();
       const detail = event.type === "wheel" ? event.deltaY : event.button;
       data.pointerEvents(event.type, (event.clientX - box.left) / box.width, (event.clientY - box.top) / box.height, frame, detail)
         .forEach(input.send);
     };
-    for (const type of ["mousemove", "mousedown", "mouseup", "wheel"]) on(canvas, type, pointer);
+    for (const type of ["pointermove", "pointerdown", "pointerup", "wheel"]) on(canvas, type, pointer);
     on(canvas, "contextmenu", (event) => event.preventDefault());
     const key = (event) => {
       event.preventDefault();
@@ -419,10 +435,51 @@ function openSession(name) {
       idle();
       data.releaseKeys(held).forEach(input.send);
     });
+
+    on($("keys"), "click", (event) => {
+      const button = event.target.closest("[data-code]");
+      if (!button) return;
+      const code = Number(button.dataset.code);
+      if (data.MODIFIERS.some((modifier) => modifier.code === code)) data.toggleModifier(code);
+      else data.chord([code]).forEach(input.send);
+    });
+
+    // The on-screen keyboard types into a hidden field, whose changes become
+    // key presses. It keeps one space, so Backspace has something to remove.
+    const SPACE = " ";
+    let typed = (typing.value = SPACE);
+    const sync = (reset) => {
+      try {
+        data.typing(typed, typing.value).forEach(input.send);
+      } catch (error) {
+        caption(error.message);
+      }
+      typed = typing.value;
+      if (reset) typed = typing.value = SPACE;
+    };
+    on(typing, "input", (event) => sync(!event.isComposing));
+    on(typing, "compositionend", () => sync(true));
+    on(typing, "keydown", (event) => {
+      const code = data.namedKey(event.key);
+      if (code === null) return;
+      event.preventDefault();
+      data.chord([code]).forEach(input.send);
+    });
+    on($("keyboard"), "click", () => (document.activeElement === typing ? typing.blur() : typing.focus()));
+    on(typing, "focus", () => {
+      $("keyboard").ariaPressed = true;
+      frameBox.classList.add("captured");
+      caption(element("span", "dot on"), "Typing goes to the machine");
+    });
+    on(typing, "blur", () => {
+      $("keyboard").ariaPressed = false;
+      frameBox.classList.remove("captured");
+      idle();
+    });
   }).catch((error) => caption(`Input unavailable: ${error.message}`));
 
   // Refreshes the hint when the display is expanded or collapsed.
-  const hint = () => frame && document.activeElement !== canvas && idle();
+  const hint = () => frame && ![canvas, $("typing")].includes(document.activeElement) && idle();
   session = { name, screen, input, events, shell: null, hint };
   openShell(name);
 }
@@ -511,6 +568,7 @@ function closeSession() {
   session.events.abort();
   closeShell();
   $("screen").blur();
+  $("typing").blur();
   session = null;
 }
 
