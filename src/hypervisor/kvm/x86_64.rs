@@ -22,8 +22,8 @@ const EFER_LMA: u64 = 1 << 10;
 
 const APIC_LVT0: usize = 0x350;
 const APIC_LVT1: usize = 0x360;
-const APIC_MODE_NMI: u32 = 4;
-const APIC_MODE_EXTINT: u32 = 7;
+const APIC_MODE_NMI: u32 = 4 << 8;
+const APIC_LVT_MASKED: u32 = 1 << 16;
 
 pub struct State;
 
@@ -56,11 +56,11 @@ pub fn create(kvm: &Kvm, vm: &VmFd, vcpus: usize) -> super::Result<(Vec<VcpuFd>,
             }
             vcpu.set_cpuid2(&cpuid)?;
 
-            // LINT0 takes the PIC's interrupts and LINT1 NMIs, as firmware leaves them.
+            // Hardware-reduced ACPI tells the kernel there is no PIC, so it never
+            // programs one: mask LINT0, which KVM resets to take the PIC's
+            // interrupts, and leave LINT1 for NMIs.
             let mut lapic = vcpu.get_lapic()?;
-            for (offset, mode) in [(APIC_LVT0, APIC_MODE_EXTINT), (APIC_LVT1, APIC_MODE_NMI)] {
-                let value = u32::from_le_bytes(std::array::from_fn(|index| lapic.regs[offset + index] as u8));
-                let value = (value & !0x700) | (mode << 8);
+            for (offset, value) in [(APIC_LVT0, APIC_LVT_MASKED), (APIC_LVT1, APIC_MODE_NMI)] {
                 for (index, byte) in value.to_le_bytes().into_iter().enumerate() {
                     lapic.regs[offset + index] = byte as _;
                 }
