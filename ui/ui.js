@@ -388,7 +388,7 @@ function openSession(name) {
   const idle = () => caption(data.state.screenExpanded ? "Click to control" : "Click to expand");
 
   caption("Connecting…");
-  const screen = data.screenStream(name, 30, (next) => {
+  const screen = data.screenStream(name, 60, (next) => {
     if (!frame) idle();
     frame = next;
     $("views").style.setProperty("--aspect", frame.width / frame.height);
