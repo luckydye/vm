@@ -36,6 +36,9 @@ pub fn start(on_frame: impl Fn(Vec<u8>) + Send + 'static) -> io::Result<Backend>
         &MTU.to_string(),
         "--fd",
         &fd.to_string(),
+        // Otherwise the gateway address reaches the host itself, and DNS
+        // breaks when the host's resolver is its gateway.
+        "--no-map-gw",
     ]);
     // As root passt drops to nobody, and AppArmor keeps it from looking that
     // user up by name, so give it the IDs.
