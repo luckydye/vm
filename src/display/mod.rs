@@ -1,9 +1,19 @@
+#[cfg(target_os = "macos")]
 mod angle;
 mod capture;
+#[cfg(target_os = "macos")]
 mod iosurface;
+#[cfg(target_os = "macos")]
+mod presenter;
+#[cfg(target_os = "linux")]
+#[path = "softbuffer.rs"]
 mod presenter;
 mod scanout;
 mod stats;
+#[cfg(target_os = "macos")]
+mod video;
+#[cfg(target_os = "linux")]
+#[path = "x264.rs"]
 mod video;
 
 pub use capture::Capture;
@@ -85,12 +95,13 @@ impl DisplayBuffer {
             return None;
         }
         Some(match self.iosurface_id {
+            #[cfg(target_os = "macos")]
             Some(id) => Capture::IOSurface {
                 id,
                 width: self.width,
                 height: self.height,
             },
-            None => Capture::Pixels {
+            _ => Capture::Pixels {
                 pixels: self.pixels.clone(),
                 width: self.width,
                 height: self.height,
@@ -137,6 +148,7 @@ impl DisplayBuffer {
         true
     }
 
+    #[cfg(target_os = "macos")]
     fn publish_iosurface(&mut self, iosurface_id: u32, source: Rect, damage: Rect) -> bool {
         let Some(dirty_rect) = self.clip_damage(source, damage) else {
             return false;

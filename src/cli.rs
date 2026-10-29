@@ -333,7 +333,7 @@ fn run(args: &[String]) {
         println!("{name}");
         // stdin, not stdout: `vm=$(varmint run)` in a shell pipes stdout but still copies.
         if io::stdin().is_terminal() {
-            objc2::rc::autoreleasepool(|_| clipboard::Pasteboard::general().write_text(name.as_bytes()));
+            clipboard::copy_text(name.as_bytes());
         }
         return;
     }
@@ -405,8 +405,17 @@ fn set_inheritable(fd: RawFd, inheritable: bool) {
 }
 
 /// The virtio-fs server pins every directory the guest has cached with an open
-/// fd, so the default soft limit of 256 runs out on any real project.
+/// fd, so the default soft limit runs out on any real project.
 fn raise_open_file_limit() {
+    let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    assert!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0, "getrlimit failed: {}", io::Error::last_os_error());
+    limit.rlim_cur = limit.rlim_max.min(max_files_per_process());
+    assert!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } == 0, "setrlimit failed: {}", io::Error::last_os_error());
+}
+
+/// macOS caps the soft limit below an unlimited hard limit.
+#[cfg(target_os = "macos")]
+fn max_files_per_process() -> libc::rlim_t {
     let mut per_process: libc::c_int = 0;
     let mut size = size_of::<libc::c_int>();
     let result = unsafe {
@@ -419,10 +428,17 @@ fn raise_open_file_limit() {
         )
     };
     assert!(result == 0, "sysctl kern.maxfilesperproc failed: {}", io::Error::last_os_error());
-    let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
-    assert!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0, "getrlimit failed: {}", io::Error::last_os_error());
-    limit.rlim_cur = limit.rlim_max.min(per_process as libc::rlim_t);
-    assert!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } == 0, "setrlimit failed: {}", io::Error::last_os_error());
+    per_process as libc::rlim_t
+}
+
+/// Linux caps every limit at `fs.nr_open`.
+#[cfg(target_os = "linux")]
+fn max_files_per_process() -> libc::rlim_t {
+    fs::read_to_string("/proc/sys/fs/nr_open")
+        .expect("failed to read /proc/sys/fs/nr_open")
+        .trim()
+        .parse()
+        .expect("malformed /proc/sys/fs/nr_open")
 }
 
 /// Entry point of the detached VM process started by `varmint run`.
@@ -790,7 +806,7 @@ fn pump_stdin(writer: &Mutex<UnixStream>, paste_images: bool) {
 
 /// The host clipboard image, or an empty frame that clears the guest clipboard.
 fn clipboard_image_frame() -> Frame {
-    let mut png = objc2::rc::autoreleasepool(|_| clipboard::Pasteboard::general().read_png()).unwrap_or_default();
+    let mut png = clipboard::read_png().unwrap_or_default();
     if png.len() > protocol::MAX_PAYLOAD {
         eprint!("varmint: the clipboard image is too large for the VM ({} bytes)\r\n", png.len());
         png.clear();

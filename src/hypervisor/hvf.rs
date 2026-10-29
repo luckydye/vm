@@ -1,15 +1,129 @@
+//! Apple Hypervisor.framework on arm64 Macs, with its in-kernel GICv3.
+
 mod psci;
 mod sysreg;
 
-use crate::{devices::Devices, memory::GuestMemory};
-use applevisor::prelude::*;
+use crate::{
+    devices::Devices,
+    machine::{Boot, GICD_START, GICR_START},
+    memory::GuestMemory,
+};
+use applevisor::{error::HypervisorError, prelude::*};
+use applevisor_sys::{HV_MEMORY_EXEC, HV_MEMORY_READ, HV_MEMORY_WRITE, hv_vm_map, hv_vm_protect, hv_vm_unmap};
 use std::{
+    io,
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc::{Receiver, SyncSender, sync_channel},
     },
     thread,
 };
+
+/// The vCPUs order memory like x86 (`configure_vcpu`), which FEX in the guest relies on.
+pub const KERNEL_ARGS: &str = "varmint.tso=1";
+
+#[derive(Clone)]
+pub struct Vm(VirtualMachineInstance<GicEnabled>);
+
+pub struct IrqLine {
+    vm: VirtualMachineInstance<GicEnabled>,
+    intid: u32,
+    level: bool,
+}
+
+fn io_error(error: HypervisorError) -> io::Error {
+    io::Error::other(format!("{error:?}"))
+}
+
+fn check(result: i32, what: &str) -> io::Result<()> {
+    if result != 0 {
+        return Err(io::Error::other(format!("{what} failed: {result:#x}")));
+    }
+    Ok(())
+}
+
+/// The sizes of the GIC distributor and of the redistributors for `vcpus`.
+pub fn gic_sizes(vcpus: usize) -> io::Result<(u64, u64)> {
+    let gicd_size = GicConfig::get_distributor_size().map_err(io_error)? as u64;
+    let gicr_region_size = GicConfig::get_redistributor_region_size().map_err(io_error)? as u64;
+    let gicr_stride = GicConfig::get_redistributor_size().map_err(io_error)? as u64;
+    assert!(gicr_stride != 0);
+
+    let max_vcpus = gicr_region_size / gicr_stride;
+    if vcpus as u64 > max_vcpus {
+        panic!("vcpus={vcpus} exceeds the Hypervisor.framework GIC limit of {max_vcpus}");
+    }
+    Ok((gicd_size, gicr_stride * vcpus as u64))
+}
+
+impl Vm {
+    pub fn new(vcpus: usize) -> io::Result<Self> {
+        gic_sizes(vcpus)?;
+        let mut gic_config = GicConfig::new();
+        gic_config.set_distributor_base(GICD_START).map_err(io_error)?;
+        gic_config.set_redistributor_base(GICR_START).map_err(io_error)?;
+
+        let mut vm_cfg = VirtualMachineConfig::new();
+        vm_cfg
+            .set_ipa_granule(IpaGranule::HV_IPA_GRANULE_4KB)
+            .map_err(io_error)?;
+        Ok(Self(VirtualMachine::with_gic(vm_cfg, gic_config).map_err(io_error)?))
+    }
+
+    /// The level-triggered line of shared peripheral interrupt `irq`.
+    pub fn irq_line(&self, irq: u32) -> IrqLine {
+        let (spi_int_start, _) = GicConfig::get_spi_interrupt_range().expect("failed to read the GIC SPI range");
+        IrqLine {
+            vm: self.0.clone(),
+            intid: spi_int_start + irq,
+            level: false,
+        }
+    }
+
+    /// Maps `size` bytes of host memory at `guest_addr`; both must be page aligned.
+    pub fn map(&self, host_addr: *mut u8, guest_addr: u64, size: usize, executable: bool) -> io::Result<()> {
+        let flags = HV_MEMORY_READ | HV_MEMORY_WRITE | if executable { HV_MEMORY_EXEC } else { 0 };
+        check(
+            unsafe { hv_vm_map(host_addr.cast(), guest_addr, size, flags) },
+            "hv_vm_map",
+        )
+    }
+
+    pub fn unmap(&self, guest_addr: u64, size: usize) -> io::Result<()> {
+        check(unsafe { hv_vm_unmap(guest_addr, size) }, "hv_vm_unmap")
+    }
+
+    /// Releases the host pages behind page-aligned guest RAM. Pages the guest
+    /// touched stay held by its mapping, which `madvise` silently ignores, so
+    /// guest access to the range is dropped around it.
+    pub fn discard(&self, host_addr: *mut u8, guest_addr: u64, len: usize) -> io::Result<()> {
+        check(unsafe { hv_vm_protect(guest_addr, len, 0) }, "hv_vm_protect")?;
+        let result = unsafe { libc::madvise(host_addr.cast(), len, libc::MADV_FREE_REUSABLE) };
+        assert_eq!(result, 0, "madvise failed: {}", io::Error::last_os_error());
+        check(
+            unsafe { hv_vm_protect(guest_addr, len, HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC) },
+            "hv_vm_protect",
+        )
+    }
+
+    /// Runs the vCPUs until the boot CPU stops.
+    pub fn run(&self, boot: Boot, vcpus: usize, mem: &GuestMemory, devices: &Devices) -> io::Result<()> {
+        CpuRuntime::new(&self.0, boot.entry, boot.arg, vcpus)
+            .and_then(|cpus| cpus.run(&self.0, mem, devices))
+            .map_err(io_error)
+    }
+}
+
+impl IrqLine {
+    pub fn set(&mut self, level: bool) {
+        if level == self.level {
+            return;
+        }
+
+        self.vm.gic_set_spi(self.intid, level).unwrap();
+        self.level = level;
+    }
+}
 
 const BOOT_VCPU_ID: usize = 0;
 const FIRST_SECONDARY_VCPU_ID: usize = 1;
@@ -38,7 +152,7 @@ struct SecondaryCpus {
     cpus: Vec<SecondaryCpu>,
 }
 
-pub struct CpuRuntime {
+struct CpuRuntime {
     boot_vcpu: Vcpu,
     secondaries: SecondaryCpus,
     secondary_workers: Vec<SecondaryWorker>,
@@ -50,7 +164,7 @@ struct SecondaryWorker {
 }
 
 impl CpuRuntime {
-    pub fn new(vm: &VirtualMachineInstance<GicEnabled>, entry_point: u64, x0: u64, vcpus: usize) -> Result<Self> {
+    fn new(vm: &VirtualMachineInstance<GicEnabled>, entry_point: u64, x0: u64, vcpus: usize) -> Result<Self> {
         let boot_vcpu = vm.vcpu_create()?;
         configure_vcpu(&boot_vcpu, BOOT_VCPU_ID)?;
         set_entry_state(&boot_vcpu, entry_point, x0)?;
@@ -64,7 +178,7 @@ impl CpuRuntime {
         })
     }
 
-    pub fn run(self, vm: &VirtualMachineInstance<GicEnabled>, mem: &GuestMemory, devices: &Devices) -> Result<()> {
+    fn run(self, vm: &VirtualMachineInstance<GicEnabled>, mem: &GuestMemory, devices: &Devices) -> Result<()> {
         let Self {
             boot_vcpu,
             secondaries,
@@ -164,7 +278,7 @@ impl SecondaryWorker {
 
 fn configure_vcpu(vcpu: &Vcpu, vcpu_id: usize) -> Result<()> {
     vcpu.set_sys_reg(SysReg::ACTLR_EL1, 1 << 1)?; // enable TSO
-    vcpu.set_sys_reg(SysReg::MPIDR_EL1, mpidr_for_vcpu(vcpu_id))?;
+    vcpu.set_sys_reg(SysReg::MPIDR_EL1, mpidr(vcpu_id))?;
     Ok(())
 }
 
@@ -178,7 +292,8 @@ fn set_entry_state(vcpu: &Vcpu, entry_point: u64, x0: u64) -> Result<()> {
     Ok(())
 }
 
-fn mpidr_for_vcpu(vcpu_id: usize) -> u64 {
+/// The MPIDR of vCPU `vcpu_id`, which the FDT names it by.
+pub fn mpidr(vcpu_id: usize) -> u64 {
     vcpu_id as u64
 }
 

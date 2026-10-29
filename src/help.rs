@@ -180,7 +180,7 @@ Without NAME, the name is read from the first line of stdin, so
 `varmint run | varmint exec -- bash` works. In a terminal, the session then
 reads the keyboard instead of the rest of stdin.
 
-In a terminal session, Ctrl+V first puts the image on the Mac clipboard into
+In a terminal session, Ctrl+V first puts the image on the host clipboard into
 the guest clipboard, so programs like Claude Code can paste it."
                 .into(),
             options: vec![],
@@ -483,7 +483,7 @@ fn render_examples(out: &mut String, examples: &[(&str, &str)]) {
 pub fn overview(commands: &[Command], user_commands: &[(String, String)]) -> String {
     let mut out = String::from(
         "\
-varmint - quick, disposable Linux VMs on macOS
+varmint - quick, disposable Linux VMs on macOS and Linux
 
 Every VM is a copy-on-write clone of a Debian desktop image and starts in
 about a second. VMs are ephemeral unless created with --persist. State and

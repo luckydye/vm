@@ -1,6 +1,6 @@
 use crate::{
     display::{DisplayBuffer, DisplayNotifier, ScanoutPublisher},
-    irq::IrqLine,
+    hypervisor::IrqLine,
     memory::GuestMemory,
     virtio::{
         self,

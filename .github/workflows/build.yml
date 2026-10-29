@@ -12,7 +12,14 @@ concurrency:
 
 jobs:
   guest:
-    runs-on: ubuntu-24.04-arm
+    strategy:
+      matrix:
+        include:
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+          - arch: amd64
+            runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
 
     steps:
       - uses: actions/checkout@v4
@@ -21,7 +28,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build/guest
-          key: guest-arm64-${{ hashFiles('guest/**') }}
+          key: guest-${{ matrix.arch }}-${{ hashFiles('guest/**', 'patches/hyprland/**') }}
 
       - name: Build guest runtime
         run: make guest-image
@@ -29,7 +36,7 @@ jobs:
       - name: Upload guest runtime
         uses: actions/upload-artifact@v4
         with:
-          name: guest-runtime
+          name: guest-runtime-${{ matrix.arch }}
           path: build/guest
           include-hidden-files: true
           compression-level: 0
@@ -74,7 +81,7 @@ jobs:
       - name: Download guest runtime
         uses: actions/download-artifact@v4
         with:
-          name: guest-runtime
+          name: guest-runtime-arm64
           path: build/guest
 
       - name: Cache Cargo
@@ -98,9 +105,56 @@ jobs:
           compression-level: 0
           retention-days: 7
 
+  linux:
+    needs: guest
+    strategy:
+      matrix:
+        include:
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+          - arch: amd64
+            runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libopus-dev libpulse-dev libsqlite3-dev libvirglrenderer-dev libx264-dev pkg-config
+
+      - name: Download guest runtime
+        uses: actions/download-artifact@v4
+        with:
+          name: guest-runtime-${{ matrix.arch }}
+          path: build/guest
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            build/cargo
+          key: cargo-linux-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+          restore-keys: cargo-linux-${{ matrix.arch }}-
+
+      - name: Build CLI tarball
+        run: make tarball
+
+      - name: Upload CLI
+        uses: actions/upload-artifact@v4
+        with:
+          name: varmint-linux-${{ matrix.arch }}
+          path: dist/varmint-linux-*.tar.gz
+          compression-level: 0
+          retention-days: 7
+
   release:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: app
+    needs: [app, linux]
     runs-on: ubuntu-24.04
 
     permissions:
@@ -110,9 +164,10 @@ jobs:
       - name: Download CLI
         uses: actions/download-artifact@v4
         with:
-          name: varmint
+          pattern: varmint*
+          merge-multiple: true
 
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" varmint.pkg --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" varmint.pkg varmint-linux-*.tar.gz --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes

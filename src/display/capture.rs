@@ -1,20 +1,28 @@
+#[cfg(target_os = "macos")]
 use objc2::{AnyThread, runtime::AnyObject};
+#[cfg(target_os = "macos")]
 use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSBitmapImageRepPropertyKey, NSDeviceRGBColorSpace};
+#[cfg(target_os = "macos")]
 use objc2_foundation::NSDictionary;
+#[cfg(target_os = "macos")]
 use objc2_io_surface::{IOSurfaceLockOptions, IOSurfaceRef};
+#[cfg(target_os = "macos")]
 use std::ptr;
 use zerocopy::IntoBytes;
 
 /// A copy of the current scanout, taken under the display lock.
 pub enum Capture {
     Pixels { pixels: Vec<u32>, width: usize, height: usize },
+    #[cfg(target_os = "macos")]
     IOSurface { id: u32, width: usize, height: usize },
 }
 
 impl Capture {
     pub fn size(&self) -> (usize, usize) {
         match *self {
-            Self::Pixels { width, height, .. } | Self::IOSurface { width, height, .. } => (width, height),
+            Self::Pixels { width, height, .. } => (width, height),
+            #[cfg(target_os = "macos")]
+            Self::IOSurface { width, height, .. } => (width, height),
         }
     }
 
@@ -25,6 +33,7 @@ impl Capture {
     }
 
     /// Copies the BGRA rows into `destination`, whose rows are `stride` bytes apart.
+    #[cfg(target_os = "macos")]
     pub fn copy_bgra(&self, destination: &mut [u8], stride: usize) -> Result<(), String> {
         let (width, height) = self.size();
         self.with_bgra(|bytes, source_stride| {
@@ -40,7 +49,15 @@ impl Capture {
     }
 
     /// Calls `read` with the BGRA rows and the bytes between them.
-    fn with_bgra<T>(&self, read: impl FnOnce(&[u8], usize) -> T) -> Result<T, String> {
+    #[cfg(target_os = "linux")]
+    pub(super) fn with_bgra<T>(&self, read: impl FnOnce(&[u8], usize) -> T) -> Result<T, String> {
+        let Self::Pixels { pixels, width, .. } = self;
+        Ok(read(pixels.as_bytes(), width * 4))
+    }
+
+    /// Calls `read` with the BGRA rows and the bytes between them.
+    #[cfg(target_os = "macos")]
+    pub(super) fn with_bgra<T>(&self, read: impl FnOnce(&[u8], usize) -> T) -> Result<T, String> {
         let (width, height) = self.size();
         let id = match self {
             Self::Pixels { pixels, .. } => return Ok(read(pixels.as_bytes(), width * 4)),
@@ -73,6 +90,20 @@ fn bgra_to_rgb(bytes: &[u8], stride: usize, width: usize, height: usize) -> Vec<
     rgb
 }
 
+#[cfg(target_os = "linux")]
+fn encode_png(rgb: &[u8], width: usize, height: usize) -> Result<Vec<u8>, String> {
+    let mut png = Vec::new();
+    let mut encoder = png::Encoder::new(&mut png, width as u32, height as u32);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .write_header()
+        .and_then(|mut writer| writer.write_image_data(rgb))
+        .map_err(|error| format!("failed to encode the screenshot as PNG: {error}"))?;
+    Ok(png)
+}
+
+#[cfg(target_os = "macos")]
 fn encode_png(rgb: &[u8], width: usize, height: usize) -> Result<Vec<u8>, String> {
     let rep = unsafe {
         NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(

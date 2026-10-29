@@ -1,7 +1,7 @@
 # varmint
-Disposable Linux VMs on your Mac, made for running coding agents and anything else you would rather not run on the host.
+Disposable Linux VMs on your Mac or Linux machine, made for running coding agents and anything else you would rather not run on the host.
 
-A VM starts in about a second as a copy-on-write clone of a Debian arm64 desktop, and is deleted when it stops. You drive it entirely from the CLI: shells, commands, SSH, file sharing, the screen, mouse and keyboard. No network setup, no image management.
+A VM starts in about a second as a copy-on-write clone of a Debian desktop, and is deleted when it stops. You drive it entirely from the CLI: shells, commands, SSH, file sharing, the screen, mouse and keyboard. No network setup, no image management.
 
 ```sh
 varmint dev                        # Claude Code on a copy of this repo, in a throwaway VM
@@ -9,14 +9,26 @@ varmint dev                        # Claude Code on a copy of this repo, in a th
 
 When Claude is done, its commits come back to your repo as branches, and you review and push them from the host. Your credentials never enter the VM.
 
-**Varmint requires macOS 26 or later on Apple Silicon.**
+**Varmint requires macOS 26 or later on Apple Silicon, or Linux with KVM on arm64 or x86-64.** The guest is Debian for the host's architecture.
 
 ## Install
-Install `varmint.pkg` from the [build artifacts](../../actions/workflows/build.yml). It puts the CLI in `/usr/local/bin` and its runtime in `/usr/local/share/varmint`. The package is unsigned, so install it from a terminal:
+On macOS, install `varmint.pkg` from the [build artifacts](../../actions/workflows/build.yml). It puts the CLI in `/usr/local/bin` and its runtime in `/usr/local/share/varmint`. The package is unsigned, so install it from a terminal:
 
 ```sh
 sudo installer -pkg varmint.pkg -target /
 ```
+
+On Linux, unpack `varmint-linux-ARCH.tar.gz` from the build artifacts into a prefix, and install the libraries and tools it uses. Your user needs access to `/dev/kvm`, usually through the `kvm` group:
+
+```sh
+sudo tar -xzf varmint-linux-$(uname -m).tar.gz -C /usr/local --strip-components=1
+sudo apt install libvirglrenderer1 virgl-server libx264-164 libopus0 libpulse0 libsqlite3-0 passt   # Debian and Ubuntu
+sudo usermod -aG kvm $USER
+```
+
+The guest renders with the host's OpenGL and Vulkan drivers, Mesa's software renderers on machines without a GPU. `virgl-server` runs the guest's Vulkan, and passt needs a network interface with a default route.
+
+VMs clone the base image with reflinks, so `~/.varmint` must be on a filesystem that has them, such as Btrfs or XFS, like APFS on macOS.
 
 `varmint help` lists all commands and `varmint COMMAND --help` explains one with its options and examples.
 
@@ -57,10 +69,10 @@ varmint ssh $vm                    # regular ssh, tunneled through the agent
 scp -o ProxyCommand="varmint proxy $vm 22" file varmint@$vm:   # any TCP port works
 ```
 
-In an interactive `exec`, Ctrl+V first copies the image on the Mac clipboard into the guest clipboard, so you can paste screenshots into Claude in `varmint dev`.
+In an interactive `exec`, Ctrl+V first copies the image on the host clipboard into the guest clipboard, so you can paste screenshots into Claude in `varmint dev`.
 
 ## Getting files in
-**Mounts** share host directories over virtio-fs, optionally read-only. Files appear owned by the guest user, changes happen as your macOS user, and the guest cannot follow symlinks out of a share. Relative guest paths are under `/home/varmint`:
+**Mounts** share host directories over virtio-fs, optionally read-only. Files appear owned by the guest user, changes happen as your host user, and the guest cannot follow symlinks out of a share. Relative guest paths are under `/home/varmint`:
 
 ```sh
 varmint run --mount ~/project:/work --mount ~/datasets:data:ro
@@ -82,7 +94,7 @@ export CLAUDE_CODE_OAUTH_TOKEN=...   # from `claude setup-token`
 varmint run --env GITHUB_TOKEN
 ```
 
-**Private container registries** listed in `~/.varmint/registries`, one host per line, can be pulled from in every VM without logging in there. Podman in the VM pulls them through a mirror on its loopback, which gets a short-lived token for each repository from the host, made with the credentials `docker login` saved on the Mac. The VM can pull but never push, and the credentials stay on the host:
+**Private container registries** listed in `~/.varmint/registries`, one host per line, can be pulled from in every VM without logging in there. Podman in the VM pulls them through a mirror on its loopback, which gets a short-lived token for each repository from the host, made with the credentials `docker login` saved on the host. The VM can pull but never push, and the credentials stay on the host:
 
 ```sh
 docker login registry.example.com
@@ -120,12 +132,16 @@ my-driver | varmint input $vm       # mouse and keyboard as JSON lines
 Graphics are hardware accelerated through the host GPU:
 
 ```text
-guest Vulkan => Mesa Venus => virglrenderer => MoltenVK => Metal
-guest OpenGL => Mesa VirGL => virglrenderer => ANGLE    => Metal
+guest Vulkan => Mesa Venus => virglrenderer => MoltenVK => Metal           (macOS)
+guest OpenGL => Mesa VirGL => virglrenderer => ANGLE    => Metal           (macOS)
+guest Vulkan => Mesa Venus => virglrenderer => host Vulkan driver          (Linux)
+guest OpenGL => Mesa VirGL => virglrenderer => host OpenGL driver over EGL (Linux)
 ```
 
+In a window, F12 captures and releases the mouse. On macOS the View menu shows statistics and enters full screen; on Linux F10 and F11 do.
+
 ## Remote provisioning
-`varmint serve` takes provisioning requests over TCP, for a relay or an app to create and stop VMs on this Mac. Each connection sends one JSON line with the token from `~/.varmint/serve-token` and gets one JSON line back:
+`varmint serve` takes provisioning requests over TCP, for a relay or an app to create and stop VMs on this host. Each connection sends one JSON line with the token from `~/.varmint/serve-token` and gets one JSON line back:
 
 ```sh
 varmint serve                      # 127.0.0.1:7420, or pass ADDRESS
@@ -137,7 +153,7 @@ echo '{"token":"'$token'","op":"ls"}' | nc 127.0.0.1 7420
 echo '{"token":"'$token'","op":"stop","name":"swift-otter"}' | nc 127.0.0.1 7420
 ```
 
-`run` takes `name`, `base`, `persist`, `cpus`, `memory_mib`, `disk_gib`, `size` (`[width, height]`), `wait_network` and `env`, the guest variables. `CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_API_KEY` come from the server's environment when set, so its VMs share the Mac's credentials; a client's `env` replaces them, as in `"env": {"CLAUDE_CODE_OAUTH_TOKEN": "..."}`. Mounts and seeds are not available remotely, since they name host files. Without `--cert` and `--key` the connection is not encrypted, so keep it on the loopback or a private network. With them every connection is TLS, which browsers on other machines need for the web UI's video; [mkcert](https://github.com/FiloSottile/mkcert) makes a certificate they trust (`mkcert -cert-file mac.pem -key-file mac-key.pem your-mac.local 192.168.1.20`, then install its root CA on the other machine).
+`run` takes `name`, `base`, `persist`, `cpus`, `memory_mib`, `disk_gib`, `size` (`[width, height]`), `wait_network` and `env`, the guest variables. `CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_API_KEY` come from the server's environment when set, so its VMs share the host's credentials; a client's `env` replaces them, as in `"env": {"CLAUDE_CODE_OAUTH_TOKEN": "..."}`. Mounts and seeds are not available remotely, since they name host files. Without `--cert` and `--key` the connection is not encrypted, so keep it on the loopback or a private network. With them every connection is TLS, which browsers on other machines need for the web UI's video; [mkcert](https://github.com/FiloSottile/mkcert) makes a certificate they trust (`mkcert -cert-file mac.pem -key-file mac-key.pem your-mac.local 192.168.1.20`, then install its root CA on the other machine).
 
 `attach` takes `name` and `request`, a request to the VM's control socket, and after its reply hands the connection to that socket, which answers in its own protocol: `{"op":"stream","fps":30,"codec":"h264"}` for the screen as hardware-encoded H.264 (`"rgb"` sends raw pixels), `{"op":"inputstream"}` for mouse and keyboard events, and `{"op":"open","session":{"type":"pty",...}}` for a shell. The web UI of `--ui` is built on it: a wall of every VM's live screen, and for each VM its shell beside its display.
 
@@ -172,7 +188,7 @@ SELECT name, boot_ms, round(stopped_at - started_at) AS seconds, stop_reason FRO
 ```
 
 ## Building from source
-Requires macOS 26 or later, Xcode, Rust and Docker.
+On macOS, requires macOS 26 or later, Xcode, Rust and Docker.
 
 ```sh
 brew install cmake meson ninja pkg-config python
@@ -182,6 +198,14 @@ make install                       # into ~/.local, or INSTALL_PREFIX=...
 make pkg                           # dist/varmint.pkg
 ```
 
+On Linux, requires Rust and Docker; the guest image is built for the host's architecture, or `GUEST_ARCH=arm64|amd64`.
+
+```sh
+sudo apt install libvirglrenderer-dev libx264-dev libopus-dev libpulse-dev libsqlite3-dev pkg-config
+make build                         # dist/varmint and dist/varmint-linux-ARCH.tar.gz
+make install                       # into ~/.local, or INSTALL_PREFIX=...
+```
+
 ## Credits
 Varmint started as a fork of [kisasexypantera94/varmint](https://github.com/kisasexypantera94/varmint) by David Grinberg, a VMM for running Windows and Linux games on Apple Silicon. Its Hypervisor.framework VMM, virtio devices and graphics stack are the foundation this project is built on.
 
@@ -189,4 +213,5 @@ The graphics stack relies on several forks maintained by the [UTM](https://githu
 
 ## Resources
 * [Booting AArch64 Linux](https://docs.kernel.org/arch/arm64/booting.html)
+* [The Linux/x86 Boot Protocol](https://docs.kernel.org/arch/x86/boot.html)
 * [VIRTIO](https://docs.oasis-open.org/virtio/virtio/v1.3/csd01/virtio-v1.3-csd01.html)

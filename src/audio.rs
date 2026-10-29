@@ -1,7 +1,14 @@
+#[cfg(target_os = "linux")]
+#[path = "audio/libopus.rs"]
 mod opus;
+#[cfg(target_os = "macos")]
+mod opus;
+#[cfg(target_os = "linux")]
+mod pulse;
 
 pub use opus::OpusEncoder;
 
+#[cfg(target_os = "macos")]
 use coreaudio::audio_unit::{
     AudioUnit, Element, IOType, SampleFormat, Scope, StreamFormat,
     audio_format::LinearPcmFlags,
@@ -17,6 +24,7 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
+#[cfg(target_os = "macos")]
 use zerocopy::IntoBytes;
 
 const MAX_PERIOD_BYTES: usize = 16 * 1024;
@@ -44,6 +52,7 @@ pub enum BackendEvent {
 }
 
 pub struct Backend {
+    #[cfg(target_os = "macos")]
     _unit: Option<AudioUnit>,
     completion: Arc<CompletionState>,
     completion_thread: Option<JoinHandle<()>>,
@@ -81,11 +90,7 @@ struct CompletionState {
 
 impl Backend {
     /// Plays on the host's default output with `speakers`, otherwise only to `listeners`.
-    pub fn new<F>(
-        speakers: bool,
-        listeners: Arc<Listeners>,
-        on_event: F,
-    ) -> Result<(Backend, PeriodSink), coreaudio::Error>
+    pub fn new<F>(speakers: bool, listeners: Arc<Listeners>, on_event: F) -> Result<(Backend, PeriodSink), String>
     where
         F: Fn(BackendEvent) + Send + 'static,
     {
@@ -115,7 +120,7 @@ impl Backend {
             })
             .expect("failed to start audio completion thread");
 
-        let mut state = CallbackState {
+        let state = CallbackState {
             consumer,
             completion: Arc::clone(&completion),
             completion_thread: completion_thread.thread().clone(),
@@ -123,44 +128,23 @@ impl Backend {
             current: None,
         };
 
+        #[cfg(target_os = "macos")]
         let (unit, clock_thread) = if speakers {
-            let mut unit = AudioUnit::new(IOType::DefaultOutput)?;
-
-            let stream_format = StreamFormat {
-                sample_rate: 48000.0,
-                sample_format: SampleFormat::I16,
-                flags: LinearPcmFlags::IS_PACKED | LinearPcmFlags::IS_SIGNED_INTEGER,
-                channels: 2,
-            };
-
-            unit.set_stream_format(stream_format, Scope::Input, Element::Output)?;
-
-            unit.set_render_callback(move |args: render_callback::Args<data::Interleaved<i16>>| {
-                state.render(args.data.buffer.as_mut_bytes());
-                Ok(())
-            })?;
-
-            unit.start()?;
+            let unit = play_on_speakers(state).map_err(|error| error.to_string())?;
             (Some(unit), None)
         } else {
-            let clock_state = Arc::clone(&completion);
-            let clock_thread = thread::Builder::new()
-                .name("audio-clock".into())
-                .spawn(move || {
-                    let mut out = vec![0; BYTES_PER_SECOND * CLOCK_TICK.as_millis() as usize / 1000];
-                    let mut next = Instant::now();
-                    while clock_state.running.load(Ordering::Acquire) {
-                        state.render(&mut out);
-                        next += CLOCK_TICK;
-                        thread::sleep(next.saturating_duration_since(Instant::now()));
-                    }
-                })
-                .expect("failed to start audio clock thread");
-            (None, Some(clock_thread))
+            (None, Some(spawn_clock(Arc::clone(&completion), state)))
         };
+        #[cfg(target_os = "linux")]
+        let clock_thread = Some(spawn_clock(
+            Arc::clone(&completion),
+            state,
+            speakers.then(pulse::Output::open).transpose()?,
+        ));
 
         Ok((
             Backend {
+                #[cfg(target_os = "macos")]
                 _unit: unit,
                 completion,
                 completion_thread: Some(completion_thread),
@@ -173,6 +157,72 @@ impl Backend {
             },
         ))
     }
+}
+
+#[cfg(target_os = "macos")]
+fn play_on_speakers(mut state: CallbackState) -> Result<AudioUnit, coreaudio::Error> {
+    let mut unit = AudioUnit::new(IOType::DefaultOutput)?;
+
+    let stream_format = StreamFormat {
+        sample_rate: 48000.0,
+        sample_format: SampleFormat::I16,
+        flags: LinearPcmFlags::IS_PACKED | LinearPcmFlags::IS_SIGNED_INTEGER,
+        channels: 2,
+    };
+
+    unit.set_stream_format(stream_format, Scope::Input, Element::Output)?;
+
+    unit.set_render_callback(move |args: render_callback::Args<data::Interleaved<i16>>| {
+        state.render(args.data.buffer.as_mut_bytes());
+        Ok(())
+    })?;
+
+    unit.start()?;
+    Ok(unit)
+}
+
+/// Consumes the guest's audio at the pace of a timer, standing in for the sound card.
+#[cfg(target_os = "macos")]
+fn spawn_clock(clock_state: Arc<CompletionState>, mut state: CallbackState) -> JoinHandle<()> {
+    thread::Builder::new()
+        .name("audio-clock".into())
+        .spawn(move || {
+            let mut out = vec![0; BYTES_PER_SECOND * CLOCK_TICK.as_millis() as usize / 1000];
+            let mut next = Instant::now();
+            while clock_state.running.load(Ordering::Acquire) {
+                state.render(&mut out);
+                next += CLOCK_TICK;
+                thread::sleep(next.saturating_duration_since(Instant::now()));
+            }
+        })
+        .expect("failed to start audio clock thread")
+}
+
+/// Consumes the guest's audio at the pace of `output`, whose writes block
+/// while it is full, or of a timer standing in for the sound card.
+#[cfg(target_os = "linux")]
+fn spawn_clock(
+    clock_state: Arc<CompletionState>,
+    mut state: CallbackState,
+    output: Option<pulse::Output>,
+) -> JoinHandle<()> {
+    thread::Builder::new()
+        .name("audio-clock".into())
+        .spawn(move || {
+            let mut out = vec![0; BYTES_PER_SECOND * CLOCK_TICK.as_millis() as usize / 1000];
+            let mut next = Instant::now();
+            while clock_state.running.load(Ordering::Acquire) {
+                state.render(&mut out);
+                match &output {
+                    Some(output) => output.write(&out).unwrap_or_else(|error| panic!("{error}")),
+                    None => {
+                        next += CLOCK_TICK;
+                        thread::sleep(next.saturating_duration_since(Instant::now()));
+                    }
+                }
+            }
+        })
+        .expect("failed to start audio clock thread")
 }
 
 impl Drop for Backend {

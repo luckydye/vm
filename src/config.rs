@@ -1,4 +1,8 @@
-use crate::instance::{self, Instance};
+use crate::{
+    hypervisor,
+    instance::{self, Instance},
+    machine,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -9,7 +13,7 @@ use std::{
 /// No device needs bounce buffers, so swiotlb would only pin 64 MiB of guest RAM.
 /// Free page reporting releases free blocks down to one 16 KiB host page (order 2)
 /// instead of 2 MiB, so fragmented free memory goes back to the host too.
-const KERNEL_ARGS: &str = "console=ttyAMA0 earlycon=pl011,mmio32,0x09000000 root=LABEL=varmint-root rw quiet loglevel=3 apparmor=0 \
+const KERNEL_ARGS: &str = "root=LABEL=varmint-root rw quiet loglevel=3 apparmor=0 \
      systemd.condition-needs-update=0 swiotlb=noforce page_reporting.page_reporting_order=2";
 const MIB: u64 = 1024 * 1024;
 pub const GIB: u64 = 1024 * MIB;
@@ -226,7 +230,12 @@ impl VmConfig {
             disk_size: hardware.disk_gib.checked_mul(GIB).expect("disk is too large"),
             kernel: instance.kernel(),
             initrd: instance.initrd(),
-            kernel_args: format!("{KERNEL_ARGS} systemd.hostname={}", instance.name),
+            kernel_args: format!(
+                "{} {KERNEL_ARGS} {} systemd.hostname={}",
+                machine::CONSOLE_ARGS,
+                hypervisor::KERNEL_ARGS,
+                instance.name
+            ),
             width: hardware.width,
             height: hardware.height,
         }

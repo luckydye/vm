@@ -35,6 +35,8 @@ const LINUX_O_APPEND: u32 = 0o2000;
 const LINUX_RENAME_NOREPLACE: u32 = 1;
 const LINUX_RENAME_EXCHANGE: u32 = 2;
 
+/// Error numbers as the Linux guest knows them; a Linux host reports them already.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 mod linux_errno {
     pub const EPERM: i32 = 1;
     pub const ENOENT: i32 = 2;
@@ -61,6 +63,7 @@ mod linux_errno {
 }
 
 /// Errno values 1–34 match between macOS and Linux except 11.
+#[cfg(target_os = "macos")]
 fn to_linux_errno(error: io::Error) -> i32 {
     let errno = error.raw_os_error().unwrap_or(libc::EIO);
     match errno {
@@ -80,6 +83,12 @@ fn to_linux_errno(error: io::Error) -> i32 {
         libc::ECANCELED => linux_errno::ECANCELED,
         _ => linux_errno::EIO,
     }
+}
+
+/// The host's error numbers are the guest's.
+#[cfg(target_os = "linux")]
+fn to_linux_errno(error: io::Error) -> i32 {
+    error.raw_os_error().unwrap_or(libc::EIO)
 }
 
 type Reply = Result<Vec<u8>, i32>;
@@ -103,7 +112,7 @@ struct Node {
     lookups: u64,
     /// Entry nodes that name this node as their parent.
     children: u64,
-    inode: (i32, u64),
+    inode: (libc::dev_t, u64),
     place: Place,
 }
 
@@ -116,7 +125,7 @@ struct DirEntry {
 pub struct Share {
     readonly: bool,
     nodes: HashMap<u64, Node>,
-    by_inode: HashMap<(i32, u64), u64>,
+    by_inode: HashMap<(libc::dev_t, u64), u64>,
     next_node: u64,
     files: HashMap<u64, File>,
     dirs: HashMap<u64, Vec<DirEntry>>,
@@ -186,7 +195,7 @@ fn attr(st: &libc::stat) -> fuse_attr {
         mtimensec: st.st_mtime_nsec as u32,
         ctimensec: st.st_ctime_nsec as u32,
         mode: u32::from(st.st_mode),
-        nlink: u32::from(st.st_nlink),
+        nlink: st.st_nlink as u32,
         uid: GUEST_UID,
         gid: GUEST_GID,
         rdev: st.st_rdev as u32,
@@ -213,6 +222,23 @@ fn open_out(fh: u64) -> fuse_open_out {
 }
 
 /// Host open flags for the Linux flags of an open request.
+#[cfg(target_os = "macos")]
+fn rename_at(old_dir: RawFd, old_name: &CStr, new_dir: RawFd, new_name: &CStr, linux_flags: u32) -> libc::c_int {
+    let flags = match linux_flags {
+        LINUX_RENAME_NOREPLACE => libc::RENAME_EXCL,
+        LINUX_RENAME_EXCHANGE => libc::RENAME_SWAP,
+        0 => 0,
+        _ => unreachable!("rename flags are validated"),
+    };
+    unsafe { libc::renameatx_np(old_dir, old_name.as_ptr(), new_dir, new_name.as_ptr(), flags) }
+}
+
+/// Linux takes the guest's flags as they are.
+#[cfg(target_os = "linux")]
+fn rename_at(old_dir: RawFd, old_name: &CStr, new_dir: RawFd, new_name: &CStr, linux_flags: u32) -> libc::c_int {
+    unsafe { libc::renameat2(old_dir, old_name.as_ptr(), new_dir, new_name.as_ptr(), linux_flags) }
+}
+
 fn open_flags(linux: u32) -> libc::c_int {
     let mut flags = (linux & LINUX_O_ACCMODE) as libc::c_int;
     if linux & LINUX_O_TRUNC != 0 {
@@ -668,18 +694,10 @@ impl Share {
         let old_dir = self.dir_fd(old_parent)?;
         let new_dir = self.dir_fd(new_parent)?;
 
-        let host_flags = match flags {
-            0 => None,
-            LINUX_RENAME_NOREPLACE => Some(libc::RENAME_EXCL),
-            LINUX_RENAME_EXCHANGE => Some(libc::RENAME_SWAP),
-            _ => return Err(linux_errno::EINVAL),
-        };
-        match host_flags {
-            None => check(unsafe { libc::renameat(old_dir, old_name.as_ptr(), new_dir, new_name.as_ptr()) })?,
-            Some(host_flags) => check(unsafe {
-                libc::renameatx_np(old_dir, old_name.as_ptr(), new_dir, new_name.as_ptr(), host_flags)
-            })?,
-        };
+        if !matches!(flags, 0 | LINUX_RENAME_NOREPLACE | LINUX_RENAME_EXCHANGE) {
+            return Err(linux_errno::EINVAL);
+        }
+        check(rename_at(old_dir, &old_name, new_dir, &new_name, flags))?;
 
         // Keep nodes of renamed entries pointing at their new names.
         for (parent, dir, name) in [(new_parent, new_dir, new_name), (old_parent, old_dir, old_name)] {
@@ -763,9 +781,9 @@ impl Share {
                 bavail: st.f_bavail,
                 files: st.f_files,
                 ffree: st.f_ffree,
-                bsize: st.f_bsize,
+                bsize: st.f_bsize as u32,
                 namelen: 255,
-                frsize: st.f_bsize,
+                frsize: st.f_bsize as u32,
                 padding: 0,
                 spare: [0; 6],
             },
