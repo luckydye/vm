@@ -1,6 +1,6 @@
 //! A PC without PCI or legacy firmware: the kernel boots through its 64-bit
-//! entry with a zero page, finds the CPUs and the IOAPIC in ACPI tables, and
-//! its virtio-mmio devices on the command line. Powering off or resetting
+//! entry with a zero page, and finds the CPUs, the IOAPIC and its virtio-mmio
+//! devices in ACPI tables. Powering off or resetting
 //! through the ACPI sleep or reset register stops the VM.
 
 use super::{Boot, checked_end};
@@ -135,16 +135,12 @@ pub fn load(
     let initrd_addr_max = u32::from_le_bytes(kernel[0x22c..0x230].try_into().unwrap()) as u64;
     let cmdline_size = u32::from_le_bytes(kernel[0x238..0x23c].try_into().unwrap()) as usize;
 
-    let mut cmdline = kernel_args.to_owned();
-    for (base, irq) in virtio_devices(shares) {
-        cmdline.push_str(&format!(" virtio_mmio.device=4K@{base:#x}:{irq}"));
-    }
-    if cmdline.len() >= cmdline_size {
+    if kernel_args.len() >= cmdline_size {
         return Err(io::Error::other(format!(
             "kernel command line exceeds {cmdline_size} bytes"
         )));
     }
-    let mut cmdline = cmdline.into_bytes();
+    let mut cmdline = kernel_args.as_bytes().to_vec();
     cmdline.push(0);
 
     let low_end = memory_size.min(LOW_RAM_END as usize) as u64;
@@ -158,7 +154,7 @@ pub fn load(
     mem.write(initrd_start, initrd)?;
     mem.write(CMDLINE_START, &cmdline)?;
 
-    let acpi = acpi_tables(vcpus);
+    let acpi = acpi_tables(vcpus, shares);
     mem.write(ACPI_START, &acpi)?;
 
     let mut zero_page = vec![0u8; 0x1000];
@@ -214,7 +210,7 @@ fn virtio_devices(shares: usize) -> Vec<(u64, u32)> {
 }
 
 /// RSDP, XSDT, FADT, DSDT and MADT, laid out from `ACPI_START`.
-fn acpi_tables(vcpus: usize) -> Vec<u8> {
+fn acpi_tables(vcpus: usize, shares: usize) -> Vec<u8> {
     const RSDP_LEN: usize = 36;
     const XSDT_LEN: usize = 36 + 2 * 8;
     const FADT_LEN: usize = 276;
@@ -224,11 +220,16 @@ fn acpi_tables(vcpus: usize) -> Vec<u8> {
     let dsdt_addr = fadt_addr + FADT_LEN as u64;
 
     // Name (_S5_, Package () { 5 }): the sleep type the kernel writes to power off.
-    let dsdt = table(
-        b"DSDT",
-        2,
-        &[0x08, b'_', b'S', b'5', b'_', 0x12, 0x04, 0x01, 0x0a, 0x05],
-    );
+    let mut dsdt = vec![0x08, b'_', b'S', b'5', b'_', 0x12, 0x04, 0x01, 0x0a, 0x05];
+    // Scope (\_SB) { Device (Vnnn) { ... } }: one virtio-mmio device each.
+    let devices: Vec<u8> = virtio_devices(shares)
+        .into_iter()
+        .enumerate()
+        .flat_map(|(index, (base, irq))| virtio_device(index, base, irq))
+        .collect();
+    dsdt.push(0x10);
+    dsdt.extend(aml_package([b"\\_SB_".as_slice(), &devices].concat()));
+    let dsdt = table(b"DSDT", 2, &dsdt);
     let madt_addr = dsdt_addr + dsdt.len() as u64;
 
     let mut fadt = vec![0u8; FADT_LEN - 36];
@@ -280,6 +281,42 @@ fn acpi_tables(vcpus: usize) -> Vec<u8> {
     assert_eq!(xsdt.len(), XSDT_LEN);
     assert_eq!(fadt.len(), FADT_LEN);
     [rsdp, xsdt, fadt, dsdt, madt].concat()
+}
+
+/// Device (Vnnn) { Name (_HID, "LNRO0005") Name (_UID, n) Name (_CRS, ...) }
+/// with the device's registers and its level-triggered, active-high IOAPIC pin.
+fn virtio_device(index: usize, base: u64, irq: u32) -> Vec<u8> {
+    let mut resources = vec![0x86, 9, 0, 1]; // Memory32Fixed, read-write
+    resources.extend_from_slice(&(base as u32).to_le_bytes());
+    resources.extend_from_slice(&0x1000u32.to_le_bytes());
+    resources.extend_from_slice(&[0x89, 6, 0, 1, 1]); // Extended Interrupt, consumer, one
+    resources.extend_from_slice(&irq.to_le_bytes());
+    resources.extend_from_slice(&[0x79, 0]); // End tag
+    let mut buffer = vec![0x0a, resources.len() as u8];
+    buffer.extend(resources);
+
+    let mut body = format!("V{index:03}").into_bytes();
+    body.extend_from_slice(b"\x08_HID\x0dLNRO0005\0");
+    body.extend_from_slice(&[0x08, b'_', b'U', b'I', b'D', 0x0a, index as u8]);
+    body.extend_from_slice(&[0x08, b'_', b'C', b'R', b'S', 0x11]);
+    body.extend(aml_package(buffer));
+    let mut device = vec![0x5b, 0x82];
+    device.extend(aml_package(body));
+    device
+}
+
+/// `contents` behind an AML PkgLength, which counts its own one or two bytes.
+fn aml_package(contents: Vec<u8>) -> Vec<u8> {
+    let length = contents.len() + 1;
+    let mut package = if length < 0x40 {
+        vec![length as u8]
+    } else {
+        let length = length + 1;
+        assert!(length < 0x1000, "AML package of {length} bytes");
+        vec![0x40 | (length & 0xf) as u8, (length >> 4) as u8]
+    };
+    package.extend(contents);
+    package
 }
 
 /// An ACPI table: the standard header, then `body`, summing to zero.
