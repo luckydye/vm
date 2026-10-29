@@ -305,7 +305,7 @@ function renderMachine(state) {
     $("volume").value = level;
     $("volume").style.setProperty("--level", `${level * 100}%`);
     $("screen").tabIndex = state.screenExpanded ? 0 : -1;
-    for (const button of $("modifier-keys").children) button.ariaPressed = state.modifiers.has(Number(button.dataset.code));
+    for (const button of document.querySelectorAll(".modifier-keys .key")) button.ariaPressed = state.modifiers.has(Number(button.dataset.code));
     if (!state.screenExpanded && document.activeElement === $("screen")) $("screen").blur();
   }
   if (session?.name !== (vm?.running ? vm.name : null)) {
@@ -315,17 +315,22 @@ function renderMachine(state) {
   session?.hint();
 }
 
-function keyButton({ label, code }) {
+function keyButton({ label, name, code }) {
   const button = element("button", "key", label);
   button.dataset.code = code;
+  if (name) button.dataset.name = name;
   return button;
 }
 
-$("modifier-keys").append(...data.MODIFIERS.map(keyButton));
-$("named-keys").append(...data.KEYS.map(keyButton));
-// Pressing a key keeps the focus where it is, so the screen keeps the keyboard
-// and the on-screen keyboard stays open.
-$("keys").addEventListener("pointerdown", (event) => event.target !== $("typing") && event.preventDefault());
+// The key bars under the screen and the shell. Pressing a key keeps the focus
+// where it is, so the screen or shell keeps the keyboard and the on-screen
+// keyboard stays open.
+$("shell-keys").querySelector(".keyboard").append($("keyboard").firstElementChild.cloneNode(true));
+for (const bar of [$("keys"), $("shell-keys")]) {
+  bar.querySelector(".modifier-keys").append(...data.MODIFIERS.map(keyButton));
+  bar.querySelector(".named-keys").append(...data.KEYS.map(keyButton));
+  bar.addEventListener("pointerdown", (event) => event.target !== $("typing") && event.preventDefault());
+}
 
 confirming(
   $("machine-power"),
@@ -439,9 +444,8 @@ function openSession(name) {
     on($("keys"), "click", (event) => {
       const button = event.target.closest("[data-code]");
       if (!button) return;
-      const code = Number(button.dataset.code);
-      if (data.MODIFIERS.some((modifier) => modifier.code === code)) data.toggleModifier(code);
-      else data.chord([code]).forEach(input.send);
+      if (!button.dataset.name) return data.toggleModifier(Number(button.dataset.code));
+      data.chord([Number(button.dataset.code)]).forEach(input.send);
     });
 
     // The on-screen keyboard types into a hidden field, whose changes become
@@ -529,7 +533,15 @@ function openShell(name) {
   terminal.loadAddon(new CanvasAddon.CanvasAddon());
   fit.fit();
   const shell = data.shellSession(name, terminal.cols, terminal.rows, (bytes) => terminal.write(bytes));
-  terminal.onData(shell.write);
+  terminal.onData((text) => shell.write(data.terminalText(text)));
+  const keys = new AbortController();
+  $("shell-keys").addEventListener("click", (event) => {
+    const button = event.target.closest(".key");
+    if (!button) return;
+    if (button.classList.contains("keyboard")) return terminal.textarea === document.activeElement ? terminal.blur() : terminal.focus();
+    if (!button.dataset.name) return data.toggleModifier(Number(button.dataset.code));
+    shell.write(data.terminalKey(button.dataset.name));
+  }, { signal: keys.signal });
   terminal.onResize(({ cols, rows }) => shell.resize(cols, rows));
   // Captured before xterm, which only pastes text.
   terminal.element.addEventListener("paste", (event) => {
@@ -541,7 +553,7 @@ function openShell(name) {
   }, true);
   const resizes = new ResizeObserver(() => host.clientWidth && host.clientHeight && fit.fit());
   resizes.observe(host);
-  session.shell = { shell, terminal, resizes };
+  session.shell = { shell, terminal, resizes, keys };
   const ended = (text) => {
     if (session?.shell?.shell !== shell) return;
     const restart = element("button", "btn", "New shell");
@@ -558,6 +570,7 @@ function closeShell() {
   session.shell.shell.close();
   session.shell.terminal.dispose();
   session.shell.resizes.disconnect();
+  session.shell.keys.abort();
   session.shell = null;
 }
 

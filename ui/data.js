@@ -580,20 +580,26 @@ export const KEYS = [
   ["Esc", "Escape"], ["Tab", "Tab"], ["←", "ArrowLeft"], ["↑", "ArrowUp"], ["↓", "ArrowDown"], ["→", "ArrowRight"],
   ["Home", "Home"], ["End", "End"], ["PgUp", "PageUp"], ["PgDn", "PageDown"], ["Ins", "Insert"], ["Del", "Delete"],
   ...Array.from({ length: 12 }, (_, index) => [`F${index + 1}`, `F${index + 1}`]),
-].map(([label, name]) => ({ label, code: KEY_CODES[name] }));
+].map(([label, name]) => ({ label, name, code: KEY_CODES[name] }));
 
 export function toggleModifier(code) {
   if (!state.modifiers.delete(code)) state.modifiers.add(code);
   changed();
 }
 
-// One press of `codes` together with the latched modifiers, which it unlatches.
-export function chord(codes) {
-  const pressed = [...new Set([...state.modifiers, ...codes])];
-  if (state.modifiers.size) {
+// The latched modifiers, which are unlatched by taking them.
+function takeModifiers() {
+  const modifiers = new Set(state.modifiers);
+  if (modifiers.size) {
     state.modifiers.clear();
     changed();
   }
+  return modifiers;
+}
+
+// One press of `codes` together with the latched modifiers, which it unlatches.
+export function chord(codes) {
+  const pressed = [...new Set([...takeModifiers(), ...codes])];
   return [...pressed.map((code) => ({ key: { code, down: true } })), ...pressed.toReversed().map((code) => ({ key: { code, down: false } }))];
 }
 
@@ -631,4 +637,45 @@ export function typing(before, after) {
 // field, so `typing` sends it.
 export function namedKey(key) {
   return key === "Backspace" ? null : KEY_CODES[key] ?? null;
+}
+
+// What the key bar's keys send to a terminal: a literal byte, or an escape
+// sequence after ESC that takes modifiers the way xterm does.
+const TERMINAL_KEYS = {
+  Escape: "\x1b", Tab: "\t", ArrowUp: "[A", ArrowDown: "[B", ArrowRight: "[C", ArrowLeft: "[D", Home: "[H", End: "[F",
+  Insert: "[2~", Delete: "[3~", PageUp: "[5~", PageDown: "[6~", F1: "OP", F2: "OQ", F3: "OR", F4: "OS",
+  F5: "[15~", F6: "[17~", F7: "[18~", F8: "[19~", F9: "[20~", F10: "[21~", F11: "[23~", F12: "[24~",
+};
+
+// The xterm modifier parameter: 1 plus Shift 1, Alt 2, Ctrl 4 and Super 8.
+function modifierParameter(modifiers) {
+  const bits = [KEY_CODES.ShiftLeft, KEY_CODES.AltLeft, KEY_CODES.ControlLeft, KEY_CODES.MetaLeft];
+  return 1 + bits.reduce((sum, code, bit) => sum + (modifiers.has(code) ? 1 << bit : 0), 0);
+}
+
+// The bytes for the key bar's key `name` in a terminal, with the latched modifiers.
+export function terminalKey(name) {
+  const modifiers = takeModifiers();
+  const sequence = TERMINAL_KEYS[name];
+  if (sequence.length === 1) {
+    if (name === "Tab" && modifiers.has(KEY_CODES.ShiftLeft)) return "\x1b[Z";
+    return (modifiers.has(KEY_CODES.AltLeft) ? "\x1b" : "") + sequence;
+  }
+  const parameter = modifierParameter(modifiers);
+  if (parameter === 1) return `\x1b${sequence}`;
+  const final = sequence.at(-1);
+  return `\x1b[${sequence.slice(1, -1) || "1"};${parameter}${final}`;
+}
+
+// `text` typed into a terminal with the latched modifiers on its first
+// character. Ctrl turns @, A to Z and [\]^_ into control bytes and leaves other
+// characters as they are, as terminals do.
+export function terminalText(text) {
+  const modifiers = takeModifiers();
+  if (!modifiers.size || !text) return text;
+  let first = modifiers.has(KEY_CODES.ShiftLeft) ? text[0].toUpperCase() : text[0];
+  const upper = first.toUpperCase().charCodeAt(0);
+  if (modifiers.has(KEY_CODES.ControlLeft) && upper >= 0x40 && upper <= 0x5f) first = String.fromCharCode(upper & 0x1f);
+  if (modifiers.has(KEY_CODES.ControlLeft) && first === " ") first = "\x00";
+  return (modifiers.has(KEY_CODES.AltLeft) ? "\x1b" : "") + first + text.slice(1);
 }

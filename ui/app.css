@@ -247,7 +247,10 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: 
 .screen-pane { grid-area: display; }
 /* The key bar under the expanded display, scrolling sideways on narrow screens. */
 .keys { position: relative; display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none; }
-.views:not([data-expanded="true"]) .keys { display: none; }
+.views:not([data-expanded="true"]) .screen-pane .keys { display: none; }
+/* A physical keyboard has all of these, so the shell shows them only on touch screens. */
+.shell-keys { margin-top: 8px; }
+@media not (pointer: coarse) { .shell-keys { display: none; } }
 .key-group { display: flex; gap: 4px; }
 .key {
   flex: none;
