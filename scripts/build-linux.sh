@@ -29,7 +29,7 @@ for file in "$KERNEL" "$INITRD" "$BASE_IMAGE"; do
   need_file "$file"
 done
 require_commands cargo pkg-config tar
-for library in virglrenderer x264 opus libpulse-simple; do
+for library in virglrenderer x264 opus libpulse-simple sqlite3; do
   pkg-config --exists "$library" || die "missing development files for $library"
 done
 

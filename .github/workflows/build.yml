@@ -123,7 +123,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libopus-dev libpulse-dev libvirglrenderer-dev libx264-dev pkg-config
+            libopus-dev libpulse-dev libsqlite3-dev libvirglrenderer-dev libx264-dev pkg-config
 
       - name: Download guest runtime
         uses: actions/download-artifact@v4

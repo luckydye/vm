@@ -22,7 +22,7 @@ On Linux, unpack `varmint-linux-ARCH.tar.gz` from the build artifacts into a pre
 
 ```sh
 sudo tar -xzf varmint-linux-$(uname -m).tar.gz -C /usr/local --strip-components=1
-sudo apt install libvirglrenderer1 libx264-164 libopus0 libpulse0 passt   # Debian and Ubuntu
+sudo apt install libvirglrenderer1 libx264-164 libopus0 libpulse0 libsqlite3-0 passt   # Debian and Ubuntu
 sudo usermod -aG kvm $USER
 ```
 
@@ -199,7 +199,7 @@ make pkg                           # dist/varmint.pkg
 On Linux, requires Rust and Docker; the guest image is built for the host's architecture, or `GUEST_ARCH=arm64|amd64`.
 
 ```sh
-sudo apt install libvirglrenderer-dev libx264-dev libopus-dev libpulse-dev pkg-config
+sudo apt install libvirglrenderer-dev libx264-dev libopus-dev libpulse-dev libsqlite3-dev pkg-config
 make build                         # dist/varmint and dist/varmint-linux-ARCH.tar.gz
 make install                       # into ~/.local, or INSTALL_PREFIX=...
 ```
