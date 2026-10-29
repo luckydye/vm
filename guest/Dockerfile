@@ -3,9 +3,13 @@ ARG FEX_COMMIT=0df84d3844bcdb87bb7d3f5b8fb0959cd009c038
 FROM debian:trixie-slim AS fex-builder
 
 ARG FEX_COMMIT
+ARG TARGETARCH
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update && \
+# FEX runs x86-64 programs on arm64 guests; x86-64 guests get an empty install.
+
+RUN [ "$TARGETARCH" = arm64 ] || exit 0; \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
         ca-certificates \
         clang \
@@ -33,13 +37,15 @@ RUN apt-get update && \
         pkgconf && \
     rm -rf /var/lib/apt/lists/*
 
-RUN git clone https://github.com/FEX-Emu/FEX.git /src/FEX && \
+RUN [ "$TARGETARCH" = arm64 ] || exit 0; \
+    git clone https://github.com/FEX-Emu/FEX.git /src/FEX && \
     git -C /src/FEX checkout "$FEX_COMMIT" && \
     git -C /src/FEX submodule update --init --recursive && \
     sed -i '/Opening host-side X11 display:/s/fprintf/\/\/ fprintf/' /src/FEX/ThunkLibs/include/common/X11Manager.h && \
     sed -i '/Linking address %p to host invoker/s/fprintf/\/\/ fprintf/' /src/FEX/ThunkLibs/libvulkan/Guest.cpp
 
-RUN cmake \
+RUN if [ "$TARGETARCH" != arm64 ]; then mkdir -p /opt/fex-install; exit 0; fi; \
+    cmake \
         -S /src/FEX \
         -B /src/FEX/build \
         -G Ninja \
@@ -88,6 +94,7 @@ RUN printf 'Types: deb deb-src\nURIs: http://snapshot.debian.org/archive/debian/
 
 FROM debian:trixie-slim
 
+ARG TARGETARCH
 ENV DEBIAN_FRONTEND=noninteractive \
     LIBGUESTFS_BACKEND=direct \
     LIBGUESTFS_BACKEND_SETTINGS=force_tcg
@@ -96,7 +103,7 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         ca-certificates \
         libguestfs-tools \
-        linux-image-arm64 \
+        linux-image-$TARGETARCH \
         ipxe-qemu \
         qemu-utils \
         zstd && \
@@ -113,9 +120,11 @@ RUN install -Dm0755 /opt/varmint/source/build-image-container.sh /usr/local/bin/
     install -Dm0755 /opt/varmint/source/varmint-display-fit /opt/varmint/rootfs/usr/local/libexec/varmint-display-fit && \
     install -Dm0755 /opt/varmint/source/varmint-grow-root /opt/varmint/rootfs/usr/local/libexec/varmint-grow-root && \
     install -Dm0755 /opt/varmint/source/varmint-provision /opt/varmint/rootfs/usr/local/libexec/varmint-provision && \
-    install -Dm0755 /opt/varmint/source/varmint-fex /opt/varmint/rootfs/usr/local/bin/FEX && \
-    ln -s FEX /opt/varmint/rootfs/usr/local/bin/FEXBash && \
-    ln -s FEX /opt/varmint/rootfs/usr/local/bin/FEXRootFSFetcher && \
+    if [ "$TARGETARCH" = arm64 ]; then \
+        install -Dm0755 /opt/varmint/source/varmint-fex /opt/varmint/rootfs/usr/local/bin/FEX && \
+        ln -s FEX /opt/varmint/rootfs/usr/local/bin/FEXBash && \
+        ln -s FEX /opt/varmint/rootfs/usr/local/bin/FEXRootFSFetcher; \
+    fi && \
     install -Dm0644 /opt/varmint/source/mise.toml /opt/varmint/rootfs/etc/mise/config.toml && \
     install -Dm0755 /opt/varmint/source/varmint-initramfs-fsck-hook /opt/varmint/rootfs/etc/initramfs-tools/hooks/varmint-fsck && \
     install -Dm0644 /opt/varmint/source/varmint-agent.service /opt/varmint/rootfs/etc/systemd/system/varmint-agent.service && \

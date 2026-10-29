@@ -2,6 +2,7 @@
 set -eu
 
 export DEBIAN_FRONTEND=noninteractive
+arch=$(dpkg --print-architecture)
 
 cat > /etc/apt/apt.conf.d/80-varmint-retries <<'EOF_APT'
 Acquire::Retries "3";
@@ -121,6 +122,11 @@ rm -rf /tmp/hyprland-debs
 command -v fsck >/dev/null 2>&1
 command -v e2fsck >/dev/null 2>&1
 command -v update-initramfs >/dev/null 2>&1
+# x86-64 guests find their virtio-mmio devices on the kernel command line,
+# which only the virtio_mmio module reads; nothing else loads it.
+if [ "$arch" = amd64 ]; then
+    echo virtio_mmio >> /etc/initramfs-tools/modules
+fi
 update-initramfs -u -k all
 
 # Keep PulseAudio's udev-managed ALSA card lifecycle, but disable timer-based
@@ -184,7 +190,7 @@ sudo -H -u varmint sh -c 'mkdir -p ~/.claude && cat > ~/.claude/settings.json' <
 EOF_CLAUDE_SETTINGS
 sudo -H -u varmint sh -c 'cat > ~/.claude/CLAUDE.md' <<'EOF_CLAUDE_MD'
 # Environment
-You run in a disposable Debian arm64 VM made by varmint on the user's Mac.
+You run in a disposable Debian VM made by varmint on the user's computer.
 Nothing you do here can harm the host, so act without asking for permission.
 
 - The user can see the VM's screen: a Hyprland (Wayland) desktop. Programs
@@ -201,8 +207,10 @@ Nothing you do here can harm the host, so act without asking for permission.
 - Your credentials stay on the host: you cannot push. Commit your work to
   branches in the repository; the user fetches them from the host and
   reviews and pushes them there.
-- x86-64 binaries run through FEX (`FEX`, `FEXBash`).
 EOF_CLAUDE_MD
+if [ "$arch" = arm64 ]; then
+    sudo -H -u varmint sh -c 'echo "- x86-64 binaries run through FEX (\`FEX\`, \`FEXBash\`)." >> ~/.claude/CLAUDE.md'
+fi
 
 cat > /etc/sudoers.d/varmint <<'EOF_SUDO'
 varmint ALL=(ALL) NOPASSWD:ALL
@@ -226,9 +234,10 @@ command = "start-hyprland"
 user = "varmint"
 EOF_GREETD
 
-# FEX runs x86-64 binaries. Its rootfs is downloaded on first use by the FEX,
+# On arm64, FEX runs x86-64 binaries. Its rootfs is downloaded on first use by the FEX,
 # FEXBash and FEXRootFSFetcher wrappers in /usr/local/bin (guest/varmint-fex).
-sudo -H -u varmint sh -c 'mkdir -p ~/.config/fex-emu && cat > ~/.config/fex-emu/Config.json' <<'EOF_FEX'
+if [ "$arch" = arm64 ]; then
+    sudo -H -u varmint sh -c 'mkdir -p ~/.config/fex-emu && cat > ~/.config/fex-emu/Config.json' <<'EOF_FEX'
 {
   "Config": {
     "RootFS": "Ubuntu_24_04",
@@ -244,6 +253,28 @@ sudo -H -u varmint sh -c 'mkdir -p ~/.config/fex-emu && cat > ~/.config/fex-emu/
   }
 }
 EOF_FEX
+    # Hypervisor.framework gives the VM x86-like memory ordering and says so
+    # with varmint.tso=1; on other hosts FEX must order memory itself.
+    cat > /usr/local/libexec/varmint-fex-tso <<'EOF_FEX_TSO'
+#!/bin/sh
+set -eu
+if grep -qw varmint.tso=1 /proc/cmdline; then tso=0; else tso=1; fi
+sed -i "s/\"TSOEnabled\": \"[01]\"/\"TSOEnabled\": \"$tso\"/" /home/varmint/.config/fex-emu/Config.json
+EOF_FEX_TSO
+    chmod 0755 /usr/local/libexec/varmint-fex-tso
+    cat > /etc/systemd/system/varmint-fex-tso.service <<'EOF_FEX_TSO'
+[Unit]
+Description=Match FEX memory ordering to the host CPU
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/varmint-fex-tso
+
+[Install]
+WantedBy=multi-user.target
+EOF_FEX_TSO
+    systemctl enable varmint-fex-tso.service
+fi
 
 # The web UI's shells attach to one shared tmux session, which outlives the
 # browser. tmux then owns scrollback, so the mouse wheel must reach it, and

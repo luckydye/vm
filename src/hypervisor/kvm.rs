@@ -20,6 +20,8 @@ use std::{
 #[cfg(target_arch = "x86_64")]
 use x86_64 as arch;
 
+pub const KERNEL_ARGS: &str = "";
+
 type Result<T> = std::result::Result<T, kvm_ioctls::Error>;
 
 #[derive(Clone)]

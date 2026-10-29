@@ -1,4 +1,5 @@
 use crate::{
+    hypervisor,
     instance::{self, Instance},
     machine,
 };
@@ -230,8 +231,9 @@ impl VmConfig {
             kernel: instance.kernel(),
             initrd: instance.initrd(),
             kernel_args: format!(
-                "{} {KERNEL_ARGS} systemd.hostname={}",
+                "{} {KERNEL_ARGS} {} systemd.hostname={}",
                 machine::CONSOLE_ARGS,
+                hypervisor::KERNEL_ARGS,
                 instance.name
             ),
             width: hardware.width,

@@ -19,6 +19,9 @@ use std::{
     thread,
 };
 
+/// The vCPUs order memory like x86 (`configure_vcpu`), which FEX in the guest relies on.
+pub const KERNEL_ARGS: &str = "varmint.tso=1";
+
 #[derive(Clone)]
 pub struct Vm(VirtualMachineInstance<GicEnabled>);
 
