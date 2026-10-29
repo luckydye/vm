@@ -3,6 +3,7 @@
 //! between the TLS session and one end of a socket pair, whose other end the
 //! server handles like a plain TCP connection.
 
+use crate::protocol;
 use rustls::{
     ServerConfig, ServerConnection,
     pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
@@ -41,6 +42,7 @@ pub fn wrap(
 ) -> io::Result<()> {
     let session = Mutex::new(ServerConnection::new(config).map_err(io::Error::other)?);
     let (plaintext, inner) = UnixStream::pair()?;
+    protocol::set_socket_option(&plaintext, libc::SOL_SOCKET, libc::SO_SNDBUF, protocol::STREAM_QUEUE_BYTES)?;
     let inner_writer = inner.try_clone()?;
     thread::scope(|scope| {
         let decrypted = scope.spawn(|| {

@@ -108,6 +108,9 @@ impl H264Encoder {
         for (name, value) in [
             ("fps", fps.to_string()),
             ("bitrate", bit_rate_kbit.to_string()),
+            // A fixed bit budget per frame, so sending fewer frames to a slow
+            // client also lowers the bitrate.
+            ("force-cfr", "1".into()),
             ("keyint", "infinite".into()),
             ("repeat-headers", "1".into()),
             ("annexb", "1".into()),

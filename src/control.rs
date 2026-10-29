@@ -100,17 +100,20 @@ fn handle(connection: UnixStream, context: &Context<'_>) -> io::Result<()> {
                 Err(error) => reply_error(&mut writer, error),
             }
         }
-        Request::Stream { fps, codec, audio } => match codec {
-            Codec::Rgb if audio => reply_error(&mut writer, "audio needs the h264 codec".to_owned()),
-            Codec::Rgb => {
-                protocol::write_json(&mut writer, &Reply::default())?;
-                stream(&mut writer, fps, context)
+        Request::Stream { fps, codec, audio } => {
+            protocol::set_socket_option(&writer, libc::SOL_SOCKET, libc::SO_SNDBUF, protocol::STREAM_QUEUE_BYTES)?;
+            match codec {
+                Codec::Rgb if audio => reply_error(&mut writer, "audio needs the h264 codec".to_owned()),
+                Codec::Rgb => {
+                    protocol::write_json(&mut writer, &Reply::default())?;
+                    stream(&mut writer, fps, context)
+                }
+                Codec::H264 => {
+                    protocol::write_json(&mut writer, &Reply::default())?;
+                    stream_h264(&writer, fps, audio, context)
+                }
             }
-            Codec::H264 => {
-                protocol::write_json(&mut writer, &Reply::default())?;
-                stream_h264(&writer, fps, audio, context)
-            }
-        },
+        }
         Request::InputStream => {
             protocol::write_json(&mut writer, &Reply::default())?;
             loop {

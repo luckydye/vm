@@ -8,7 +8,30 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     io::{self, BufRead, Read, Write},
+    os::fd::AsRawFd,
 };
+
+/// Bytes a screen stream may queue in each socket on its way to the client.
+/// Kept small so a slow client lowers the frame rate instead of falling
+/// seconds behind.
+pub const STREAM_QUEUE_BYTES: libc::c_int = 8 * 1024;
+
+/// Sets the integer socket option `name` at `level`.
+pub fn set_socket_option(socket: &impl AsRawFd, level: libc::c_int, name: libc::c_int, value: libc::c_int) -> io::Result<()> {
+    let result = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            level,
+            name,
+            (&raw const value).cast(),
+            size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
 
 pub mod kind {
     pub const OPEN: u8 = 1;

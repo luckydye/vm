@@ -205,6 +205,14 @@ pub fn serve(listener: TcpListener, token: &str, ui: bool, tls: Option<Arc<rustl
                     continue;
                 }
             };
+            // Streams wait for the client instead of filling the kernel's send buffer.
+            #[cfg(target_os = "linux")]
+            if let Err(error) =
+                protocol::set_socket_option(&connection, libc::IPPROTO_TCP, libc::TCP_NOTSENT_LOWAT, protocol::STREAM_QUEUE_BYTES)
+            {
+                emit("error", None, json!({ "message": format!("TCP_NOTSENT_LOWAT failed: {error}") }));
+                continue;
+            }
             let client = Client {
                 peer,
                 request_id: uuid::Uuid::new_v4().to_string(),
