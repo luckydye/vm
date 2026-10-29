@@ -60,6 +60,11 @@
     <div class="views" id="views">
       <div class="pane shell-pane">
         <div class="shell" id="shell"></div>
+        <div class="keys shell-keys" id="shell-keys">
+          <button class="key keyboard" aria-label="On-screen keyboard"></button>
+          <span class="key-group modifier-keys"></span>
+          <span class="key-group named-keys"></span>
+        </div>
         <p class="shell-status" id="shell-status"></p>
       </div>
       <div class="pane screen-pane">
@@ -80,12 +85,12 @@
           </div>
         </div>
         <div class="keys" id="keys">
-          <button class="key" id="keyboard" aria-label="On-screen keyboard">
+          <button class="key keyboard" id="keyboard" aria-label="On-screen keyboard">
             <svg viewBox="0 0 24 24"><rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M8 14h8"/></svg>
           </button>
           <input class="typing" id="typing" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="enter" aria-label="Type on the machine">
-          <span class="key-group" id="modifier-keys"></span>
-          <span class="key-group" id="named-keys"></span>
+          <span class="key-group modifier-keys"></span>
+          <span class="key-group named-keys"></span>
         </div>
       </div>
       <button class="shell-return" id="shell-return">
