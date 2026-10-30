@@ -1,72 +1,208 @@
-use serde::Deserialize;
+use crate::{
+    hypervisor,
+    instance::{self, Instance},
+    machine,
+};
+use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     env,
-    ffi::OsStr,
-    fs,
     path::{Path, PathBuf},
-    process::Command,
 };
 
-const DEFAULT_MEMORY_MIB: u64 = 16 * 1024;
-const DEFAULT_VCPUS: usize = 12;
-const DEFAULT_KERNEL_ARGS: &str = "console=ttyAMA0 earlycon=pl011,mmio32,0x09000000 root=LABEL=varmint-root rw";
+/// No device needs bounce buffers, so swiotlb would only pin 64 MiB of guest RAM.
+/// Free page reporting releases free blocks down to one 16 KiB host page (order 2)
+/// instead of 2 MiB, so fragmented free memory goes back to the host too.
+const KERNEL_ARGS: &str = "root=LABEL=varmint-root rw quiet loglevel=3 apparmor=0 \
+     systemd.condition-needs-update=0 swiotlb=noforce page_reporting.page_reporting_order=2";
 const MIB: u64 = 1024 * 1024;
-const GIB: u64 = 1024 * MIB;
+pub const GIB: u64 = 1024 * MIB;
 
-pub fn locate() -> Option<PathBuf> {
-    let mut arguments = env::args_os().skip(1);
-    let config = match arguments.next() {
-        Some(path) => PathBuf::from(path),
-        None => return choose_config(),
-    };
-    if let Some(argument) = arguments.next() {
-        panic!("unexpected argument: {}", argument.to_string_lossy());
+/// Virtual hardware of one VM, stored as `meta.json` in its directory.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Hardware {
+    pub persist: bool,
+    pub cpus: usize,
+    pub memory_mib: u64,
+    pub disk_gib: u64,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl Hardware {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.cpus == 0 {
+            return Err("cpus must be greater than zero".into());
+        }
+        if self.memory_mib < 256 {
+            return Err("memory must be at least 256 MiB".into());
+        }
+        if self.disk_gib == 0 {
+            return Err("disk must be at least 1 GiB".into());
+        }
+        if self.width < 320 || self.height < 200 {
+            return Err("display size must be at least 320x200".into());
+        }
+        Ok(())
     }
-    Some(config)
 }
 
-fn choose_config() -> Option<PathBuf> {
-    let output = Command::new("/usr/bin/osascript")
-        .arg("-e")
-        .arg("POSIX path of (choose file with prompt \"Choose a Varmint configuration\" of type {\"varmint\"})")
-        .output()
-        .unwrap_or_else(|error| panic!("failed to open configuration picker: {error}"));
+/// A host directory shared into the guest: `HOST:GUEST[:ro]`.
+#[derive(Debug, Clone)]
+pub struct Mount {
+    pub host: PathBuf,
+    pub guest: String,
+    pub readonly: bool,
+}
 
-    if !output.status.success() {
-        return None;
+impl Mount {
+    /// Relative guest paths are relative to the guest user's home.
+    pub fn parse(spec: &str) -> Result<Self, String> {
+        let (spec, readonly) = match spec.strip_suffix(":ro") {
+            Some(spec) => (spec, true),
+            None => (spec, false),
+        };
+        let (host, guest) = spec
+            .split_once(':')
+            .ok_or_else(|| format!("invalid mount {spec:?}; expected HOST:GUEST[:ro]"))?;
+        let host = Path::new(host)
+            .canonicalize()
+            .map_err(|error| format!("invalid mount source {host}: {error}"))?;
+        if !host.is_dir() {
+            return Err(format!("mount source {} is not a directory", host.display()));
+        }
+        if guest.is_empty() {
+            return Err(format!("invalid mount {spec:?}; the guest path is empty"));
+        }
+        let guest = match guest.starts_with('/') {
+            true => guest.to_owned(),
+            false => format!("/home/varmint/{guest}"),
+        };
+        Ok(Self { host, guest, readonly })
     }
 
-    let path = String::from_utf8(output.stdout)
-        .unwrap_or_else(|error| panic!("configuration path is not valid UTF-8: {error}"));
-    let path = path.trim_end_matches(['\r', '\n']);
-
-    (!path.is_empty()).then_some(PathBuf::from(path))
+    pub fn spec(&self) -> String {
+        let suffix = if self.readonly { ":ro" } else { "" };
+        format!("{}:{}{suffix}", self.host.display(), self.guest)
+    }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum NeptuneBackend {
-    #[default]
-    Dxmt,
-    D3dmetal,
-}
+/// The guest variables as a JSON object: from `varmint serve` to `varmint run`,
+/// and from `run` to the VM process. Unlike arguments, a process environment
+/// is not visible to other users in `ps`, and one variable keeps names chosen
+/// by a remote client out of the host processes' own environment.
+pub const GUEST_ENVIRONMENT_VARIABLE: &str = "VARMINT_GUEST_ENVIRONMENT";
 
-impl NeptuneBackend {
-    pub fn as_env(self) -> &'static str {
-        match self {
-            Self::Dxmt => "dxmt",
-            Self::D3dmetal => "d3dmetal",
+/// Variables copied into every VM from this process's environment when they
+/// are set, without `--env`: an agent's credentials.
+pub const PASSED_VARIABLES: [&str; 2] = ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"];
+
+/// Variables every guest session gets: each of PASSED_VARIABLES that is set,
+/// then those in GUEST_ENVIRONMENT_VARIABLE, then each `--env NAME` with its
+/// value from this process's environment.
+/// Values never come from arguments, where `ps` and shell history show them.
+pub fn guest_environment(names: &[String]) -> Result<BTreeMap<String, String>, String> {
+    // @deprecated ~/.varmint/env is no longer read; fail instead of silently
+    // starting VMs without the variables it holds.
+    let path = instance::home().join("env");
+    if path.exists() {
+        return Err(format!(
+            "{} is no longer read; export its variables in your shell, pass them with --env NAME and delete it",
+            path.display()
+        ));
+    }
+
+    let mut environment = BTreeMap::new();
+    for name in PASSED_VARIABLES {
+        match env::var(name) {
+            Ok(value) => {
+                environment.insert(name.to_owned(), value);
+            }
+            Err(env::VarError::NotPresent) => {}
+            Err(error) => return Err(format!("invalid {name}: {error}")),
         }
     }
+    match env::var(GUEST_ENVIRONMENT_VARIABLE) {
+        Ok(json) => environment.extend(
+            serde_json::from_str::<BTreeMap<String, String>>(&json)
+                .map_err(|error| format!("invalid {GUEST_ENVIRONMENT_VARIABLE}: {error}"))?,
+        ),
+        Err(env::VarError::NotPresent) => {}
+        Err(error) => return Err(format!("invalid {GUEST_ENVIRONMENT_VARIABLE}: {error}")),
+    }
+    for name in names {
+        if name.contains('=') {
+            return Err(format!("--env {name}: give the name only; the value comes from the environment"));
+        }
+        let value = env::var(name).map_err(|_| format!("--env {name}: {name} is not set here"))?;
+        environment.insert(name.clone(), value);
+    }
 
-    pub fn from_env(value: &str) -> Option<Self> {
-        match value {
-            "dxmt" => Some(Self::Dxmt),
-            "d3dmetal" => Some(Self::D3dmetal),
-            _ => None,
+    for (key, value) in &environment {
+        let valid_key = key.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !valid_key {
+            return Err(format!("invalid environment variable name {key:?}"));
+        }
+        if value.contains(['\n', '\0']) {
+            return Err(format!("the value of {key} must be a single line"));
         }
     }
+    Ok(environment)
+}
+
+/// A host file or directory copied into the guest at every start: `HOST:GUEST`.
+#[derive(Debug, Clone)]
+pub struct Seed {
+    pub host: PathBuf,
+    pub guest: String,
+}
+
+impl Seed {
+    /// A leading `~/` in HOST is the host home; relative GUEST paths are
+    /// relative to the guest user's home.
+    pub fn parse(spec: &str) -> Result<Self, String> {
+        let (host, guest) = spec
+            .split_once(':')
+            .ok_or_else(|| format!("invalid seed {spec:?}; expected HOST:GUEST"))?;
+        let host = match host.strip_prefix("~/") {
+            Some(rest) => PathBuf::from(env::var_os("HOME").expect("HOME is not set")).join(rest),
+            None => PathBuf::from(host),
+        };
+        let host = host
+            .canonicalize()
+            .map_err(|error| format!("invalid seed source {}: {error}", host.display()))?;
+        if guest.is_empty() {
+            return Err(format!("invalid seed {spec:?}; the guest path is empty"));
+        }
+        let guest = match guest.starts_with('/') {
+            true => guest.to_owned(),
+            false => format!("/home/varmint/{guest}"),
+        };
+        Ok(Self { host, guest })
+    }
+
+    pub fn spec(&self) -> String {
+        format!("{}:{}", self.host.display(), self.guest)
+    }
+}
+
+/// Seeds for this run: the `~/.varmint/seeds` directory, copied into the
+/// guest home, then `--seed` entries.
+pub fn seeds(overrides: &[String]) -> Result<Vec<Seed>, String> {
+    let path = instance::home().join("seeds");
+    let mut seeds = Vec::new();
+    if path.exists() {
+        if !path.is_dir() {
+            return Err(format!("{} must be a directory; its contents are copied into the guest home", path.display()));
+        }
+        seeds.push(Seed::parse(&format!("{}:/home/varmint", path.display()))?);
+    }
+    for spec in overrides {
+        seeds.push(Seed::parse(spec)?);
+    }
+    Ok(seeds)
 }
 
 #[derive(Debug, Clone)]
@@ -75,205 +211,69 @@ pub struct VmConfig {
     pub vcpus: usize,
     pub disk: PathBuf,
     pub disk_size: u64,
-    pub base_image: PathBuf,
     pub kernel: PathBuf,
-    pub initrd: Option<PathBuf>,
+    pub initrd: PathBuf,
     pub kernel_args: String,
-    pub neptune_backend: NeptuneBackend,
-    pub host_environment: BTreeMap<String, String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct VmConfigFile {
-    format_version: u32,
-    #[serde(default = "default_memory_mib")]
-    memory_mib: u64,
-    #[serde(default = "default_vcpus")]
-    vcpus: usize,
-    disk: PathBuf,
-    disk_size_gib: u64,
-    base_image: Option<PathBuf>,
-    kernel: Option<PathBuf>,
-    initrd: Option<PathBuf>,
-    kernel_args: Option<Vec<String>>,
-    #[serde(default)]
-    neptune_backend: NeptuneBackend,
-    #[serde(default)]
-    host_environment: BTreeMap<String, String>,
+    pub width: u32,
+    pub height: u32,
 }
 
 impl VmConfig {
-    pub fn load(path: &Path) -> Self {
-        let path = absolute_path(path);
-        let source = fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("failed to read VM config {}: {error}", path.display()));
-        let config: VmConfigFile = toml::from_str(&source)
-            .unwrap_or_else(|error| panic!("failed to parse VM config {}: {error}", path.display()));
-
-        if config.format_version != 1 {
-            panic!(
-                "unsupported VM config format_version {}; expected 1",
-                config.format_version
-            );
-        }
-        if config.vcpus == 0 {
-            panic!("vcpus must be greater than zero");
-        }
-        if config.memory_mib < 256 {
-            panic!("memory_mib must be at least 256");
-        }
-        if config.disk_size_gib == 0 {
-            panic!("disk_size_gib must be greater than zero");
-        }
-        if config.kernel.is_none() && config.initrd.is_some() {
-            panic!("initrd requires a custom kernel");
-        }
-
-        let base = path.parent().unwrap_or_else(|| Path::new("."));
-        let resources = bundle_resources();
-        let disk = resolve_path(base, config.disk);
-        let base_image = config
-            .base_image
-            .map(|path| resolve_path(base, path))
-            .unwrap_or_else(|| {
-                resource_path(
-                    resources.as_deref(),
-                    "runtime/base.raw.zst",
-                    "build/guest/varmint-debian.raw.zst",
-                )
-            });
-        let memory_size = bytes_from_units(config.memory_mib, MIB, "memory_mib");
-        let disk_size = config
-            .disk_size_gib
-            .checked_mul(GIB)
-            .unwrap_or_else(|| panic!("disk_size_gib is too large"));
-
-        let (kernel, initrd) = match config.kernel {
-            Some(kernel) => (
-                resolve_path(base, kernel),
-                config.initrd.map(|initrd| resolve_path(base, initrd)),
-            ),
-            None => {
-                let source_kernel = resource_path(resources.as_deref(), "kernel/Image", "build/guest/Image");
-                let source_initrd = resource_path(resources.as_deref(), "kernel/initrd", "build/guest/initrd");
-
-                let disk_name = disk.file_name().and_then(|name| name.to_str()).unwrap_or("disk");
-                let boot_dir = disk
-                    .parent()
-                    .unwrap_or_else(|| Path::new("."))
-                    .join(format!("{disk_name}.boot"));
-                let kernel = boot_dir.join("Image");
-                let initrd = boot_dir.join("initrd");
-
-                snapshot_file(&source_kernel, &kernel, "kernel");
-                snapshot_file(&source_initrd, &initrd, "initrd");
-
-                (kernel, Some(initrd))
-            }
-        };
-
-        let kernel_args = config
-            .kernel_args
-            .map(|args| args.join(" "))
-            .unwrap_or_else(|| DEFAULT_KERNEL_ARGS.to_owned());
+    pub fn new(instance: &Instance, hardware: &Hardware) -> Self {
+        let memory_size = usize::try_from(hardware.memory_mib.checked_mul(MIB).expect("memory is too large"))
+            .expect("memory is too large for this host");
 
         Self {
             memory_size,
-            vcpus: config.vcpus,
-            disk,
-            disk_size,
-            base_image,
-            kernel,
-            initrd,
-            kernel_args,
-            neptune_backend: config.neptune_backend,
-            host_environment: config.host_environment,
+            vcpus: hardware.cpus,
+            disk: instance.disk(),
+            disk_size: hardware.disk_gib.checked_mul(GIB).expect("disk is too large"),
+            kernel: instance.kernel(),
+            initrd: instance.initrd(),
+            kernel_args: format!(
+                "{} {KERNEL_ARGS} {} systemd.hostname={}",
+                machine::CONSOLE_ARGS,
+                hypervisor::KERNEL_ARGS,
+                instance.name
+            ),
+            width: hardware.width,
+            height: hardware.height,
         }
     }
 }
 
-fn default_memory_mib() -> u64 {
-    DEFAULT_MEMORY_MIB
+pub struct Resources {
+    pub base_image: PathBuf,
+    pub kernel: PathBuf,
+    pub initrd: PathBuf,
 }
 
-fn default_vcpus() -> usize {
-    DEFAULT_VCPUS
-}
-
-fn bytes_from_units(value: u64, unit: u64, name: &str) -> usize {
-    let bytes = value.checked_mul(unit).unwrap_or_else(|| panic!("{name} is too large"));
-    usize::try_from(bytes).unwrap_or_else(|_| panic!("{name} is too large for this host"))
-}
-
-fn absolute_path(path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        return path.to_owned();
-    }
-
-    env::current_dir()
-        .unwrap_or_else(|error| panic!("failed to resolve current directory: {error}"))
-        .join(path)
-}
-
-fn resolve_path(base: &Path, path: PathBuf) -> PathBuf {
-    if path.is_absolute() { path } else { base.join(path) }
-}
-
-fn snapshot_file(source: &Path, destination: &Path, name: &str) {
-    if destination.exists() {
-        return;
-    }
-
-    let parent = destination.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent)
-        .unwrap_or_else(|error| panic!("failed to create per-VM boot directory {}: {error}", parent.display()));
-
-    let temporary = parent.join(format!(
-        ".{}.partial.{}",
-        destination.file_name().and_then(|name| name.to_str()).unwrap_or(name),
-        std::process::id()
-    ));
-
-    let _ = fs::remove_file(&temporary);
-    fs::copy(source, &temporary).unwrap_or_else(|error| {
-        panic!(
-            "failed to snapshot {name} {} to {}: {error}",
-            source.display(),
-            temporary.display()
-        )
-    });
-
-    match fs::rename(&temporary, destination) {
-        Ok(()) => {
-            eprintln!(
-                "snapshotted VM {name} {} from {}",
-                destination.display(),
-                source.display()
-            );
-        }
-        Err(error) if destination.exists() => {
-            let _ = fs::remove_file(&temporary);
-        }
-        Err(error) => {
-            let _ = fs::remove_file(&temporary);
-            panic!("failed to install per-VM {name} {}: {error}", destination.display());
+impl Resources {
+    pub fn locate() -> Self {
+        let resources = runtime_dir().map(|runtime| runtime.join("Resources"));
+        Self {
+            base_image: resource_path(
+                resources.as_deref(),
+                "runtime/base.raw.zst",
+                "build/guest/varmint-debian.raw.zst",
+            ),
+            kernel: resource_path(resources.as_deref(), "kernel/Image", "build/guest/Image"),
+            initrd: resource_path(resources.as_deref(), "kernel/initrd", "build/guest/initrd"),
         }
     }
 }
 
-fn bundle_resources() -> Option<PathBuf> {
-    let executable = env::current_exe().ok()?;
-    let macos = executable.parent()?;
-    if macos.file_name()? != OsStr::new("MacOS") {
-        return None;
-    }
-
-    Some(macos.parent()?.join("Resources"))
+/// Directory holding `Helpers/`, `Frameworks/` and `Resources/`:
+/// `PREFIX/share/varmint` for `PREFIX/bin/varmint`. `None` for development
+/// builds run from the cargo target directory.
+pub fn runtime_dir() -> Option<PathBuf> {
+    let executable = env::current_exe().ok()?.canonicalize().ok()?;
+    let share = executable.parent()?.parent()?.join("share/varmint");
+    share.is_dir().then_some(share)
 }
 
 fn resource_path(resources: Option<&Path>, bundled_name: &str, development_path: &str) -> PathBuf {
     resources
         .map(|resources| resources.join(bundled_name))
-        .unwrap_or_else(|| PathBuf::from(development_path))
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join(development_path))
 }

@@ -2,10 +2,24 @@
 set -eu
 
 export DEBIAN_FRONTEND=noninteractive
+arch=$(dpkg --print-architecture)
 
 cat > /etc/apt/apt.conf.d/80-varmint-retries <<'EOF_APT'
 Acquire::Retries "3";
 EOF_APT
+
+# Like Debian's slim container images, packages install without docs, man
+# pages and translations; the cloud image's own are removed at the end.
+cat > /etc/dpkg/dpkg.cfg.d/80-varmint-nodoc <<'EOF_DPKG'
+path-exclude /usr/share/doc/*
+path-include /usr/share/doc/*/copyright
+path-exclude /usr/share/groff/*
+path-exclude /usr/share/info/*
+path-exclude /usr/share/linda/*
+path-exclude /usr/share/lintian/*
+path-exclude /usr/share/locale/*
+path-exclude /usr/share/man/*
+EOF_DPKG
 
 cat > /etc/apt/sources.list.d/varmint-backports.sources <<'EOF_BACKPORTS'
 Types: deb
@@ -16,25 +30,34 @@ Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
 EOF_BACKPORTS
 
 apt-get update
+# Ephemeral VMs are never upgraded in place.
 apt-get purge -y \
     pipewire-alsa \
     pipewire-audio \
     pipewire-pulse \
+    unattended-upgrades \
     wireplumber
 
 apt-get install -y --no-install-recommends \
+    aardvark-dns \
     adwaita-icon-theme \
+    build-essential \
     ca-certificates \
+    catatonit \
+    chromium \
     cloud-guest-utils \
     curl \
     dbus-user-session \
     e2fsprogs \
     fonts-dejavu-core \
     fonts-liberation \
+    foot \
+    fuzzel \
     gdisk \
+    git \
+    greetd \
+    grim \
     librsvg2-common \
-    lightdm \
-    lightdm-gtk-greeter \
     libasound2-plugins \
     libasound2t64 \
     libdrm2 \
@@ -52,31 +75,46 @@ apt-get install -y --no-install-recommends \
     libxxhash0 \
     mesa-utils \
     openssh-server \
-    avahi-daemon \
-    pavucontrol \
+    passt \
+    pkg-config \
+    podman \
+    podman-compose \
     pulseaudio \
     pulseaudio-utils \
     python3 \
     rtkit \
     squashfs-tools \
     sudo \
-    systemd-timesyncd \
+    tmux \
+    uidmap \
     vulkan-tools \
-    x11-xserver-utils \
-    xclip \
-    xdg-user-dirs \
-    xfce4 \
-    xfce4-power-manager \
-    xfce4-terminal \
-    xserver-xorg \
-    xserver-xorg-input-libinput
+    wl-clipboard \
+    xwayland
 
+# mise manages per-project tool versions (node, python, ...).
+install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://mise.jdx.dev/gpg-key.pub -o /etc/apt/keyrings/mise-archive-keyring.asc
+cat > /etc/apt/sources.list.d/mise.sources <<'EOF_MISE'
+Types: deb
+URIs: https://mise.jdx.dev/deb
+Suites: stable
+Components: main
+Signed-By: /etc/apt/keyrings/mise-archive-keyring.asc
+EOF_MISE
+
+apt-get update
+apt-get install -y --no-install-recommends mise
+
+# Hyprland comes patched from guest/Dockerfile (patches/hyprland).
 apt-get install -y --no-install-recommends -t trixie-backports \
+    /tmp/hyprland-debs/hyprland_*.deb \
+    hyprland-guiutils \
     libegl-mesa0 \
     libgbm1 \
     libgl1-mesa-dri \
     libglx-mesa0 \
     mesa-vulkan-drivers
+rm -rf /tmp/hyprland-debs
 
 # The stock cloud initramfs may not contain fsck even though e2fsprogs is
 # installed in the root filesystem. Rebuild it with the Varmint hook so a
@@ -84,6 +122,11 @@ apt-get install -y --no-install-recommends -t trixie-backports \
 command -v fsck >/dev/null 2>&1
 command -v e2fsck >/dev/null 2>&1
 command -v update-initramfs >/dev/null 2>&1
+# x86-64 guests find their virtio-mmio devices on the kernel command line,
+# which only the virtio_mmio module reads; nothing else loads it.
+if [ "$arch" = amd64 ]; then
+    echo virtio_mmio >> /etc/initramfs-tools/modules
+fi
 update-initramfs -u -k all
 
 # Keep PulseAudio's udev-managed ALSA card lifecycle, but disable timer-based
@@ -111,55 +154,194 @@ grep -Fx \
 grep -Fx 'default-fragments = 4' /etc/pulse/daemon.conf >/dev/null
 grep -Fx 'default-fragment-size-msec = 10' /etc/pulse/daemon.conf >/dev/null
 
-install -d -m 0755 /etc/X11/xorg.conf.d
-cat > /etc/X11/xorg.conf.d/20-varmint-cursor.conf <<'EOF_XORG'
-Section "Device"
-    Identifier "Varmint GPU"
-    Driver "modesetting"
-    Option "SWCursor" "true"
-EndSection
-EOF_XORG
+# Every VM boots straight into the desktop of a fixed user. Access control
+# happens on the host: shells and SSH only reach the guest through the agent.
+useradd --create-home --shell /bin/bash varmint
+passwd -d varmint
+for group in sudo audio video render input; do
+    getent group "$group" >/dev/null && usermod -aG "$group" varmint
+done
 
-install -d -m 0755 /usr/local/libexec
-cat > /usr/local/libexec/varmint-greeter-wrapper <<'EOF_GREETER'
-#!/bin/sh
+# Install the tools from /etc/mise/config.toml (guest/mise.toml).
+runuser -l varmint -c 'mise install'
 
-scale=1
-if [ -r /etc/varmint/ui-scale ]; then
-    IFS= read -r configured_scale < /etc/varmint/ui-scale || true
-    case "$configured_scale" in
-        1|2) scale=$configured_scale ;;
-    esac
+# Claude Code skips its first-run theme picker and trusts everything in the
+# home directory, so every VM starts straight into a session. The VM is the
+# sandbox, so Claude Code runs without permission prompts.
+sudo -H -u varmint sh -c 'cat > ~/.claude.json' <<'EOF_CLAUDE'
+{
+  "hasCompletedOnboarding": true,
+  "theme": "dark",
+  "projects": {
+    "/home/varmint": {
+      "hasTrustDialogAccepted": true
+    }
+  }
+}
+EOF_CLAUDE
+sudo -H -u varmint sh -c 'mkdir -p ~/.claude && cat > ~/.claude/settings.json' <<'EOF_CLAUDE_SETTINGS'
+{
+  "permissions": {
+    "defaultMode": "bypassPermissions"
+  },
+  "skipDangerousModePermissionPrompt": true
+}
+EOF_CLAUDE_SETTINGS
+sudo -H -u varmint sh -c 'cat > ~/.claude/CLAUDE.md' <<'EOF_CLAUDE_MD'
+# Environment
+You run in a disposable Debian VM made by varmint on the user's computer.
+Nothing you do here can harm the host, so act without asking for permission.
+
+- The user can see the VM's screen: a Hyprland (Wayland) desktop. Programs
+  you start, like `chromium` or `foot`, open windows there, so you can show
+  the user things on screen. X11 programs run through Xwayland.
+- You can see the screen too: `grim /tmp/screen.png` takes a screenshot,
+  which you can then read. Look at it to check what you put on screen.
+- Use the screen to show the user the status of a task, or anything else
+  that is easier to follow there than in the terminal, when it helps them.
+- You are the user `varmint` with passwordless `sudo`. Install system
+  packages with `sudo apt-get install`, and tools with `mise`.
+- `wl-copy` and `wl-paste` use the guest clipboard; screenshots the user
+  pastes into you come through it.
+- Your credentials stay on the host: you cannot push. Commit your work to
+  branches in the repository; the user fetches them from the host and
+  reviews and pushes them there.
+EOF_CLAUDE_MD
+if [ "$arch" = arm64 ]; then
+    sudo -H -u varmint sh -c 'echo "- x86-64 binaries run through FEX (\`FEX\`, \`FEXBash\`)." >> ~/.claude/CLAUDE.md'
 fi
 
-export GDK_SCALE="$scale"
-export XCURSOR_SIZE="$((24 * scale))"
+cat > /etc/sudoers.d/varmint <<'EOF_SUDO'
+varmint ALL=(ALL) NOPASSWD:ALL
+EOF_SUDO
+chmod 0440 /etc/sudoers.d/varmint
 
-exec "$@"
-EOF_GREETER
-chmod 0755 /usr/local/libexec/varmint-greeter-wrapper
+# greetd logs in once per boot with the initial session and starts Hyprland
+# as the default session whenever that one ends. The session owns tty1, so no
+# getty may start there: it hangs up the terminal and ends the session.
+systemctl mask getty@tty1.service
+cat > /etc/greetd/config.toml <<'EOF_GREETD'
+[terminal]
+vt = 1
 
-install -d -m 0755 /etc/lightdm/lightdm.conf.d
-cat > /etc/lightdm/lightdm.conf.d/50-varmint.conf <<'EOF_LIGHTDM'
-[Seat:*]
-greeter-session=lightdm-gtk-greeter
-greeter-wrapper=/usr/local/libexec/varmint-greeter-wrapper
-user-session=xfce
-EOF_LIGHTDM
+[default_session]
+command = "start-hyprland"
+user = "varmint"
 
-install -d -m 0755 /etc/sysctl.d
-cat > /etc/sysctl.d/60-varmint-gaming.conf <<'EOF_SYSCTL'
-vm.overcommit_memory = 1
-EOF_SYSCTL
+[initial_session]
+command = "start-hyprland"
+user = "varmint"
+EOF_GREETD
+
+# On arm64, FEX runs x86-64 binaries. Its rootfs is downloaded on first use by the FEX,
+# FEXBash and FEXRootFSFetcher wrappers in /usr/local/bin (guest/varmint-fex).
+if [ "$arch" = arm64 ]; then
+    sudo -H -u varmint sh -c 'mkdir -p ~/.config/fex-emu && cat > ~/.config/fex-emu/Config.json' <<'EOF_FEX'
+{
+  "Config": {
+    "RootFS": "Ubuntu_24_04",
+    "DiskCache": "0",
+    "TSOEnabled": "0",
+    "VectorTSOEnabled": "0",
+    "MemcpySetTSOEnabled": "0",
+    "HalfBarrierTSOEnabled": "1",
+    "X87ReducedPrecision": "1"
+  },
+  "ThunksDB": {
+    "Vulkan": 1
+  }
+}
+EOF_FEX
+    # Hypervisor.framework gives the VM x86-like memory ordering and says so
+    # with varmint.tso=1; on other hosts FEX must order memory itself.
+    cat > /usr/local/libexec/varmint-fex-tso <<'EOF_FEX_TSO'
+#!/bin/sh
+set -eu
+if grep -qw varmint.tso=1 /proc/cmdline; then tso=0; else tso=1; fi
+sed -i "s/\"TSOEnabled\": \"[01]\"/\"TSOEnabled\": \"$tso\"/" /home/varmint/.config/fex-emu/Config.json
+EOF_FEX_TSO
+    chmod 0755 /usr/local/libexec/varmint-fex-tso
+    cat > /etc/systemd/system/varmint-fex-tso.service <<'EOF_FEX_TSO'
+[Unit]
+Description=Match FEX memory ordering to the host CPU
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/varmint-fex-tso
+
+[Install]
+WantedBy=multi-user.target
+EOF_FEX_TSO
+    systemctl enable varmint-fex-tso.service
+fi
+
+# The web UI's shells attach to one shared tmux session, which outlives the
+# browser. tmux then owns scrollback, so the mouse wheel must reach it, and
+# Claude Code needs extended keys for Shift+Enter. The page has its own status.
+cat > /etc/tmux.conf <<'EOF_TMUX'
+set -g mouse on
+set -g status off
+set -g history-limit 50000
+set -g window-size latest
+set -g extended-keys on
+set -as terminal-features 'xterm*:extkeys:RGB'
+EOF_TMUX
+
+# Login shells (bash -l, ssh commands) reset PATH in /etc/profile; the shims
+# keep tools installed with `mise use -g` available there too.
+cat > /etc/profile.d/mise.sh <<'EOF_PROFILE'
+export PATH="$HOME/.local/share/mise/shims:$PATH"
+EOF_PROFILE
+
+cat >> /etc/bash.bashrc <<'EOF_BASHRC'
+
+# Variables from varmint run --env and varmint serve.
+if [ -r /run/varmint/environment ]; then
+    while IFS='=' read -r __varmint_key __varmint_value; do
+        export "$__varmint_key=$__varmint_value"
+    done < /run/varmint/environment
+    unset __varmint_key __varmint_value
+fi
+
+eval "$(mise activate bash)"
+
+# varmint telemetry: PS0 stamps the start of every command line, the prompt
+# hook logs it with its duration and exit status. It runs first in
+# PROMPT_COMMAND so $? is still the command's status.
+PS0='${PS0:0:$((__varmint_started=${EPOCHREALTIME/./},0))}'"$PS0"
+__varmint_log_command() {
+    local status=$?
+    if [ -n "$__varmint_started" ] && [ -w /run/varmint/shell.log ]; then
+        local line
+        line=$(HISTTIMEFORMAT='' builtin history 1)
+        line=${line#*[0-9]  }
+        printf '%s\t%s\t%s\t%s\n' "$__varmint_started" "${EPOCHREALTIME/./}" "$status" "${line//$'\n'/ }" >> /run/varmint/shell.log
+    fi
+    __varmint_started=
+    return $status
+}
+PROMPT_COMMAND="__varmint_log_command${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
+EOF_BASHRC
+
+# Chromium only uses the virtual GPU through ANGLE on Vulkan (Venus): the
+# virgl OpenGL path offers GL 2.1 / ES 3.0, too little for Chromium. WebGPU
+# stays off: Chromium needs OPAQUE_FD semaphores, which Venus lacks.
+install -d -m 0755 /etc/chromium.d
+cat > /etc/chromium.d/varmint-gpu <<'EOF_CHROMIUM'
+export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --use-angle=vulkan --enable-features=Vulkan,VulkanFromANGLE,DefaultANGLEVulkan --ignore-gpu-blocklist"
+EOF_CHROMIUM
 
 install -d -m 0755 /etc/udev/rules.d
 cat > /etc/udev/rules.d/70-varmint-clipboard.rules <<'EOF_UDEV'
 SUBSYSTEM=="virtio-ports", ATTR{name}=="clipboard", MODE="0660", TAG+="uaccess"
 EOF_UDEV
+cat > /etc/udev/rules.d/70-varmint-agent.rules <<'EOF_UDEV'
+SUBSYSTEM=="virtio-ports", ATTR{name}=="agent", TAG+="systemd", ENV{SYSTEMD_WANTS}+="varmint-agent.service"
+EOF_UDEV
 
 # Host keys are deliberately removed from the published image so cloned VMs do
 # not share an SSH identity. Generate them immediately before sshd validates its
-# configuration, independently of the interactive first-boot provisioning.
+# configuration.
 install -d -m 0755 /etc/systemd/system/ssh.service.d
 cat > /etc/systemd/system/ssh.service.d/varmint-hostkeys.conf <<'EOF_SSH'
 [Service]
@@ -168,11 +350,42 @@ ExecStartPre=/usr/bin/ssh-keygen -A
 ExecStartPre=/usr/sbin/sshd -t
 EOF_SSH
 
-systemctl enable openssh-server.service >/dev/null 2>&1 || true
-systemctl enable avahi-daemon.service >/dev/null 2>&1 || true
-systemctl enable systemd-timesyncd.service >/dev/null 2>&1 || true
-systemctl disable lightdm.service >/dev/null 2>&1 || true
-systemctl set-default multi-user.target
+# Duplicate address detection holds back the IPv6 link-local address, and
+# with it network-online (varmint run --wait-network), for about 2 s. Each VM
+# derives its link-local address from its own MAC, so the check is skipped.
+# The glob applies it to each interface as udev adds it.
+cat > /etc/sysctl.d/80-varmint-nodad.conf <<'EOF_SYSCTL'
+net.ipv6.conf.*.accept_dad = 0
+EOF_SYSCTL
+
+# ssh sessions get the host-provided variables too; optional, so a VM that
+# has not received any yet still accepts logins.
+printf 'session optional pam_env.so envfile=/run/varmint/environment\n' >> /etc/pam.d/sshd
+
+systemctl enable ssh.service
+systemctl enable greetd.service
+systemctl set-default graphical.target
+
+# Boot time: the host sets the clock through the agent, and nothing may wait
+# for the network or run maintenance during boot.
+for unit in \
+    apt-daily.timer \
+    apt-daily-upgrade.timer \
+    dpkg-db-backup.timer \
+    e2scrub_all.timer \
+    e2scrub_reap.service \
+    fstrim.timer \
+    man-db.timer \
+    systemd-networkd-wait-online.service \
+    ifupdown-wait-online.service \
+    NetworkManager-wait-online.service \
+    systemd-time-wait-sync.service \
+    systemd-timesyncd.service; do
+    systemctl mask "$unit"
+done
 
 apt-get clean
 rm -rf /var/lib/apt/lists/*
+find /usr/share/doc -mindepth 1 -not -name copyright -not -type d -delete
+find /usr/share/doc -mindepth 1 -type d -empty -delete
+rm -rf /usr/share/groff/* /usr/share/info/* /usr/share/linda/* /usr/share/lintian/* /usr/share/locale/* /usr/share/man/*

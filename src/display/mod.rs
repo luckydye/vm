@@ -1,16 +1,46 @@
+#[cfg(target_os = "macos")]
 mod angle;
+mod capture;
+#[cfg(target_os = "macos")]
 mod iosurface;
+#[cfg(target_os = "macos")]
+mod presenter;
+#[cfg(target_os = "linux")]
+#[path = "softbuffer.rs"]
 mod presenter;
 mod scanout;
 mod stats;
+#[cfg(target_os = "macos")]
+mod video;
+#[cfg(target_os = "linux")]
+#[path = "x264.rs"]
+mod video;
 
+pub use capture::Capture;
 pub use presenter::{PresentMode, Presenter};
 pub use scanout::ScanoutPublisher;
+pub use video::H264Encoder;
+use winit::event_loop::EventLoopProxy;
 use zerocopy::IntoBytes;
 
 #[derive(Clone, Copy)]
 pub enum DisplayEvent {
     Changed,
+}
+
+/// Tells the window about new frames. Headless VMs have nobody to tell.
+#[derive(Clone)]
+pub enum DisplayNotifier {
+    Window(EventLoopProxy<DisplayEvent>),
+    Headless,
+}
+
+impl DisplayNotifier {
+    pub fn notify(&self) {
+        if let Self::Window(proxy) = self {
+            let _ = proxy.send_event(DisplayEvent::Changed);
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -48,6 +78,35 @@ impl DisplayBuffer {
             iosurface_id: None,
             sequence: 0,
         }
+    }
+
+    /// Changes whenever the guest presents a new frame.
+    pub fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    pub fn size(&self) -> (usize, usize) {
+        (self.width, self.height)
+    }
+
+    /// Returns `None` until the guest has configured a scanout.
+    pub fn capture(&self) -> Option<Capture> {
+        if self.width == 0 || self.height == 0 {
+            return None;
+        }
+        Some(match self.iosurface_id {
+            #[cfg(target_os = "macos")]
+            Some(id) => Capture::IOSurface {
+                id,
+                width: self.width,
+                height: self.height,
+            },
+            _ => Capture::Pixels {
+                pixels: self.pixels.clone(),
+                width: self.width,
+                height: self.height,
+            },
+        })
     }
 
     fn resize(&mut self, width: usize, height: usize) {
@@ -89,6 +148,7 @@ impl DisplayBuffer {
         true
     }
 
+    #[cfg(target_os = "macos")]
     fn publish_iosurface(&mut self, iosurface_id: u32, source: Rect, damage: Rect) -> bool {
         let Some(dirty_rect) = self.clip_damage(source, damage) else {
             return false;

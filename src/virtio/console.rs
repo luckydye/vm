@@ -1,5 +1,5 @@
 use crate::{
-    clipboard,
+    agent, clipboard,
     memory::GuestMemory,
     virtio::{
         chain::ChainData,
@@ -22,11 +22,15 @@ const Q_CONTROL_RX: usize = 2;
 const Q_CONTROL_TX: usize = 3;
 const Q_CLIP_RX: usize = 4;
 const Q_CLIP_TX: usize = 5;
+const Q_AGENT_RX: usize = 6;
+const Q_AGENT_TX: usize = 7;
 
-const NUM_QUEUES: u16 = 6;
+const NUM_QUEUES: u16 = 8;
 
 const CLIP_PORT: u32 = 1;
-const PORT_NAME: &[u8] = b"clipboard";
+const AGENT_PORT: u32 = 2;
+const CLIP_PORT_NAME: &[u8] = b"clipboard";
+const AGENT_PORT_NAME: &[u8] = b"agent";
 
 #[derive(IntoBytes, FromBytes, Immutable)]
 #[repr(C, packed)]
@@ -40,7 +44,7 @@ struct ConsoleConfig {
 impl ConsoleConfig {
     fn new() -> ConsoleConfig {
         let mut c = ConsoleConfig::new_zeroed();
-        c.max_nr_ports = 2;
+        c.max_nr_ports = 3;
         c
     }
 }
@@ -67,20 +71,25 @@ const RX_CHUNK: usize = 4096;
 
 pub struct Console {
     config: ConsoleConfig,
-    clipboard: clipboard::Sink,
-    rx_to_guest: VecDeque<Vec<u8>>,
+    clipboard: Option<clipboard::Sink>,
+    agent: agent::Sink,
+    clip_to_guest: VecDeque<Vec<u8>>,
+    agent_to_guest: VecDeque<Vec<u8>>,
     ctrl_to_guest: VecDeque<Vec<u8>>,
-    port_open: bool,
+    clip_open: bool,
 }
 
 impl Console {
-    pub fn new(clipboard: clipboard::Sink) -> Console {
+    /// Without a clipboard sink the clipboard port exists but stays unsynchronized.
+    pub fn new(clipboard: Option<clipboard::Sink>, agent: agent::Sink) -> Console {
         Console {
             config: ConsoleConfig::new(),
             clipboard,
-            rx_to_guest: VecDeque::new(),
+            agent,
+            clip_to_guest: VecDeque::new(),
+            agent_to_guest: VecDeque::new(),
             ctrl_to_guest: VecDeque::new(),
-            port_open: false,
+            clip_open: false,
         }
     }
 
@@ -107,43 +116,52 @@ impl Console {
         match event {
             ctrl_event::DEVICE_READY => {
                 self.queue_control(CLIP_PORT, ctrl_event::DEVICE_ADD, 0);
+                self.queue_control(AGENT_PORT, ctrl_event::DEVICE_ADD, 0);
             }
             ctrl_event::PORT_READY => {
-                if id == CLIP_PORT {
-                    self.queue_control(CLIP_PORT, ctrl_event::CONSOLE_PORT, 0);
-                    self.queue_control_with_name(CLIP_PORT, ctrl_event::PORT_NAME, 1, PORT_NAME);
-                    self.queue_control(CLIP_PORT, ctrl_event::PORT_OPEN, 1);
-                }
+                let name = match id {
+                    CLIP_PORT => CLIP_PORT_NAME,
+                    AGENT_PORT => AGENT_PORT_NAME,
+                    _ => return,
+                };
+                self.queue_control(id, ctrl_event::CONSOLE_PORT, 0);
+                self.queue_control_with_name(id, ctrl_event::PORT_NAME, 1, name);
+                self.queue_control(id, ctrl_event::PORT_OPEN, 1);
             }
             ctrl_event::PORT_OPEN => {
                 if id == CLIP_PORT {
-                    self.port_open = value != 0;
+                    self.clip_open = value != 0;
                 }
             }
             _ => {}
         }
     }
 
-    fn handle_clip_tx(&self, chain: &ChainData, mem: &GuestMemory) -> u32 {
+    fn read_tx(chain: &ChainData, mem: &GuestMemory) -> Option<Vec<u8>> {
         let total = chain.readable_len();
         if total == 0 {
-            return 0;
+            return None;
         }
         let mut buf = vec![0u8; total];
         if chain.read_at(0, &mut buf, mem).is_none() {
-            eprintln!("console clip TX: failed to read {total} bytes from guest memory");
-            return 0;
+            eprintln!("console TX: failed to read {total} bytes from guest memory");
+            return None;
         }
-        self.clipboard.push(buf);
-        0
+        Some(buf)
     }
 
-    fn enqueue_rx(&mut self, payload: &[u8]) {
+    fn enqueue_clip_rx(&mut self, payload: &[u8]) {
         let mut framed = Vec::with_capacity(FRAME_LEN_PREFIX + payload.len());
         framed.extend_from_slice(&(payload.len() as u32).to_le_bytes());
         framed.extend_from_slice(payload);
         for chunk in framed.chunks(RX_CHUNK) {
-            self.rx_to_guest.push_back(chunk.to_vec());
+            self.clip_to_guest.push_back(chunk.to_vec());
+        }
+    }
+
+    fn enqueue_agent_rx(&mut self, bytes: &[u8]) {
+        for chunk in bytes.chunks(RX_CHUNK) {
+            self.agent_to_guest.push_back(chunk.to_vec());
         }
     }
 
@@ -156,12 +174,12 @@ impl Console {
         }
     }
 
-    fn pump_clip_rx(&mut self, ctx: &mut DeviceContext<'_>) {
-        while let Some(chunk) = self.rx_to_guest.front() {
-            if !ctx.deliver(Q_CLIP_RX, &[chunk]) {
+    fn pump_rx(queue: &mut VecDeque<Vec<u8>>, queue_idx: usize, ctx: &mut DeviceContext<'_>) {
+        while let Some(chunk) = queue.front() {
+            if !ctx.deliver(queue_idx, &[chunk]) {
                 break;
             }
-            self.rx_to_guest.pop_front();
+            queue.pop_front();
         }
     }
 
@@ -207,11 +225,22 @@ impl Device for Console {
                 }
                 self.pump_control_rx(ctx);
             }
-            Q_CLIP_RX => self.pump_clip_rx(ctx),
+            Q_CLIP_RX => Self::pump_rx(&mut self.clip_to_guest, Q_CLIP_RX, ctx),
             Q_CLIP_TX => {
                 while let Some(chain) = ctx.pop_chain(queue_idx) {
-                    let written = self.handle_clip_tx(&chain.data, ctx.mem());
-                    ctx.complete(chain.token, written);
+                    if let (Some(bytes), Some(clipboard)) = (Self::read_tx(&chain.data, ctx.mem()), &self.clipboard) {
+                        clipboard.push(bytes);
+                    }
+                    ctx.complete(chain.token, 0);
+                }
+            }
+            Q_AGENT_RX => Self::pump_rx(&mut self.agent_to_guest, Q_AGENT_RX, ctx),
+            Q_AGENT_TX => {
+                while let Some(chain) = ctx.pop_chain(queue_idx) {
+                    if let Some(bytes) = Self::read_tx(&chain.data, ctx.mem()) {
+                        self.agent.push(bytes);
+                    }
+                    ctx.complete(chain.token, 0);
                 }
             }
             _ => {}
@@ -219,14 +248,16 @@ impl Device for Console {
     }
 
     fn reset(&mut self) {
-        self.rx_to_guest.clear();
+        self.clip_to_guest.clear();
+        self.agent_to_guest.clear();
         self.ctrl_to_guest.clear();
-        self.port_open = false;
+        self.clip_open = false;
     }
 }
 
 pub enum ExternalEvent<'a> {
     HostClipboard(&'a [u8]),
+    Agent(&'a [u8]),
 }
 
 impl ExternalEventHandler for Console {
@@ -235,12 +266,15 @@ impl ExternalEventHandler for Console {
     fn on_event(&mut self, event: ExternalEvent<'_>, ctx: &mut DeviceContext<'_>) {
         match event {
             ExternalEvent::HostClipboard(payload) => {
-                if self.port_open {
-                    self.enqueue_rx(payload);
+                if self.clip_open {
+                    self.enqueue_clip_rx(payload);
                 }
+                Self::pump_rx(&mut self.clip_to_guest, Q_CLIP_RX, ctx);
+            }
+            ExternalEvent::Agent(bytes) => {
+                self.enqueue_agent_rx(bytes);
+                Self::pump_rx(&mut self.agent_to_guest, Q_AGENT_RX, ctx);
             }
         }
-
-        self.pump_clip_rx(ctx);
     }
 }

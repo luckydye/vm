@@ -1,0 +1,18 @@
+#!/bin/sh
+# Keeps the display at the mode the host prefers, which follows the size of
+# the window or terminal showing the VM. Hyprland reads the modes of a display
+# only once, so the preferred size from sysfs becomes a custom mode, at the
+# refresh rate Hyprland started with. Every line from udevadm, including the
+# banner it prints once it listens, triggers a fit, so no change is missed.
+# Each size is applied once, so repeated events do not repeat the modeset.
+modes=/sys/class/drm/card0-Virtual-1/modes
+refresh=$(hyprctl monitors | sed -n 's/^\t[0-9]*x[0-9]*@\([0-9.]*\) at .*/\1/p')
+[ -n "$refresh" ]
+
+applied=
+stdbuf -oL udevadm monitor --udev --subsystem-match=drm | while read -r _; do
+    preferred=$(head -n 1 "$modes")
+    [ "$preferred" = "$applied" ] && continue
+    hyprctl keyword monitor "Virtual-1,$preferred@$refresh,0x0,1" >/dev/null
+    applied=$preferred
+done

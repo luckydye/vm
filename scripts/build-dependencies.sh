@@ -58,30 +58,6 @@ meson_install() {
   )
 }
 
-write_macos_x86_64_cross_file() {
-  local path="$1"
-
-  cat >"$path" <<'EOF'
-[binaries]
-c = ['clang', '-arch', 'x86_64']
-cpp = ['clang++', '-arch', 'x86_64']
-objc = ['clang', '-arch', 'x86_64']
-objcpp = ['clang++', '-arch', 'x86_64']
-ar = 'ar'
-strip = 'strip'
-pkg-config = 'pkg-config'
-
-[host_machine]
-system = 'darwin'
-cpu_family = 'x86_64'
-cpu = 'x86_64'
-endian = 'little'
-
-[properties]
-needs_exe_wrapper = false
-EOF
-}
-
 build_angle() {
   local source="$DEPS_SRC/WebKit"
   local angle="$source/Source/ThirdParty/ANGLE"
@@ -152,8 +128,17 @@ build_moltenvk() {
   done
   (
     cd "$source"
-    clean_env ./fetchDependencies --macos -v
+    # The external dependencies hardcode macOS 11.0, which current SDKs reject.
+    printf 'MACOSX_DEPLOYMENT_TARGET = %s\n' "$MINIMUM_MACOS" > "$source/varmint-deployment.xcconfig"
+    # Fetch without building, patch SPIRV-Cross and pin MoltenVK to the patched
+    # commit; fetchDependencies force-checks-out pinned revisions when building.
+    clean_env ./fetchDependencies --none -v
+    patch_spirv_cross "$source"
+    clean_env XCODE_XCCONFIG_FILE="$source/varmint-deployment.xcconfig" ./fetchDependencies --macos -v
     rm -rf "Package/$CONFIGURATION"
+    # Metal's private API provides features Vulkan guests rely on, such as
+    # VK_EXT_provoking_vertex, without which ANGLE (Chromium's WebGL) is
+    # limited to ES 2.0 on Venus. varmint is not distributed via the App Store.
     clean_env xcodebuild build \
       -project MoltenVKPackaging.xcodeproj \
       -scheme 'MoltenVK Package (macOS only)' \
@@ -161,7 +146,8 @@ build_moltenvk() {
       -sdk "$SDK" \
       -arch "$ARCH" \
       MACOSX_DEPLOYMENT_TARGET="$MINIMUM_MACOS" \
-      CODE_SIGNING_ALLOWED=NO
+      CODE_SIGNING_ALLOWED=NO \
+      GCC_PREPROCESSOR_DEFINITIONS='$(inherited) MVK_USE_METAL_PRIVATE_API=1'
   )
 
   package="$source/Package/$CONFIGURATION/MoltenVK"
@@ -174,6 +160,19 @@ build_moltenvk() {
 
   write_pkgconfig "$PREFIX/lib/pkgconfig/MoltenVK.pc" MoltenVK "UTM MoltenVK geometry shader build" "$MOLTENVK_VERSION" '-lMoltenVK'
   write_pkgconfig "$PREFIX/lib/pkgconfig/vulkan.pc" Vulkan "Vulkan loader backed by UTM MoltenVK" "$MOLTENVK_VERSION" '-lMoltenVK'
+}
+
+patch_spirv_cross() {
+  local source="$1"
+  local spirv_cross="$source/External/SPIRV-Cross"
+  local patch
+
+  for patch in "${SPIRV_CROSS_PATCHES[@]}"; do
+    git -C "$spirv_cross" apply "$patch"
+  done
+  git -C "$spirv_cross" -c user.name=varmint -c user.email=build@varmint.invalid -c commit.gpgsign=false \
+    commit -q -a -m "varmint SPIRV-Cross patches"
+  git -C "$spirv_cross" rev-parse HEAD > "$source/ExternalRevisions/SPIRV-Cross_repo_revision"
 }
 
 prepare_python() {
@@ -195,7 +194,6 @@ build_virglrenderer() {
   local source="$DEPS_SRC/virglrenderer"
   local epoxy_source="$DEPS_SRC/libepoxy"
   local patch
-  local x86_root x86_prefix cross_file arm_server x86_server universal_server
 
   log "virglrenderer"
   checkout_repo "$VIRGL_REPOSITORY" "$VIRGL_COMMIT" "$source"
@@ -210,7 +208,7 @@ build_virglrenderer() {
     export PATH="$DEPS_VENV/bin:$PATH"
     meson_install "$source" \
       -Dvenus=true \
-      -Dneptune=true \
+      -Dneptune=false \
       -Dvulkan-dload=false \
       -Dplatforms=egl \
       -Drender-server-mode=process \
@@ -225,136 +223,8 @@ build_virglrenderer() {
   need_file "$PREFIX/lib/libvirglrenderer.1.dylib"
   need_file "$PREFIX/libexec/virgl_render_server"
 
-  # D3DMetal.framework is x86_64-only.  Build a minimal Neptune render-server
-  # slice for Rosetta; the normal arm64 slice remains the full Venus/Neptune
-  # build used by DXMT and Vulkan.
-  x86_root="$(mktemp -d "${TMPDIR:-/tmp}/varmint-virgl-x86.XXXXXX")"
-  x86_prefix="$x86_root/prefix"
-  cross_file="$x86_root/macos-x86_64.ini"
-  mkdir -p "$x86_prefix"
-
-  write_macos_x86_64_cross_file "$cross_file"
-
-  (
-    export PATH="$DEPS_VENV/bin:$PATH"
-
-    meson setup "$x86_root/epoxy-build" "$epoxy_source" \
-      --cross-file "$cross_file" \
-      --prefix "$x86_prefix" \
-      --buildtype=release \
-      -Degl=no \
-      -Dglx=no \
-      -Dx11=false \
-      -Dtests=false
-    meson compile -C "$x86_root/epoxy-build"
-    meson install -C "$x86_root/epoxy-build"
-
-    PKG_CONFIG_PATH="$x86_prefix/lib/pkgconfig" \
-    PKG_CONFIG_LIBDIR="$x86_prefix/lib/pkgconfig:/usr/lib/pkgconfig" \
-      meson setup "$x86_root/virgl-build" "$source" \
-        --cross-file "$cross_file" \
-        --prefix "$x86_prefix" \
-        --buildtype=release \
-        -Dvenus=false \
-        -Dneptune=true \
-        -Dvulkan-dload=false \
-        -Dplatforms=[] \
-        -Drender-server-mode=process \
-        -Drender-server-worker=process \
-        -Ddrm-renderers=[] \
-        -Dtests=false \
-        -Dcheck-gl-errors=false \
-        -Dvideo=false \
-        -Dtracing=none
-    meson compile -C "$x86_root/virgl-build" virgl_render_server
-  )
-
-  arm_server="$PREFIX/libexec/virgl_render_server"
-  x86_server="$x86_root/virgl-build/server/virgl_render_server"
-  universal_server="$x86_root/virgl_render_server"
-
-  need_file "$x86_server"
-  lipo -create "$arm_server" "$x86_server" -output "$universal_server"
-  mv "$universal_server" "$arm_server"
-  rm -rf "$x86_root"
-
-  lipo -archs "$arm_server" | grep -qw arm64
-  lipo -archs "$arm_server" | grep -qw x86_64
-
   codesign_file "$PREFIX/lib/libvirglrenderer.1.dylib"
-  codesign_file "$arm_server"
-}
-
-build_d3dmetal() {
-  local source="$DEPS_SRC/d3dmetal-native"
-  local x86_root x86_prefix cross_file built_library destination
-
-  log "d3dmetal-native"
-  checkout_repo "$D3DMETAL_REPOSITORY" "$D3DMETAL_COMMIT" "$source"
-
-  for patch in "${D3DMETAL_PATCHES[@]}"; do
-    apply_dependency_patch "$source" "$patch"
-  done
-
-  x86_root="$(mktemp -d "${TMPDIR:-/tmp}/varmint-d3dmetal-x86.XXXXXX")"
-  x86_prefix="$x86_root/prefix"
-  cross_file="$x86_root/macos-x86_64.ini"
-  mkdir -p "$x86_prefix"
-
-  write_macos_x86_64_cross_file "$cross_file"
-
-  (
-    export PATH="$DEPS_VENV/bin:$PATH"
-    meson setup "$x86_root/build" "$source" \
-      --cross-file "$cross_file" \
-      --prefix "$x86_prefix" \
-      --buildtype=release \
-      -Dtests=disabled
-    meson compile -C "$x86_root/build"
-    meson install -C "$x86_root/build"
-  )
-
-  built_library="$x86_prefix/lib/libd3dmetal-native.dylib"
-  destination="$PREFIX/lib/x86_64/libd3dmetal-native.dylib"
-
-  need_file "$built_library"
-  mkdir -p "$(dirname "$destination")"
-  install -m 755 "$built_library" "$destination"
-  rm -rf "$x86_root"
-
-  lipo -archs "$destination" | tr ' ' '\n' | grep -qx x86_64 \
-    || die "d3dmetal-native is missing x86_64 slice"
-  codesign_file "$destination"
-}
-
-build_dxmt() {
-  local source="$DEPS_SRC/dxmt"
-  local llvm_path patch
-
-  log "DXMT"
-  checkout_repo "$DXMT_REPOSITORY" "$DXMT_COMMIT" "$source"
-  git -C "$source" submodule update --init --recursive
-
-  for patch in "${DXMT_PATCHES[@]}"; do
-    apply_dependency_patch "$source" "$patch"
-  done
-
-  llvm_path="${DXMT_LLVM_PATH:-}"
-  if [ -z "$llvm_path" ]; then
-    need_cmd brew
-    llvm_path="$(brew --prefix llvm@15)"
-  fi
-  [ -d "$llvm_path" ] || die "DXMT LLVM 15 not found: $llvm_path"
-
-  meson_install "$source" \
-    --buildtype=release \
-    -Dnative_llvm_path="$llvm_path" \
-    -Denable_tests=false \
-    -Denable_nvapi=false \
-    -Denable_d3d12=false
-
-  need_file "$PREFIX/lib/libdxmt-native.dylib"
-  codesign_file "$PREFIX/lib/libdxmt-native.dylib"
+  codesign_file "$PREFIX/libexec/virgl_render_server"
 }
 
 verify_dependency_prefix() {
@@ -366,11 +236,7 @@ verify_dependency_prefix() {
     lipo -archs "$PREFIX/lib/$dylib" | tr ' ' '\n' | grep -qx "$ARCH" \
       || die "$dylib does not contain $ARCH"
   done
-  PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig"     pkg-config --exists epoxy egl glesv2 vulkan dxmt-native
-  need_file "$PREFIX/lib/x86_64/libd3dmetal-native.dylib"
-  lipo -archs "$PREFIX/lib/x86_64/libd3dmetal-native.dylib" |
-    tr ' ' '\n' | grep -qx x86_64 \
-    || die "d3dmetal-native is missing x86_64 slice"
+  PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig" pkg-config --exists epoxy egl glesv2 vulkan
 
 }
 
@@ -380,6 +246,7 @@ dependency_recipe_hash() {
   cat \
     "$MANIFEST" \
     "${MOLTENVK_PATCHES[@]}" \
+    "${SPIRV_CROSS_PATCHES[@]}" \
     "$VIRGL_GENERATED_PATCH" \
     "$VIRGL_PATCH_SERIES"
 
@@ -388,8 +255,6 @@ dependency_recipe_hash() {
   done < <(virgl_patch_files)
 
   cat \
-    "${D3DMETAL_PATCHES[@]}" \
-    "${DXMT_PATCHES[@]}" \
     "$COMMON_SCRIPT" \
     "$DEPENDENCIES_SCRIPT"
 
@@ -402,10 +267,9 @@ build_dependencies() {
 
   for patch in \
     "${MOLTENVK_PATCHES[@]}" \
+    "${SPIRV_CROSS_PATCHES[@]}" \
     "$VIRGL_GENERATED_PATCH" \
-    "$VIRGL_PATCH_SERIES" \
-    "${D3DMETAL_PATCHES[@]}" \
-    "${DXMT_PATCHES[@]}"
+    "$VIRGL_PATCH_SERIES"
   do
     need_file "$patch"
   done
@@ -431,8 +295,6 @@ build_dependencies() {
   build_epoxy
   build_moltenvk
   build_virglrenderer
-  build_d3dmetal
-  build_dxmt
   verify_dependency_prefix
   printf '%s\n' "$expected_stamp" > "$stamp"
   commit_dependency_prefix_update

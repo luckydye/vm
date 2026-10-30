@@ -15,26 +15,35 @@ work_image="$work_dir/varmint-debian.raw"
 stage="$work_dir/stage"
 mkdir -p "$OUTPUT_DIR" "$stage"
 
-qemu-img convert -p -O raw "$SOURCE_IMAGE" "$work_image"
+qemu-img convert -p -O raw "$SOURCE_IMAGE" "$work_dir/source.raw"
+# The cloud image's 3 GB root cannot hold the desktop.
+truncate -s 8G "$work_image"
+virt-resize --expand /dev/sda1 "$work_dir/source.raw" "$work_image"
+rm -f "$work_dir/source.raw"
 
 virt-customize --network -a "$work_image" \
     --copy-in "$SCRIPT_DIR/fex-install:/tmp" \
+    --copy-in "$SCRIPT_DIR/hyprland-debs:/tmp" \
     --copy-in "$SCRIPT_DIR/rootfs:/tmp" \
     --run-command 'cp -a /tmp/fex-install/. / && cp -a /tmp/rootfs/. / && rm -rf /tmp/fex-install /tmp/rootfs' \
     --run-command '/usr/local/libexec/varmint-provision' \
-    --run-command 'missing=""; for command in FEXBash FEXRootFSFetcher curl e2fsck fsck growpart resize2fs sgdisk sudo glxinfo pactl pulseaudio python3 unsquashfs update-initramfs vulkaninfo xclip; do command -v "$command" >/dev/null 2>&1 || missing="$missing $command"; done; [ -z "$missing" ] || { echo "missing required guest commands:$missing" >&2; exit 1; }' \
+    --run-command 'missing=""; for command in Hyprland start-hyprland Xwayland cc chromium curl e2fsck flock foot fsck git greetd growpart mise newgidmap newuidmap pasta podman podman-compose resize2fs pkg-config sgdisk sha256sum sshd stdbuf sudo glxinfo pactl pulseaudio python3 udevadm unsquashfs update-initramfs vulkaninfo wl-copy wl-paste; do command -v "$command" >/dev/null 2>&1 || missing="$missing $command"; done; [ -z "$missing" ] || { echo "missing required guest commands:$missing" >&2; exit 1; }' \
     --run-command 'for initrd in /boot/initrd.img-*; do listing="$(lsinitramfs "$initrd")"; printf "%s\n" "$listing" | grep -Eq "(^|/)sbin/fsck$" && printf "%s\n" "$listing" | grep -Eq "(^|/)sbin/e2fsck$" && printf "%s\n" "$listing" | grep -Eq "(^|/)sbin/fsck.ext4$" || { echo "initramfs is missing ext4 fsck tools: $initrd" >&2; exit 1; }; done' \
-    --run-command 'test -f /usr/share/fex-emu/GuestThunks/libvulkan-guest.so && test -f /usr/lib/aarch64-linux-gnu/fex-emu/HostThunks/libvulkan-host.so && test -f /usr/lib/aarch64-linux-gnu/fex-emu/HostThunks_32/libvulkan-host.so' \
-    --run-command 'systemctl enable varmint-grow-root.service varmint-firstboot.service' \
+    --run-command '[ "$(dpkg --print-architecture)" != arm64 ] || { command -v FEXBash >/dev/null && test -f /usr/share/fex-emu/GuestThunks/libvulkan-guest.so && test -f /usr/lib/aarch64-linux-gnu/fex-emu/HostThunks/libvulkan-host.so && test -f /usr/lib/aarch64-linux-gnu/fex-emu/HostThunks_32/libvulkan-host.so; }' \
+    --run-command '[ "$(dpkg --print-architecture)" != arm64 ] || { test -x /usr/local/bin/FEX && test "$(readlink /usr/local/bin/FEXBash)" = FEX && test "$(readlink /usr/local/bin/FEXRootFSFetcher)" = FEX && test ! -e /home/varmint/.local/share/fex-emu/RootFS; }' \
+    --run-command '[ "$(dpkg --print-architecture)" != amd64 ] || for initrd in /boot/initrd.img-*; do lsinitramfs "$initrd" | grep -q "/virtio_mmio.ko" || { echo "initramfs is missing virtio_mmio: $initrd" >&2; exit 1; }; done' \
+    --run-command 'test -f /home/varmint/.config/hypr/hyprland.conf' \
+    --run-command 'grep -q "^varmint:" /etc/subuid && grep -q "^varmint:" /etc/subgid' \
+    --run-command 'systemctl enable varmint-grow-root.service' \
     --run-command 'passwd -l root' \
     --run-command 'printf "varmint\n" > /etc/hostname' \
     --run-command 'truncate -s 0 /etc/machine-id' \
-    --run-command 'rm -f /var/lib/dbus/machine-id /etc/ssh/ssh_host_* /var/lib/varmint/firstboot.done /var/lib/varmint/firstboot.user /usr/local/libexec/varmint-provision' \
+    --run-command 'rm -f /var/lib/dbus/machine-id /etc/ssh/ssh_host_* /usr/local/libexec/varmint-provision' \
     --run-command 'rm -rf /var/lib/cloud/* /etc/systemd/system/getty@tty1.service.d /etc/systemd/system/serial-getty@*.service.d' \
     --run-command 'apt-get clean && rm -rf /var/lib/apt/lists/* /var/log/*.log /var/log/journal/*'
 
-if virt-cat -a "$work_image" /etc/passwd | awk -F: '$3 >= 1000 && $3 < 65534 { found = 1 } END { exit !found }'; then
-    echo "error: source image contains a regular user; expected a clean nocloud image" >&2
+if virt-cat -a "$work_image" /etc/passwd | awk -F: '$3 >= 1000 && $3 < 65534 && $1 != "varmint" { found = 1 } END { exit !found }'; then
+    echo "error: image contains a regular user besides varmint; expected a clean nocloud image" >&2
     exit 1
 fi
 

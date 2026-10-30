@@ -1,0 +1,768 @@
+#!/usr/bin/env python3
+"""Serves shells, commands and TCP tunnels to the host over the `agent` virtio-console port,
+and mirrors the host's private container registries on the loopback.
+
+Frames are `[u32 stream][u8 kind][u32 len][payload]`, little endian (see src/protocol.rs).
+"""
+import calendar
+import ctypes
+import fcntl
+import http.client
+import http.server
+import json
+import os
+import pty
+import pwd
+import re
+import select
+import shutil
+import signal
+import socket
+import struct
+import subprocess
+import termios
+import threading
+import time
+
+PORT = "/dev/virtio-ports/agent"
+USER = "varmint"
+# Variables from varmint run --env and varmint serve, for every session.
+ENVIRONMENT_FILE = "/run/varmint/environment"
+HOST_ENVIRONMENT = {}
+HEADER = struct.Struct("<IBI")
+OPEN, DATA, STDERR, EOF, EXIT, RESIZE, HELLO, SETUP, CLOSE, SETUP_DONE, TELEMETRY, CLIPBOARD_IMAGE, REGISTRY_TOKEN = range(1, 14)
+REGISTRY_PORT = 5100
+REGISTRIES_CONF = "/etc/containers/registries.conf.d/50-varmint-mirrors.conf"
+
+
+class Link:
+    def __init__(self, path):
+        self.fd = os.open(path, os.O_RDWR)
+        self.buffer = b""
+        # Registry mirror threads send too.
+        self.lock = threading.Lock()
+
+    def send(self, stream, kind, payload=b""):
+        view = memoryview(HEADER.pack(stream, kind, len(payload)) + payload)
+        with self.lock:
+            while view:
+                view = view[os.write(self.fd, view):]
+
+    def receive(self):
+        self.buffer += os.read(self.fd, 65536)
+        while len(self.buffer) >= HEADER.size:
+            stream, kind, length = HEADER.unpack_from(self.buffer)
+            if len(self.buffer) < HEADER.size + length:
+                return
+            payload = self.buffer[HEADER.size:HEADER.size + length]
+            self.buffer = self.buffer[HEADER.size + length:]
+            yield stream, kind, payload
+
+
+def user_environment(account, terminal=None):
+    environment = {
+        "HOME": account.pw_dir,
+        "USER": account.pw_name,
+        "LOGNAME": account.pw_name,
+        "SHELL": account.pw_shell,
+        # mise shims make tools installed with `mise use -g` work in `varmint exec`.
+        "PATH": f"{account.pw_dir}/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin",
+        "WAYLAND_DISPLAY": "wayland-1",
+        "DISPLAY": ":0",
+        "XDG_RUNTIME_DIR": f"/run/user/{account.pw_uid}",
+        "LANG": "C.UTF-8",
+    }
+    environment.update(terminal or {})
+    environment.update(HOST_ENVIRONMENT)
+    return environment
+
+
+def become(account):
+    os.setgid(account.pw_gid)
+    os.initgroups(account.pw_name, account.pw_gid)
+    os.setuid(account.pw_uid)
+    os.chdir(account.pw_dir)
+
+
+def exit_code(status):
+    code = os.waitstatus_to_exitcode(status)
+    return 128 - code if code < 0 else code
+
+
+class Stream:
+    """One host session. `outputs` maps readable fds to the frame kind they produce."""
+
+    def __init__(self, link, stream):
+        self.link = link
+        self.id = stream
+        self.outputs = {}
+        self.input = None
+        self.pending = b""
+        self.pid = None
+        self.status = None
+
+    def finished(self):
+        return not self.outputs and (self.pid is None or self.status is not None)
+
+    def finish(self):
+        self.link.send(self.id, EXIT, struct.pack("<i", 0 if self.status is None else self.status))
+
+    def read(self, fd):
+        try:
+            data = os.read(fd, 65536)
+        except OSError:
+            data = b""
+        if data:
+            self.link.send(self.id, self.outputs[fd], data)
+            return
+        del self.outputs[fd]
+        if fd != self.input:
+            os.close(fd)
+
+    def write(self, data):
+        if self.input is not None:
+            self.pending += data
+            self.flush()
+
+    def close_input(self):
+        os.close(self.input)
+        self.input = None
+        self.pending = b""
+
+    def resize(self, payload):
+        pass
+
+    def wake_time(self):
+        """Monotonic time at which `tick` needs to run, or None."""
+        return None
+
+    def tick(self, now):
+        pass
+
+    def flush(self):
+        try:
+            while self.pending:
+                self.pending = self.pending[os.write(self.input, self.pending):]
+        except BlockingIOError:
+            pass
+        except OSError:
+            self.pending = b""
+
+    def reap(self):
+        if self.pid is None or self.status is not None:
+            return
+        pid, status = os.waitpid(self.pid, os.WNOHANG)
+        if pid:
+            self.status = exit_code(status)
+            self.on_exit()
+
+    def on_exit(self):
+        pass
+
+    def kill(self):
+        if self.pid is not None and self.status is None:
+            try:
+                os.killpg(self.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            os.waitpid(self.pid, 0)
+        for fd in set(self.outputs) | ({self.input} if self.input is not None else set()):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+class PtyStream(Stream):
+    def __init__(self, link, stream, request):
+        super().__init__(link, stream)
+        account = pwd.getpwnam(USER)
+        argv = request["argv"] or [account.pw_shell, "-l"]
+        pid, master = pty.fork()
+        if pid == 0:
+            try:
+                fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", request["rows"], request["cols"], 0, 0))
+                become(account)
+                os.execvpe(argv[0], argv, user_environment(account, request["terminal"]))
+            finally:
+                os._exit(127)
+        os.set_blocking(master, False)
+        self.pid = pid
+        self.input = master
+        self.outputs[master] = DATA
+
+    def eof(self):
+        self.write(b"\x04")
+
+    def resize(self, payload):
+        cols, rows = struct.unpack("<HH", payload)
+        fcntl.ioctl(self.input, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+
+    def clipboard_image(self, png):
+        """Sets the guest clipboard to the host's image, or clears it when the host has none."""
+        account = pwd.getpwnam(USER)
+        argv = ["wl-copy", "--type", "image/png"] if png else ["wl-copy", "--clear"]
+        # wl-copy forks and keeps serving the selection, so none of its output may be a pipe.
+        result = subprocess.run(
+            argv,
+            input=png,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=user_environment(account),
+            user=account.pw_uid,
+            group=account.pw_gid,
+            check=False,
+        )
+        if result.returncode != 0:
+            self.link.send(self.id, STDERR, f"varmint-agent: wl-copy failed with exit code {result.returncode}\r\n".encode())
+
+    def on_exit(self):
+        # Background jobs may keep the pty open; once the shell is gone, send what
+        # is buffered and stop. Reads stop at EIO or when nothing is left.
+        while self.input in self.outputs:
+            self.read(self.input)
+        self.close_input()
+
+
+class ExecStream(Stream):
+    def __init__(self, link, stream, request):
+        super().__init__(link, stream)
+        account = pwd.getpwnam(USER)
+        try:
+            process = subprocess.Popen(
+                request["argv"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=account.pw_dir,
+                env=user_environment(account),
+                user=account.pw_uid,
+                group=account.pw_gid,
+                extra_groups=os.getgrouplist(account.pw_name, account.pw_gid),
+                start_new_session=True,
+            )
+        except OSError as error:
+            link.send(stream, STDERR, f"varmint-agent: {request['argv'][0]}: {error.strerror}\n".encode())
+            self.status = 127
+            return
+        self.pid = process.pid
+        self.input = os.dup(process.stdin.fileno())
+        stdout = os.dup(process.stdout.fileno())
+        stderr = os.dup(process.stderr.fileno())
+        for pipe in (process.stdin, process.stdout, process.stderr):
+            pipe.close()
+        process.returncode = 0  # This agent reaps the child itself.
+        os.set_blocking(self.input, False)
+        self.outputs[stdout] = DATA
+        self.outputs[stderr] = STDERR
+
+    def eof(self):
+        if self.input is not None:
+            self.close_input()
+
+
+class TcpStream(Stream):
+    """Connects to a guest port. Services may still be starting right after
+    boot, so a refused connection is retried for a while; host data that
+    arrives meanwhile is held back until the connection exists."""
+
+    CONNECT_TIMEOUT = 30
+    RETRY_INTERVAL = 0.1
+
+    def __init__(self, link, stream, request):
+        super().__init__(link, stream)
+        self.port = request["port"]
+        self.deadline = time.monotonic() + self.CONNECT_TIMEOUT
+        self.retry_at = None
+        self.early = b""
+        self.early_eof = False
+        self.connect()
+
+    def connect(self):
+        try:
+            self.socket = socket.create_connection(("127.0.0.1", self.port))
+        except ConnectionRefusedError as error:
+            if time.monotonic() < self.deadline:
+                self.retry_at = time.monotonic() + self.RETRY_INTERVAL
+            else:
+                self.fail(error.strerror)
+            return
+        except OSError as error:
+            self.fail(error.strerror)
+            return
+        self.retry_at = None
+        self.socket.setblocking(False)
+        self.input = self.socket.fileno()
+        self.outputs[self.input] = DATA
+        if self.early:
+            super().write(self.early)
+            self.early = b""
+        if self.early_eof:
+            self.eof()
+
+    def fail(self, message):
+        self.retry_at = None
+        self.link.send(self.id, STDERR, f"varmint-agent: port {self.port}: {message}\n".encode())
+        self.status = 1
+
+    def wake_time(self):
+        return self.retry_at
+
+    def tick(self, now):
+        if self.retry_at is not None and now >= self.retry_at:
+            self.connect()
+
+    def finished(self):
+        return self.retry_at is None and super().finished()
+
+    def write(self, data):
+        if self.retry_at is not None:
+            self.early += data
+        else:
+            super().write(data)
+
+    def eof(self):
+        if self.retry_at is not None:
+            self.early_eof = True
+        elif self.input is not None:
+            self.socket.shutdown(socket.SHUT_WR)
+
+    def read(self, fd):
+        super().read(fd)
+        if fd not in self.outputs:
+            self.kill()
+
+    def kill(self):
+        if self.input is not None:
+            self.input = None
+            self.pending = b""
+            self.socket.close()
+
+
+SESSIONS = {"pty": PtyStream, "exec": ExecStream, "tcp": TcpStream}
+
+
+class Registries:
+    """Mirrors the host's private registries on the loopback for podman.
+
+    Pulls go upstream with bearer tokens the host requests for each
+    repository, so the registry credentials never enter the guest.
+    """
+
+    PATH = re.compile(r"/v2/([^/]+)/(.+)/(manifests|blobs|tags)/.+")
+    TOKEN_TIMEOUT = 60
+    # Renew tokens this many seconds before they expire.
+    TOKEN_MARGIN = 10
+
+    def __init__(self, link, hosts):
+        self.link = link
+        self.hosts = hosts
+        self.lock = threading.Lock()
+        self.tokens = {}
+        self.waiting = {}
+        self.next_id = 0
+
+        os.makedirs(os.path.dirname(REGISTRIES_CONF), exist_ok=True)
+        with open(REGISTRIES_CONF, "w", encoding="utf-8") as file:
+            for host in hosts:
+                file.write(f'[[registry]]\nlocation = "{host}"\n[[registry.mirror]]\n')
+                file.write(f'location = "127.0.0.1:{REGISTRY_PORT}/{host}"\ninsecure = true\n\n')
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", REGISTRY_PORT), RegistryHandler)
+        server.registries = self
+        threading.Thread(target=server.serve_forever, name="registry-mirror", daemon=True).start()
+
+    def token(self, registry, repository):
+        key = (registry, repository)
+        with self.lock:
+            token, expires_at = self.tokens.get(key, (None, 0))
+            if time.monotonic() < expires_at:
+                return token
+            self.next_id += 1
+            request_id = self.next_id
+            waiter = self.waiting[request_id] = {"answered": threading.Event()}
+        request = {"id": request_id, "registry": registry, "repository": repository}
+        self.link.send(0, REGISTRY_TOKEN, json.dumps(request).encode())
+        if not waiter["answered"].wait(self.TOKEN_TIMEOUT):
+            with self.lock:
+                self.waiting.pop(request_id, None)
+            raise RuntimeError("the host did not answer the token request")
+        reply = waiter["reply"]
+        if "error" in reply:
+            raise RuntimeError(reply["error"])
+        with self.lock:
+            self.tokens[key] = (reply["token"], time.monotonic() + reply["expires_in"] - self.TOKEN_MARGIN)
+        return reply["token"]
+
+    def answer(self, payload):
+        reply = json.loads(payload)
+        with self.lock:
+            waiter = self.waiting.pop(reply["id"], None)
+        if waiter:
+            waiter["reply"] = reply
+            waiter["answered"].set()
+
+
+class RegistryHandler(http.server.BaseHTTPRequestHandler):
+    """Serves `/v2/<registry>/<repository>/...` pulls from `<registry>`."""
+
+    HOP_BY_HOP = {"connection", "keep-alive", "transfer-encoding"}
+
+    def do_GET(self):
+        self.forward()
+
+    def do_HEAD(self):
+        self.forward()
+
+    def forward(self):
+        registries = self.server.registries
+        if self.path == "/v2/":
+            self.send_response(200)
+            self.send_header("Docker-Distribution-API-Version", "registry/2.0")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        match = Registries.PATH.fullmatch(self.path.split("?")[0])
+        if not match or match[1] not in registries.hosts:
+            self.send_error(404)
+            return
+        registry, repository = match[1], match[2]
+        headers = {name: ", ".join(self.headers.get_all(name)) for name in ("Accept", "Range") if name in self.headers}
+        upstream = http.client.HTTPSConnection(registry, timeout=60)
+        try:
+            headers["Authorization"] = f"Bearer {registries.token(registry, repository)}"
+            upstream.request(self.command, "/v2/" + self.path[len(f"/v2/{registry}/"):], headers=headers)
+            response = upstream.getresponse()
+        except (OSError, RuntimeError) as error:
+            upstream.close()
+            self.send_error(502, explain=str(error))
+            return
+        self.send_response(response.status)
+        for name, value in response.getheaders():
+            if name.lower() not in self.HOP_BY_HOP:
+                self.send_header(name, value)
+        self.end_headers()
+        if self.command == "GET":
+            shutil.copyfileobj(response, self.wfile, 1 << 20)
+        upstream.close()
+
+    def log_message(self, format, *args):
+        pass
+
+
+class Telemetry:
+    """Reports what runs and what gets installed in the guest.
+
+    Kernel process accounting records every exiting process, the bash hook in
+    /etc/bash.bashrc appends interactive commands to shell.log, dpkg logs apt
+    installs and mise keeps one directory per installed tool version. inotify
+    wakes the agent whenever one of them changes.
+    """
+
+    DIR = "/run/varmint"
+    SHELL_LOG = f"{DIR}/shell.log"
+    DPKG_LOG = "/var/log/dpkg.log"
+    ACCT_ROTATE_SIZE = 1 << 20
+    # struct acct_v3 from linux/acct.h
+    ACCT = struct.Struct("<BBHIIIIIIf8H16s")
+    ACCT_HZ = 100
+    IN_MODIFY = 0x2
+    IN_CREATE = 0x100
+
+    def __init__(self, link):
+        self.link = link
+        self.libc = ctypes.CDLL(None, use_errno=True)
+        account = pwd.getpwnam(USER)
+        self.mise_installs = os.path.join(account.pw_dir, ".local/share/mise/installs")
+
+        os.makedirs(self.DIR, mode=0o755, exist_ok=True)
+        if not os.path.exists(self.SHELL_LOG):
+            open(self.SHELL_LOG, "w").close()
+            os.chown(self.SHELL_LOG, account.pw_uid, account.pw_gid)
+        self.shell_offset = os.path.getsize(self.SHELL_LOG)
+        self.dpkg_offset = os.path.getsize(self.DPKG_LOG) if os.path.exists(self.DPKG_LOG) else 0
+        self.known_tools = self.mise_tools()
+
+        self.acct_generation = 0
+        self.acct_path = self.start_accounting()
+        self.acct_offset = 0
+
+        self.fd = self.libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
+        if self.fd < 0:
+            raise OSError(ctypes.get_errno(), "inotify_init1 failed")
+        for path, mask in ((self.DIR, self.IN_MODIFY), ("/var/log", self.IN_MODIFY | self.IN_CREATE)):
+            if self.libc.inotify_add_watch(self.fd, path.encode(), mask) < 0:
+                raise OSError(ctypes.get_errno(), f"inotify_add_watch {path} failed")
+
+    def start_accounting(self):
+        self.acct_generation += 1
+        path = f"{self.DIR}/acct.{self.acct_generation}"
+        open(path, "wb").close()
+        if self.libc.acct(path.encode()) != 0:
+            raise OSError(ctypes.get_errno(), "enabling process accounting failed")
+        return path
+
+    def mise_tools(self):
+        if not os.path.isdir(self.mise_installs):
+            return set()
+        return {
+            (tool, version)
+            for tool in os.listdir(self.mise_installs)
+            if os.path.isdir(os.path.join(self.mise_installs, tool))
+            for version in os.listdir(os.path.join(self.mise_installs, tool))
+            if not version.startswith(".")
+            and os.path.isdir(os.path.join(self.mise_installs, tool, version))
+            and not os.path.islink(os.path.join(self.mise_installs, tool, version))
+        }
+
+    def processes(self):
+        with open(self.acct_path, "rb") as file:
+            file.seek(self.acct_offset)
+            data = file.read()
+        complete = len(data) - len(data) % self.ACCT.size
+        self.acct_offset += complete
+        records = [self.ACCT.unpack_from(data, offset) for offset in range(0, complete, self.ACCT.size)]
+
+        if self.acct_offset >= self.ACCT_ROTATE_SIZE:
+            old = self.acct_path
+            self.acct_path = self.start_accounting()
+            with open(old, "rb") as file:
+                file.seek(self.acct_offset)
+                rest = file.read()
+            records += [self.ACCT.unpack_from(rest, offset) for offset in range(0, len(rest) - len(rest) % self.ACCT.size, self.ACCT.size)]
+            os.unlink(old)
+            self.acct_offset = 0
+
+        def comp(value):
+            return (value & 0x1FFF) << (3 * (value >> 13))
+
+        return [
+            {
+                "ended_at": btime + etime / self.ACCT_HZ,
+                "command": comm.rstrip(b"\0").decode(errors="replace"),
+                "elapsed_ms": etime * 1000 / self.ACCT_HZ,
+                "cpu_ms": (comp(utime) + comp(stime)) * 1000 / self.ACCT_HZ,
+                "exit_code": exit_code(status),
+                "uid": uid,
+            }
+            for (_, _, _, status, uid, _, _, _, btime, etime, utime, stime, *_, comm) in records
+        ]
+
+    def commands(self):
+        with open(self.SHELL_LOG, "rb") as file:
+            file.seek(self.shell_offset)
+            data = file.read()
+        complete = data[: data.rfind(b"\n") + 1]
+        self.shell_offset += len(complete)
+        commands = []
+        for line in complete.decode(errors="replace").splitlines():
+            started, ended, status, command = line.split("\t", 3)
+            commands.append(
+                {
+                    "started_at": int(started) / 1e6,
+                    "duration_ms": (int(ended) - int(started)) / 1e3,
+                    "exit_code": int(status),
+                    "command": command,
+                }
+            )
+        return commands
+
+    def packages(self):
+        packages = []
+        if os.path.exists(self.DPKG_LOG):
+            with open(self.DPKG_LOG, "rb") as file:
+                file.seek(self.dpkg_offset)
+                data = file.read()
+            complete = data[: data.rfind(b"\n") + 1]
+            self.dpkg_offset += len(complete)
+            for line in complete.decode(errors="replace").splitlines():
+                # 2026-10-11 16:20:01 install curl:arm64 <none> 8.14.1-2
+                # Only new installs; trigger runs and upgrades log other actions.
+                fields = line.split()
+                if len(fields) == 6 and fields[2] == "install":
+                    at = calendar.timegm(time.strptime(f"{fields[0]} {fields[1]}", "%Y-%m-%d %H:%M:%S"))
+                    name = fields[3].split(":")[0]
+                    packages.append({"installed_at": at, "manager": "apt", "name": name, "version": fields[5]})
+
+        tools = self.mise_tools()
+        for tool, version in sorted(tools - self.known_tools):
+            packages.append({"installed_at": time.time(), "manager": "mise", "name": tool, "version": version})
+        self.known_tools = tools
+        return packages
+
+    def collect(self):
+        while True:
+            try:
+                os.read(self.fd, 65536)
+            except BlockingIOError:
+                break
+        report = {"processes": self.processes(), "commands": self.commands(), "packages": self.packages()}
+        if any(report.values()):
+            self.link.send(0, TELEMETRY, json.dumps(report).encode())
+
+
+def mounted_paths():
+    with open("/proc/mounts", encoding="utf-8") as mounts:
+        return {line.split()[1] for line in mounts}
+
+
+def mount(share, account):
+    """Mounts a host share; returns an error message or None."""
+    path = share["path"]
+    if path in mounted_paths():
+        return None
+    if not os.path.isdir(path):
+        os.makedirs(path)
+        os.chown(path, account.pw_uid, account.pw_gid)
+    options = ["-o", "ro"] if share["readonly"] else []
+    result = subprocess.run(
+        ["mount", "-t", "virtiofs", *options, share["tag"], path],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if result.returncode != 0:
+        return f"mounting {share['tag']} at {path} failed: {result.stdout.decode(errors='replace').strip()}"
+    return None
+
+
+def copy_seeds(seeds, account):
+    """Copies host seeds to their guest targets as the guest user; returns errors."""
+    home = account.pw_dir
+    for item in seeds["items"]:
+        source = os.path.join(seeds["mount"], item["source"])
+        target = item["target"]
+        # Parents created here belong to the guest user when inside its home.
+        missing = []
+        parent = os.path.dirname(target)
+        while not os.path.exists(parent):
+            missing.append(parent)
+            parent = os.path.dirname(parent)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        if os.path.isdir(source):
+            shutil.copytree(source, target, dirs_exist_ok=True)
+        else:
+            shutil.copy2(source, target)
+
+        if target == home or target.startswith(home + "/"):
+            for path in missing:
+                os.chown(path, account.pw_uid, account.pw_gid)
+            os.lchown(target, account.pw_uid, account.pw_gid)
+            # Only what the seed copied, not everything already at the target.
+            for root, directories, files in os.walk(source):
+                for entry in directories + files:
+                    relative = os.path.relpath(os.path.join(root, entry), source)
+                    os.lchown(os.path.join(target, relative), account.pw_uid, account.pw_gid)
+
+    result = subprocess.run(["umount", seeds["mount"]], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
+    if result.returncode != 0:
+        return [f"unmounting the seeds failed: {result.stdout.decode(errors='replace').strip()}"]
+    return []
+
+
+def setup(payload, link):
+    """Applies host settings; returns the registry mirror or None and a list of error messages."""
+    request = json.loads(payload)
+    time.clock_settime(time.CLOCK_REALTIME, request["time_ms"] / 1000)
+
+    account = pwd.getpwnam(USER)
+    ssh_dir = os.path.join(account.pw_dir, ".ssh")
+    os.makedirs(ssh_dir, mode=0o700, exist_ok=True)
+    keys = os.path.join(ssh_dir, "authorized_keys")
+    with open(keys, "w", encoding="utf-8") as file:
+        file.write(request["authorized_keys"])
+    os.chmod(keys, 0o600)
+    for path in (ssh_dir, keys):
+        os.chown(path, account.pw_uid, account.pw_gid)
+
+    HOST_ENVIRONMENT.clear()
+    HOST_ENVIRONMENT.update(request["environment"])
+    # Plain KEY=VALUE lines, read by pam_env for ssh and by /etc/bash.bashrc.
+    os.makedirs(os.path.dirname(ENVIRONMENT_FILE), mode=0o755, exist_ok=True)
+    descriptor = os.open(ENVIRONMENT_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o640)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as file:
+        file.writelines(f"{key}={value}\n" for key, value in HOST_ENVIRONMENT.items())
+    os.chown(ENVIRONMENT_FILE, 0, account.pw_gid)
+
+    errors = [error for error in (mount(share, account) for share in request["mounts"]) if error]
+    if request["seeds"] and not errors:
+        errors += copy_seeds(request["seeds"], account)
+    registries = Registries(link, request["registries"]) if request["registries"] else None
+    return registries, errors
+
+
+def main():
+    wake_read, wake_write = os.pipe()
+    os.set_blocking(wake_read, False)
+    os.set_blocking(wake_write, False)
+    signal.signal(signal.SIGCHLD, lambda *_: None)
+    signal.set_wakeup_fd(wake_write)
+
+    link = Link(PORT)
+    streams = {}
+    registries = None
+    link.send(0, HELLO)
+    telemetry = Telemetry(link)
+
+    while True:
+        readable = [link.fd, wake_read, telemetry.fd] + [fd for stream in streams.values() for fd in stream.outputs]
+        writable = [stream.input for stream in streams.values() if stream.pending]
+        wake_times = [t for t in (stream.wake_time() for stream in streams.values()) if t is not None]
+        timeout = max(0, min(wake_times) - time.monotonic()) if wake_times else None
+        ready_read, ready_write, _ = select.select(readable, writable, [], timeout)
+
+        now = time.monotonic()
+        for stream in list(streams.values()):
+            stream.tick(now)
+
+        for stream in list(streams.values()):
+            if stream.input in ready_write:
+                stream.flush()
+            for fd in list(stream.outputs):
+                if fd in ready_read:
+                    stream.read(fd)
+
+        if telemetry.fd in ready_read:
+            telemetry.collect()
+
+        if wake_read in ready_read:
+            while True:
+                try:
+                    os.read(wake_read, 4096)
+                except BlockingIOError:
+                    break
+            for stream in streams.values():
+                stream.reap()
+
+        if link.fd in ready_read:
+            for stream_id, kind, payload in link.receive():
+                if kind == SETUP:
+                    registries, errors = setup(payload, link)
+                    link.send(0, SETUP_DONE, json.dumps({"errors": errors}).encode())
+                elif kind == REGISTRY_TOKEN:
+                    registries.answer(payload)
+                elif kind == OPEN:
+                    request = json.loads(payload)
+                    streams[stream_id] = SESSIONS[request["type"]](link, stream_id, request)
+                elif stream_id not in streams:
+                    continue
+                elif kind == DATA:
+                    streams[stream_id].write(payload)
+                elif kind == EOF:
+                    streams[stream_id].eof()
+                elif kind == RESIZE:
+                    streams[stream_id].resize(payload)
+                elif kind == CLIPBOARD_IMAGE:
+                    streams[stream_id].clipboard_image(payload)
+                elif kind == CLOSE:
+                    streams.pop(stream_id).kill()
+
+        for stream_id, stream in list(streams.items()):
+            stream.reap()
+            if stream.finished():
+                stream.finish()
+                del streams[stream_id]
+
+
+if __name__ == "__main__":
+    main()

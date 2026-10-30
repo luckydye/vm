@@ -1,0 +1,25 @@
+diff --git a/src/helpers/Monitor.cpp b/src/helpers/Monitor.cpp
+index 2c1a5ca..1c6b2b3 100644
+--- a/src/helpers/Monitor.cpp
++++ b/src/helpers/Monitor.cpp
+@@ -2510,14 +2510,18 @@ void CMonitorState::ensureBufferPresent() {
+         return;
+     }
+ 
+-    if (STATE.buffer) {
++    // A buffer of the old size must not be tested against a new mode: drivers that
++    // require the primary plane to cover the CRTC (e.g. virtio-gpu) reject it, so
++    // the output could never switch to a larger mode.
++    const auto& MODE = STATE.mode ? STATE.mode : STATE.customMode;
++    if (STATE.buffer && (!MODE || STATE.buffer->size == MODE->pixelSize)) {
+         if (const auto params = STATE.buffer->dmabuf(); params.success && params.format == m_owner->m_drmFormat)
+             return;
+     }
+ 
+     // this is required for modesetting being possible and might be missing in case of first tests in the renderer
+     // where we test modes and buffers
+-    Log::logger->log(Log::DEBUG, "CMonitorState::ensureBufferPresent: no buffer or mismatched format, attaching one from the swapchain for modeset being possible");
++    Log::logger->log(Log::DEBUG, "CMonitorState::ensureBufferPresent: no buffer or mismatched format or size, attaching one from the swapchain for modeset being possible");
+     m_owner->m_output->state->setBuffer(m_owner->m_output->swapchain->next(nullptr));
+     m_owner->m_output->swapchain->rollback(); // restore the counter, don't advance the swapchain
+ }

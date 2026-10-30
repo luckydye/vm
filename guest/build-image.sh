@@ -5,17 +5,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 OUTPUT_DIR="$ROOT/build/guest"
 CACHE_DIR="$ROOT/build/cache/guest"
-BUILDER_IMAGE="varmint-guest-builder:trixie-arm64"
+# The guest runs the host's architecture: arm64 on Macs and arm64 Linux, amd64 on x86-64 Linux.
+case "${GUEST_ARCH:-$(uname -m)}" in
+  arm64|aarch64) GUEST_ARCH=arm64 ;;
+  amd64|x86_64) GUEST_ARCH=amd64 ;;
+  *) echo "error: unsupported guest architecture: ${GUEST_ARCH:-$(uname -m)}" >&2; exit 1 ;;
+esac
+BUILDER_IMAGE="varmint-guest-builder:trixie-$GUEST_ARCH"
 DEBIAN_BASE_URL="${DEBIAN_BASE_URL:-https://cloud.debian.org/images/cloud/trixie/latest}"
-DEBIAN_IMAGE_NAME="${DEBIAN_IMAGE_NAME:-debian-13-nocloud-arm64.qcow2}"
+DEBIAN_IMAGE_NAME="${DEBIAN_IMAGE_NAME:-debian-13-nocloud-$GUEST_ARCH.qcow2}"
 SOURCE_IMAGE="$CACHE_DIR/$DEBIAN_IMAGE_NAME"
 STAMP="$OUTPUT_DIR/.build-stamp"
 
 INPUTS=(
   "$SCRIPT_DIR"
-  "$ROOT/patches/neptune-protocol"
-  "$ROOT/patches/neptune-generated/virtio-win-mesa.patch"
-  "$ROOT/patches/virtio-win-mesa"
+  "$ROOT/patches/hyprland"
 )
 OUTPUTS=(
   "$OUTPUT_DIR/Image"
@@ -28,7 +32,7 @@ OUTPUTS=(
 command -v shasum >/dev/null 2>&1 || { echo "error: shasum is required" >&2; exit 1; }
 
 fingerprint="$({
-  printf '%s\n' "$DEBIAN_BASE_URL" "$DEBIAN_IMAGE_NAME"
+  printf '%s\n' "$GUEST_ARCH" "$DEBIAN_BASE_URL" "$DEBIAN_IMAGE_NAME"
   find "${INPUTS[@]}" -type f | LC_ALL=C sort | while IFS= read -r input; do
     printf '%s\0' "${input#$ROOT/}"
     cat "$input"
@@ -84,7 +88,7 @@ if [ -f "$SOURCE_IMAGE" ]; then
 fi
 
 if [ "$actual_sha512" != "$expected_sha512" ]; then
-  printf '\n== download Debian nocloud arm64 image ==\n'
+  printf '\n== download Debian nocloud %s image ==\n' "$GUEST_ARCH"
   rm -f "$SOURCE_IMAGE"
   curl --fail --location --retry 3 --retry-delay 2 \
     --output "$image_partial" \
@@ -102,14 +106,14 @@ fi
 
 printf '\n== build guest image builder ==\n'
 docker build \
-  --platform linux/arm64 \
+  --platform "linux/$GUEST_ARCH" \
   --tag "$BUILDER_IMAGE" \
   --file "$SCRIPT_DIR/Dockerfile" \
   "$ROOT"
 
 printf '\n== build guest runtime ==\n'
 docker run --rm \
-  --platform linux/arm64 \
+  --platform "linux/$GUEST_ARCH" \
   --privileged \
   --volume "$CACHE_DIR:/input:ro" \
   --volume "$OUTPUT_DIR:/output" \

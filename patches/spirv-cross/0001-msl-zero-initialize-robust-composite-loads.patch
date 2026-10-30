@@ -1,0 +1,17 @@
+diff --git a/spirv_msl.cpp b/spirv_msl.cpp
+index d4252fcf..07c72c96 100644
+--- a/spirv_msl.cpp
++++ b/spirv_msl.cpp
+@@ -10337,8 +10337,10 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
+ 			{
+ 				auto &loaded_type = get<SPIRType>(result_type);
+ 				// Generate a proper zero expression using type constructor
+-				// to_zero_initialized_expression returns {} which doesn't work in ternary
+-				string zero_expr = join(type_to_glsl(loaded_type), "(0)");
++				// to_zero_initialized_expression returns {} which doesn't work in ternary.
++				// Structs and arrays have no single-value constructor; T{} zero-initializes them.
++				bool composite = loaded_type.basetype == SPIRType::Struct || is_array(loaded_type);
++				string zero_expr = join(type_to_glsl(loaded_type), composite ? "{}" : "(0)");
+ 
+ 				// Wrap the expression with a select: (in_bounds) ? loaded_value : zero
+ 				expr->expression = join("(", info.bounds_check_condition, " ? ", expr->expression, " : ", zero_expr, ")");

@@ -1,5 +1,10 @@
-use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
-use objc2_foundation::NSString;
+#[cfg(target_os = "macos")]
+use objc2_app_kit::{
+    NSBitmapImageFileType, NSBitmapImageRep, NSPasteboard, NSPasteboardTypePNG, NSPasteboardTypeString,
+    NSPasteboardTypeTIFF,
+};
+#[cfg(target_os = "macos")]
+use objc2_foundation::{NSDictionary, NSString};
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
@@ -35,12 +40,26 @@ fn hash_bytes(bytes: &[u8]) -> u64 {
     h.finish()
 }
 
-struct Pasteboard {
+/// Puts `text` on the host clipboard from a command that exits right after.
+#[cfg(target_os = "macos")]
+pub fn copy_text(text: &[u8]) {
+    objc2::rc::autoreleasepool(|_| Pasteboard::general().write_text(text));
+}
+
+/// The host clipboard image as PNG.
+#[cfg(target_os = "macos")]
+pub fn read_png() -> Option<Vec<u8>> {
+    objc2::rc::autoreleasepool(|_| Pasteboard::general().read_png())
+}
+
+#[cfg(target_os = "macos")]
+pub struct Pasteboard {
     inner: objc2::rc::Retained<NSPasteboard>,
 }
 
+#[cfg(target_os = "macos")]
 impl Pasteboard {
-    fn general() -> Pasteboard {
+    pub fn general() -> Pasteboard {
         let inner = NSPasteboard::generalPasteboard();
         Pasteboard { inner }
     }
@@ -54,13 +73,117 @@ impl Pasteboard {
         Some(s.to_string().into_bytes())
     }
 
-    fn write_text(&self, bytes: &[u8]) {
+    /// The clipboard image as PNG; many apps only offer TIFF.
+    pub fn read_png(&self) -> Option<Vec<u8>> {
+        if let Some(png) = self.inner.dataForType(unsafe { NSPasteboardTypePNG }) {
+            return Some(png.to_vec());
+        }
+        let tiff = self.inner.dataForType(unsafe { NSPasteboardTypeTIFF })?;
+        let image = NSBitmapImageRep::imageRepWithData(&tiff).expect("the pasteboard TIFF is not a bitmap");
+        let png = unsafe { image.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new()) }
+            .expect("converting the pasteboard TIFF to PNG failed");
+        Some(png.to_vec())
+    }
+
+    pub fn write_text(&self, bytes: &[u8]) {
         let text = String::from_utf8_lossy(bytes);
         let ns = NSString::from_str(&text);
         self.inner.clearContents();
         unsafe {
             self.inner.setString_forType(&ns, NSPasteboardTypeString);
         }
+    }
+}
+
+/// The argument that makes `varmint` serve the text on its stdin as the
+/// clipboard, since X11 and Wayland clipboards live only as long as the
+/// program offering them.
+#[cfg(target_os = "linux")]
+pub const SERVE_TEXT_COMMAND: &str = "__serve-clipboard-text";
+
+/// Puts `text` on the host clipboard from a command that exits right after:
+/// a detached `varmint` keeps offering it until another program takes over.
+#[cfg(target_os = "linux")]
+pub fn copy_text(text: &[u8]) {
+    use std::{
+        io::Write,
+        process::{Command, Stdio},
+    };
+    let mut server = Command::new(std::env::current_exe().expect("cannot find the varmint executable"))
+        .arg(SERVE_TEXT_COMMAND)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to start the clipboard server");
+    server
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(text)
+        .expect("failed to hand the clipboard server its text");
+}
+
+/// Serves the text on stdin as the clipboard until another program takes it.
+#[cfg(target_os = "linux")]
+pub fn serve_text() {
+    use arboard::SetExtLinux;
+    use std::io::Read;
+    let mut text = Vec::new();
+    std::io::stdin()
+        .read_to_end(&mut text)
+        .expect("failed to read the clipboard text");
+    unsafe { libc::setsid() };
+    arboard::Clipboard::new()
+        .and_then(|mut clipboard| clipboard.set().wait().text(String::from_utf8_lossy(&text)))
+        .expect("failed to serve the clipboard");
+}
+
+/// The host clipboard image as PNG.
+#[cfg(target_os = "linux")]
+pub fn read_png() -> Option<Vec<u8>> {
+    Pasteboard::general().read_png()
+}
+
+#[cfg(target_os = "linux")]
+pub struct Pasteboard {
+    inner: std::cell::RefCell<arboard::Clipboard>,
+}
+
+#[cfg(target_os = "linux")]
+impl Pasteboard {
+    pub fn general() -> Pasteboard {
+        let inner = arboard::Clipboard::new().unwrap_or_else(|error| panic!("cannot open the clipboard: {error}"));
+        Pasteboard { inner: inner.into() }
+    }
+
+    /// Changes with the clipboard text, which X11 and Wayland do not count.
+    fn change_count(&self) -> isize {
+        self.read_text().map_or(0, |text| hash_bytes(&text) as isize)
+    }
+
+    fn read_text(&self) -> Option<Vec<u8>> {
+        self.inner.borrow_mut().get_text().ok().map(String::into_bytes)
+    }
+
+    pub fn read_png(&self) -> Option<Vec<u8>> {
+        let image = self.inner.borrow_mut().get_image().ok()?;
+        let mut png = Vec::new();
+        let mut encoder = png::Encoder::new(&mut png, image.width as u32, image.height as u32);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .and_then(|mut writer| writer.write_image_data(&image.bytes))
+            .expect("encoding the clipboard image as PNG failed");
+        Some(png)
+    }
+
+    pub fn write_text(&self, bytes: &[u8]) {
+        self.inner
+            .borrow_mut()
+            .set_text(String::from_utf8_lossy(bytes))
+            .unwrap_or_else(|error| panic!("cannot write the clipboard: {error}"));
     }
 }
 

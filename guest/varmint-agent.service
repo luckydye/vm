@@ -1,0 +1,10 @@
+[Unit]
+Description=Varmint host agent
+DefaultDependencies=no
+BindsTo=dev-virtio\x2dports-agent.device
+After=dev-virtio\x2dports-agent.device
+
+[Service]
+ExecStart=/usr/local/libexec/varmint-agent
+Restart=always
+RestartSec=100ms
