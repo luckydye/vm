@@ -181,7 +181,6 @@ sudo -H -u varmint sh -c 'cat > ~/.claude.json' <<'EOF_CLAUDE'
 EOF_CLAUDE
 sudo -H -u varmint sh -c 'mkdir -p ~/.claude && cat > ~/.claude/settings.json' <<'EOF_CLAUDE_SETTINGS'
 {
-  "model": "default",
   "permissions": {
     "defaultMode": "bypassPermissions"
   },
