@@ -632,6 +632,28 @@ export function typing(before, after) {
   return [...[...before.slice(same)].map(() => [KEY_CODES.Backspace]), ...typed].flatMap(chord);
 }
 
+// The presses that type `text` into the machine's screen, as its paste.
+export const pasting = (text) => typing("", text.replace(/\r\n?/g, "\n"));
+
+// Browsers only give pages the clipboard over HTTPS or on localhost.
+function clipboard() {
+  if (!navigator.clipboard) throw new Error("Pasting needs a secure connection, HTTPS or localhost.");
+  return navigator.clipboard;
+}
+
+export const readClipboardText = async () => clipboard().readText();
+
+// The browser clipboard as { png } if it holds a PNG image, otherwise as { text }.
+export async function readClipboard() {
+  const items = await clipboard().read();
+  const blob = (type) => items.find((item) => item.types.includes(type))?.getType(type);
+  const png = blob("image/png");
+  if (png) return { png: new Uint8Array(await (await png).arrayBuffer()) };
+  const text = blob("text/plain");
+  if (!text) throw new Error("The clipboard holds no text or PNG image.");
+  return { text: await (await text).text() };
+}
+
 // The key of a KeyboardEvent.key that types no text into the on-screen
 // keyboard's field, like Enter or an arrow, or null. Backspace edits the
 // field, so `typing` sends it.
