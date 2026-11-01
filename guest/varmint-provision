@@ -206,6 +206,13 @@ Nothing you do here can harm the host, so act without asking for permission.
 - Your credentials stay on the host: you cannot push. Commit your work to
   branches in the repository; the user fetches them from the host and
   reviews and pushes them there.
+- Other VMs and the user share data with you through an object store on
+  the host, at http://127.0.0.1:5101. `curl localhost:5101/` lists the
+  buckets this VM may use, `curl localhost:5101/BUCKET?prefix=P` their
+  objects, and `curl localhost:5101/BUCKET/KEY` reads one; write with
+  `curl -T FILE localhost:5101/BUCKET/KEY`, delete with `curl -X DELETE`.
+  Every write keeps the earlier versions (`?versions` lists them,
+  `?versionId=N` reads one), and the host logs every request.
 EOF_CLAUDE_MD
 if [ "$arch" = arm64 ]; then
     sudo -H -u varmint sh -c 'echo "- x86-64 binaries run through FEX (\`FEX\`, \`FEXBash\`)." >> ~/.claude/CLAUDE.md'

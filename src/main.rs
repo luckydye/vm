@@ -23,6 +23,7 @@ mod screen;
 mod seed;
 mod serve;
 mod stdio;
+mod store;
 mod telemetry;
 mod uart;
 mod virtio;

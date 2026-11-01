@@ -22,7 +22,7 @@ mod web;
 
 use crate::{
     config::{GUEST_ENVIRONMENT_VARIABLE, Hardware},
-    instance, protocol,
+    instance, protocol, store,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -58,7 +58,8 @@ const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 /// config::PASSED_VARIABLES; they reach `varmint run` in
 /// GUEST_ENVIRONMENT_VARIABLE, never its arguments or its own variables.
 /// Mounts and seeds are left out on purpose: they name host files, which a
-/// remote client must not reach.
+/// remote client must not reach. `stores` grants buckets of the shared store,
+/// `BUCKET[:ro]` as in `--store`.
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "lowercase", deny_unknown_fields)]
 enum Request {
@@ -75,6 +76,8 @@ enum Request {
         wait_network: bool,
         #[serde(default)]
         env: BTreeMap<String, String>,
+        #[serde(default)]
+        stores: Vec<String>,
     },
     Ls,
     Stop {
@@ -419,6 +422,7 @@ fn execute(client: &Client, request: Request) -> Result<Reply, String> {
             size,
             wait_network,
             env,
+            stores,
         } => {
             let mut args = vec!["run".to_owned()];
             if let Some(name) = name {
@@ -446,6 +450,10 @@ fn execute(client: &Client, request: Request) -> Result<Reply, String> {
             }
             if wait_network {
                 args.push("--wait-network".into());
+            }
+            for spec in stores {
+                store::Grant::parse(&spec)?;
+                args.extend(["--store".to_owned(), spec]);
             }
             let name = varmint(client, &args, &env)?;
             Ok(Reply {
