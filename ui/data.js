@@ -265,6 +265,9 @@ function runFields(form) {
   if (form.name) fields.name = form.name;
   if (form.base) fields.base = form.base;
   if (form.disk_gib) fields.disk_gib = Number(form.disk_gib);
+  // Bucket names cannot hold commas or spaces, so the field lists them with either.
+  const stores = form.stores.split(/[\s,]+/).filter(Boolean);
+  if (stores.length) fields.stores = stores;
   if (form.size) {
     const size = form.size.split("x").map(Number);
     if (size.length !== 2 || size.some((value) => !Number.isInteger(value))) throw new Error(`size is not WIDTHxHEIGHT: ${form.size}`);

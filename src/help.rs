@@ -66,6 +66,12 @@ ignores. Changes in the VM never reach the host."
                         .into(),
                 ),
                 (
+                    "--store BUCKET[:ro]",
+                    "Let the VM use BUCKET of the shared store, see `varmint store`;\n\
+                     :ro makes it read-only. Repeatable"
+                        .into(),
+                ),
+                (
                     "--env NAME",
                     "Copy a variable from your environment into the VM. Repeatable"
                         .into(),
@@ -208,6 +214,44 @@ authorized in every VM. Remaining arguments are passed to ssh."
                 ("varmint ssh $vm", "interactive session"),
                 ("varmint ssh $vm uptime", "run a command"),
                 ("varmint ssh $vm -L 8080:localhost:8080", "forward a port"),
+            ],
+        },
+        Command {
+            name: "store",
+            group: "Access",
+            usage: "varmint store ls|get|put|rm|log|gc [ARGS]",
+            summary: "Read, write and audit the object store shared by VMs",
+            description: "\
+The store keeps buckets of versioned objects in ~/.varmint/store. A VM may
+use only the buckets it was started with (`varmint run --store BUCKET[:ro]`),
+through an S3-like HTTP API on http://127.0.0.1:5101 in the guest:
+
+  GET    /                               buckets this VM may use
+  GET    /BUCKET?prefix=P[&versions]     objects, or all their versions
+  GET    /BUCKET/KEY[?versionId=N]       an object, or one of its versions
+  HEAD   /BUCKET/KEY                     its headers
+  PUT    /BUCKET/KEY                     a new version, with Content-Length
+  DELETE /BUCKET/KEY                     a delete marker as the new version
+
+Replies carry the version in x-amz-version-id; lists and errors are JSON.
+Nothing is overwritten or removed until gc runs, and every request, allowed
+or not, is logged with the VM that made it. From the host, these commands
+may use every bucket and are logged as host:
+
+  ls [BUCKET [PREFIX]] [--versions]   buckets, objects or versions as JSON
+  get BUCKET KEY [--version N]        an object on stdout
+  put BUCKET KEY                      stdin as a new version
+  rm BUCKET KEY                       add a delete marker
+  log [BUCKET]                        time, caller, method, status, key, version, error
+  gc --keep N                         remove all but the newest N versions of each key"
+                .into(),
+            options: vec![],
+            examples: &[
+                ("varmint run --store shared --store specs:ro", "a VM with two buckets"),
+                ("curl -T notes.md localhost:5101/shared/notes.md", "in the VM: store a file"),
+                ("curl localhost:5101/shared/notes.md", "in the VM: read it"),
+                ("varmint store get shared notes.md --version 3", "an earlier version on the host"),
+                ("varmint store log shared", "who did what"),
             ],
         },
         Command {
@@ -425,8 +469,9 @@ created on first use:
 A failed request answers {\"error\": \"...\"}. All fields of run are
 optional, plus name and base as in `varmint run`, and env, an object of
 guest variables. CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY come from
-the server's environment when set, unless env names them. Mounts
-and seeds are not available remotely, since they name host files.
+the server's environment when set, unless env names them. stores is a
+list of buckets the VM may use, as in --store, like [\"shared\", \"specs:ro\"].
+Mounts and seeds are not available remotely, since they name host files.
 
 attach hands the connection to the VM's control socket after its reply,
 with request as the first line there: stream for the screen as H.264

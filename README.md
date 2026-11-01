@@ -102,6 +102,20 @@ echo registry.example.com >> ~/.varmint/registries
 varmint exec "$vm" -- podman pull registry.example.com/team/app
 ```
 
+## Shared store
+VMs share data through an object store on the host, in `~/.varmint/store`. A VM may use only the buckets it was started with, read-only with `:ro`, and reaches them through an S3-like HTTP API on `127.0.0.1:5101` in the guest, which its agent relays to the host without any network between them. Every put and delete adds a version, so nothing is lost until you run `varmint store gc`, and every request is logged with the VM that made it:
+
+```sh
+a=$(varmint run --store shared)
+b=$(varmint run --store shared:ro)
+varmint exec "$a" -- curl -sT notes.md localhost:5101/shared/notes.md   # a new version
+varmint exec "$b" -- curl -s localhost:5101/shared/notes.md
+varmint exec "$b" -- curl -s 'localhost:5101/shared?prefix=no&versions'
+varmint store get shared notes.md --version 1    # any version, from the host
+varmint store log shared                         # who did what, allowed or not
+varmint store gc --keep 5                        # keep the newest 5 versions of each key
+```
+
 ## Your own commands
 Executables in `~/.varmint/commands` become varmint commands: `varmint NAME` runs `~/.varmint/commands/NAME` with the remaining arguments and `$VARMINT` set to the varmint binary. The comment on the line after the shebang is its summary in `varmint help`.
 
@@ -153,7 +167,7 @@ echo '{"token":"'$token'","op":"ls"}' | nc 127.0.0.1 7420
 echo '{"token":"'$token'","op":"stop","name":"swift-otter"}' | nc 127.0.0.1 7420
 ```
 
-`run` takes `name`, `base`, `persist`, `cpus`, `memory_mib`, `disk_gib`, `size` (`[width, height]`), `wait_network` and `env`, the guest variables. `CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_API_KEY` come from the server's environment when set, so its VMs share the host's credentials; a client's `env` replaces them, as in `"env": {"CLAUDE_CODE_OAUTH_TOKEN": "..."}`. Mounts and seeds are not available remotely, since they name host files. Without `--cert` and `--key` the connection is not encrypted, so keep it on the loopback or a private network. With them every connection is TLS, which browsers on other machines need for the web UI's video; [mkcert](https://github.com/FiloSottile/mkcert) makes a certificate they trust (`mkcert -cert-file mac.pem -key-file mac-key.pem your-mac.local 192.168.1.20`, then install its root CA on the other machine).
+`run` takes `name`, `base`, `persist`, `cpus`, `memory_mib`, `disk_gib`, `size` (`[width, height]`), `wait_network`, `stores`, the buckets as in `--store` (`["shared", "specs:ro"]`), and `env`, the guest variables. `CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_API_KEY` come from the server's environment when set, so its VMs share the host's credentials; a client's `env` replaces them, as in `"env": {"CLAUDE_CODE_OAUTH_TOKEN": "..."}`. Mounts and seeds are not available remotely, since they name host files. Without `--cert` and `--key` the connection is not encrypted, so keep it on the loopback or a private network. With them every connection is TLS, which browsers on other machines need for the web UI's video; [mkcert](https://github.com/FiloSottile/mkcert) makes a certificate they trust (`mkcert -cert-file mac.pem -key-file mac-key.pem your-mac.local 192.168.1.20`, then install its root CA on the other machine).
 
 `attach` takes `name` and `request`, a request to the VM's control socket, and after its reply hands the connection to that socket, which answers in its own protocol: `{"op":"stream","fps":30,"codec":"h264"}` for the screen as hardware-encoded H.264 (`"rgb"` sends raw pixels), `{"op":"inputstream"}` for mouse and keyboard events, and `{"op":"open","session":{"type":"pty",...}}` for a shell. The web UI of `--ui` is built on it: a wall of every VM's live screen, and for each VM its shell beside its display.
 

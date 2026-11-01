@@ -5,6 +5,7 @@ use crate::{
     keymap,
     machine::MAX_SHARES,
     protocol::{self, Codec, Frame, InputEvent, Reply, Request, Session, kind},
+    store::{self, Grant},
     virtio::input::keys::{BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, KEY_LEFTSHIFT},
     vmm,
 };
@@ -81,6 +82,7 @@ pub fn main() {
         "key" => key(args),
         "scroll" => scroll(args),
         "serve" => serve_command(args),
+        "store" => store_command(args),
         "__vmm" => vmm_process(args),
         _ => user_command(command, args),
     }
@@ -234,6 +236,7 @@ fn run(args: &[String]) {
     let mut mounts = Vec::new();
     let mut environment = Vec::new();
     let mut seeds = Vec::new();
+    let mut grants = Vec::new();
     let mut hardware = DEFAULT_HARDWARE;
     let mut hardware_flags = false;
     let mut image = None;
@@ -250,6 +253,10 @@ fn run(args: &[String]) {
             "--wait-network" => wait_network = true,
             "--env" => environment.push(args.next().unwrap_or_else(|| usage_error("run")).clone()),
             "--seed" => seeds.push(args.next().unwrap_or_else(|| usage_error("run")).clone()),
+            "--store" => {
+                let spec = args.next().unwrap_or_else(|| fail("--store needs BUCKET[:ro]"));
+                grants.push(Grant::parse(spec).unwrap_or_else(|error| fail(error)));
+            }
             "--mount" => {
                 let spec = args.next().unwrap_or_else(|| fail("--mount needs HOST:GUEST[:ro]"));
                 mounts.push(Mount::parse(spec).unwrap_or_else(|error| fail(error)));
@@ -310,7 +317,7 @@ fn run(args: &[String]) {
 
     let name = launch.instance.name.clone();
     let log = launch.instance.log();
-    spawn_vmm(launch, window, &mounts, &seeds, &environment);
+    spawn_vmm(launch, window, &mounts, &seeds, &grants, &environment);
 
     let instance = open(&name);
     let (_, reply) = request(&instance, &Request::Wait).unwrap_or_else(|_| {
@@ -363,7 +370,14 @@ fn wait_for_network(instance: &Instance) {
     }
 }
 
-fn spawn_vmm(launch: Launch, window: bool, mounts: &[Mount], seeds: &[Seed], environment: &BTreeMap<String, String>) {
+fn spawn_vmm(
+    launch: Launch,
+    window: bool,
+    mounts: &[Mount],
+    seeds: &[Seed],
+    grants: &[Grant],
+    environment: &BTreeMap<String, String>,
+) {
     let lock_fd = launch.lock.as_raw_fd();
     let listen_fd = launch.listener.as_raw_fd();
     set_inheritable(lock_fd, true);
@@ -393,6 +407,9 @@ fn spawn_vmm(launch: Launch, window: bool, mounts: &[Mount], seeds: &[Seed], env
     }
     for seed in seeds {
         command.arg("--seed").arg(seed.spec());
+    }
+    for grant in grants {
+        command.arg("--store").arg(grant.spec());
     }
     command
         .spawn()
@@ -450,6 +467,7 @@ fn vmm_process(args: &[String]) {
     let mut window = false;
     let mut mounts = Vec::new();
     let mut seeds = Vec::new();
+    let mut grants = Vec::new();
     let mut rest = rest.iter();
     while let Some(arg) = rest.next() {
         match arg.as_str() {
@@ -461,6 +479,10 @@ fn vmm_process(args: &[String]) {
             "--seed" => {
                 let spec = rest.next().unwrap_or_else(|| fail("internal: --seed needs a spec"));
                 seeds.push(Seed::parse(spec).unwrap_or_else(|error| fail(error)));
+            }
+            "--store" => {
+                let spec = rest.next().unwrap_or_else(|| fail("internal: --store needs a spec"));
+                grants.push(Grant::parse(spec).unwrap_or_else(|error| fail(error)));
             }
             _ => fail(format!("internal: unexpected argument {arg}")),
         }
@@ -484,7 +506,80 @@ fn vmm_process(args: &[String]) {
     // Helpers started by the VM must not see the guest's secrets.
     unsafe { env::remove_var(GUEST_ENVIRONMENT_VARIABLE) };
 
-    vmm::run(launch, window, &mounts, &seeds, environment).unwrap_or_else(|error| panic!("VM failed: {error:?}"));
+    vmm::run(launch, window, &mounts, &seeds, grants, environment).unwrap_or_else(|error| panic!("VM failed: {error:?}"));
+}
+
+/// `varmint store`: the shared object store from the host, through the same
+/// requests VMs make, but with every bucket.
+fn store_command(args: &[String]) {
+    let Some((subcommand, args)) = args.split_first() else {
+        usage_error("store");
+    };
+    let (method, mut positional, mut query) = (subcommand.as_str(), Vec::new(), BTreeMap::new());
+    let mut keep = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--versions" if method == "ls" => {
+                query.insert("versions".to_owned(), String::new());
+            }
+            "--version" if method == "get" => {
+                query.insert("versionId".to_owned(), args.next().unwrap_or_else(|| usage_error("store")).clone());
+            }
+            "--keep" if method == "gc" => keep = Some(parse::<u32>(args.next(), "--keep")),
+            _ if !arg.starts_with('-') => positional.push(arg.clone()),
+            _ => usage_error("store"),
+        }
+    }
+    let request = |method: &str, bucket: &str, key: &str, query| store::Request {
+        method: method.into(),
+        bucket: bucket.into(),
+        key: key.into(),
+        query,
+        length: None,
+        content_type: None,
+    };
+    let request = match (method, positional.as_slice()) {
+        ("ls", []) => request("GET", "", "", query),
+        ("ls", [bucket]) => request("GET", bucket, "", query),
+        ("ls", [bucket, prefix]) => {
+            query.insert("prefix".to_owned(), prefix.clone());
+            request("GET", bucket, "", query)
+        }
+        ("get", [bucket, key]) => request("GET", bucket, key, query),
+        ("put", [bucket, key]) => request("PUT", bucket, key, query),
+        ("rm", [bucket, key]) => request("DELETE", bucket, key, query),
+        ("log", []) | ("log", [_]) => {
+            for line in store::log(positional.first().map(String::as_str)).unwrap_or_else(|error| fail(error)) {
+                println!("{line}");
+            }
+            return;
+        }
+        ("gc", []) => {
+            let keep = keep.unwrap_or_else(|| fail("gc needs --keep N, the versions to keep of every key"));
+            if keep == 0 {
+                fail("--keep must be at least 1, the current version");
+            }
+            let (count, bytes) = store::gc(keep).unwrap_or_else(|error| fail(error));
+            eprintln!("removed {count} versions, {bytes} bytes");
+            return;
+        }
+        _ => usage_error("store"),
+    };
+    let response = store::handle(&store::Caller::Host, &request, &mut io::stdin().lock());
+    let status = response.head.status;
+    let mut stdout = io::stdout().lock();
+    let mut body = Vec::new();
+    response
+        .send_body(|chunk| match status {
+            200 => stdout.write_all(&chunk).unwrap_or_else(|error| fail(error)),
+            _ => body.extend(chunk),
+        })
+        .unwrap_or_else(|error| fail(error));
+    if status != 200 {
+        let error: serde_json::Value = serde_json::from_slice(&body).unwrap_or_else(|error| fail(error));
+        fail(error["message"].as_str().expect("store errors have a message"));
+    }
 }
 
 fn list() {

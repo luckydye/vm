@@ -11,7 +11,9 @@ use crate::{
     memory, net,
     protocol::{GuestMount, GuestSeeds},
     registry, seed,
-    stdio, telemetry, virtio,
+    stdio,
+    store::Grant,
+    telemetry, virtio,
 };
 use std::{
     collections::BTreeMap,
@@ -91,6 +93,7 @@ pub fn run(
     window: bool,
     mounts: &[Mount],
     seeds: &[Seed],
+    grants: Vec<Grant>,
     environment: BTreeMap<String, String>,
 ) -> io::Result<()> {
     let Launch {
@@ -180,6 +183,8 @@ pub fn run(
             items,
         }),
         registry::allowed().unwrap_or_else(|error| panic!("{error}")),
+        instance.name.clone(),
+        grants,
     );
 
     let net_rx_tx = runtime_event_tx.clone();

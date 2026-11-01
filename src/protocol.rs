@@ -49,6 +49,11 @@ pub mod kind {
     pub const CLIPBOARD_IMAGE: u8 = 12;
     /// A [`RegistryTokenRequest`] from the guest, answered with a [`RegistryToken`].
     pub const REGISTRY_TOKEN: u8 = 13;
+    /// A [`crate::store::Request`] from the guest on the stream it chose,
+    /// answered with a [`crate::store::Head`] on the same stream.
+    pub const STORE: u8 = 14;
+    /// A piece of a store request's or reply's body; an empty one ends it.
+    pub const STORE_DATA: u8 = 15;
 }
 
 /// The kinds of messages in an H.264 [`Request::Stream`].

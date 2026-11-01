@@ -4,7 +4,9 @@
 use crate::{
     devices::RuntimeEvent,
     protocol::{Deframer, Frame, GuestMount, GuestSeeds, RegistryTokenRequest, Session, Setup, SetupDone, kind},
-    registry, telemetry,
+    registry,
+    store::{self, Grant},
+    telemetry,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -29,6 +31,11 @@ pub struct Agent {
     environment: BTreeMap<String, String>,
     seeds: Option<GuestSeeds>,
     registries: Vec<String>,
+    /// The VM's name and the buckets it may use, for store requests.
+    name: String,
+    grants: Vec<Grant>,
+    /// Where the body of each store request in progress goes, by stream.
+    store_requests: Mutex<HashMap<u32, Sender<Vec<u8>>>>,
 }
 
 /// Receives raw bytes the guest wrote to the agent port.
@@ -49,6 +56,8 @@ pub fn start(
     environment: BTreeMap<String, String>,
     seeds: Option<GuestSeeds>,
     registries: Vec<String>,
+    name: String,
+    grants: Vec<Grant>,
 ) -> (Arc<Agent>, Sink) {
     let agent = Arc::new(Agent {
         to_guest,
@@ -62,6 +71,9 @@ pub fn start(
         environment,
         seeds,
         registries,
+        name,
+        grants,
+        store_requests: Mutex::new(HashMap::new()),
     });
 
     let (tx, rx) = channel::<Vec<u8>>();
@@ -121,6 +133,18 @@ impl Agent {
                 return;
             }
             kind::REGISTRY_TOKEN => return self.registry_token(&frame.payload),
+            kind::STORE => return self.store_request(frame.stream, frame.payload),
+            kind::STORE_DATA => {
+                let mut requests = self.store_requests.lock().unwrap();
+                if frame.payload.is_empty() {
+                    // Dropping the sender ends the body.
+                    requests.remove(&frame.stream);
+                } else if let Some(body) = requests.get(&frame.stream) {
+                    // A request answered before its body arrived no longer reads it.
+                    let _ = body.send(frame.payload);
+                }
+                return;
+            }
             _ => {}
         }
 
@@ -137,8 +161,10 @@ impl Agent {
     }
 
     fn hello(&self) {
-        // A restarted agent has lost every stream it served before.
+        // A restarted agent has lost every stream it served before, and
+        // dropping the store bodies ends requests whose body never finished.
         self.streams.lock().unwrap().clear();
+        self.store_requests.lock().unwrap().clear();
 
         let time_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -169,6 +195,28 @@ impl Agent {
                 agent.send(&Frame::new(0, kind::REGISTRY_TOKEN, serde_json::to_vec(&token).unwrap()));
             })
             .unwrap_or_else(|error| panic!("failed to spawn registry token thread: {error}"));
+    }
+
+    /// Answers on another thread, which reads the body as it arrives and
+    /// sends the reply's head, body and an empty frame on the request's stream.
+    fn store_request(self: &Arc<Self>, stream: u32, payload: Vec<u8>) {
+        let (body, frames) = channel();
+        self.store_requests.lock().unwrap().insert(stream, body);
+        let agent = self.clone();
+        thread::Builder::new()
+            .name("varmint-store".into())
+            .spawn(move || {
+                let caller = store::Caller::Vm {
+                    name: &agent.name,
+                    grants: &agent.grants,
+                };
+                let response = store::handle_frame(&caller, &payload, &mut store::Chunks::new(frames));
+                agent.send(&Frame::new(stream, kind::STORE, serde_json::to_vec(&response.head).unwrap()));
+                // A file that fails to read cuts the body short of its Content-Length, which HTTP clients report.
+                let _ = response.send_body(|chunk| agent.send(&Frame::new(stream, kind::STORE_DATA, chunk)));
+                agent.send(&Frame::new(stream, kind::STORE_DATA, Vec::new()));
+            })
+            .unwrap_or_else(|error| panic!("failed to spawn store thread: {error}"));
     }
 
     fn setup_done(&self, payload: &[u8]) {

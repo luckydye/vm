@@ -629,6 +629,7 @@ $("sheet").addEventListener("close", () => {
       base: form.base.value.trim(),
       disk_gib: form.disk_gib.value,
       size: form.size.value.trim(),
+      stores: form.stores.value,
       env: form.env.value,
     });
   } else {
