@@ -441,6 +441,10 @@ function openSession(name) {
       data.releaseKeys(held).forEach(input.send);
     });
 
+    // Types the clipboard's text, since the guest only has its own clipboard.
+    on($("paste"), "click", () => {
+      data.readClipboardText().then((text) => data.pasting(text).forEach(input.send)).catch((error) => caption(error.message));
+    });
     on($("keys"), "click", (event) => {
       const button = event.target.closest("[data-code]");
       if (!button) return;
@@ -539,6 +543,11 @@ function openShell(name) {
     const button = event.target.closest(".key");
     if (!button) return;
     if (button.classList.contains("keyboard")) return terminal.textarea === document.activeElement ? terminal.blur() : terminal.focus();
+    if (button.classList.contains("paste")) {
+      return data.readClipboard()
+        .then(({ png, text }) => (png ? shell.pasteImage(png) : terminal.paste(text)))
+        .catch((error) => terminal.write(`\r\n${error.message}\r\n`));
+    }
     if (!button.dataset.name) return data.toggleModifier(Number(button.dataset.code));
     shell.write(data.terminalKey(button.dataset.name));
   }, { signal: keys.signal });
