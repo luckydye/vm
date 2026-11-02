@@ -165,18 +165,16 @@ done
 # Install the tools from /etc/mise/config.toml (guest/mise.toml).
 runuser -l varmint -c 'mise install'
 
-# Claude Code skips its first-run theme picker and trusts everything in the
-# home directory, so every VM starts straight into a session. The VM is the
-# sandbox, so Claude Code runs without permission prompts.
+# Claude Code skips its first-run theme picker and, with
+# CLAUDE_CODE_SANDBOXED, its trust dialog in every directory, so every VM
+# starts straight into a session. Desktop and ssh sessions read the variable
+# from /etc/environment, varmint exec gets it from varmint-agent. The VM is
+# the sandbox, so Claude Code runs without permission prompts.
+echo CLAUDE_CODE_SANDBOXED=1 >> /etc/environment
 sudo -H -u varmint sh -c 'cat > ~/.claude.json' <<'EOF_CLAUDE'
 {
   "hasCompletedOnboarding": true,
-  "theme": "dark",
-  "projects": {
-    "/home/varmint": {
-      "hasTrustDialogAccepted": true
-    }
-  }
+  "theme": "dark"
 }
 EOF_CLAUDE
 sudo -H -u varmint sh -c 'mkdir -p ~/.claude && cat > ~/.claude/settings.json' <<'EOF_CLAUDE_SETTINGS'

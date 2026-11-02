@@ -77,6 +77,8 @@ def user_environment(account, terminal=None):
         "DISPLAY": ":0",
         "XDG_RUNTIME_DIR": f"/run/user/{account.pw_uid}",
         "LANG": "C.UTF-8",
+        # Skips Claude Code's trust dialog, see varmint-provision.
+        "CLAUDE_CODE_SANDBOXED": "1",
     }
     environment.update(terminal or {})
     environment.update(HOST_ENVIRONMENT)
