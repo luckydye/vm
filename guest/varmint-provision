@@ -386,6 +386,11 @@ cat > /etc/sysctl.d/80-varmint-nodad.conf <<'EOF_SYSCTL'
 net.ipv6.conf.*.accept_dad = 0
 EOF_SYSCTL
 
+# Rootless podman publishes containers on ports 80 and up, as docker does.
+cat > /etc/sysctl.d/80-varmint-ports.conf <<'EOF_PORTS'
+net.ipv4.ip_unprivileged_port_start = 80
+EOF_PORTS
+
 # ssh sessions get the host-provided variables too; optional, so a VM that
 # has not received any yet still accepts logins.
 printf 'session optional pam_env.so envfile=/run/varmint/environment\n' >> /etc/pam.d/sshd
