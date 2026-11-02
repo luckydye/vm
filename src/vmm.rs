@@ -132,8 +132,6 @@ pub fn run(
         }
     }
 
-    let disk = virtio::Blk::new(&config.disk, config.disk_size)
-        .unwrap_or_else(|error| panic!("failed to open VM disk {}: {error}", config.disk.display()));
     let boot = BootPayload::load(&config);
 
     let vm = Vm::new(config.vcpus).unwrap_or_else(|error| panic!("failed to create the VM: {error}"));
@@ -141,6 +139,12 @@ pub fn run(
     let display = Mutex::new(DisplayBuffer::new());
 
     let (runtime_event_tx, runtime_event_rx) = std::sync::mpsc::channel();
+
+    let blk_io_tx = runtime_event_tx.clone();
+    let disk = virtio::Blk::new(&config.disk, config.disk_size, move |completion| {
+        let _ = blk_io_tx.send(RuntimeEvent::BlkIo(completion));
+    })
+    .unwrap_or_else(|error| panic!("failed to open VM disk {}: {error}", config.disk.display()));
 
     let staged_seeds =
         seed::stage(&instance, seeds).unwrap_or_else(|error| panic!("failed to stage seeds: {error}"));
