@@ -79,6 +79,7 @@ apt-get install -y --no-install-recommends \
     pkg-config \
     podman \
     podman-compose \
+    podman-docker \
     pulseaudio \
     pulseaudio-utils \
     python3 \
@@ -92,6 +93,15 @@ apt-get install -y --no-install-recommends \
     wlrctl \
     wtype \
     xwayland
+
+# `docker` is podman, so pulls from private registries go through the
+# agent's mirror. Docker itself cannot be installed.
+touch /etc/containers/nodocker
+cat > /etc/apt/preferences.d/80-varmint-nodocker <<'EOF_NODOCKER'
+Package: docker.io docker-ce docker-ce-cli docker-cli docker-compose docker-compose-plugin containerd.io
+Pin: release *
+Pin-Priority: -1
+EOF_NODOCKER
 
 # mise manages per-project tool versions (node, python, ...).
 install -d -m 0755 /etc/apt/keyrings

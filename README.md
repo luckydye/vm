@@ -94,7 +94,7 @@ export CLAUDE_CODE_OAUTH_TOKEN=...   # from `claude setup-token`
 varmint run --env GITHUB_TOKEN
 ```
 
-**Private container registries** listed in `~/.varmint/registries`, one host per line, can be pulled from in every VM without logging in there. Podman in the VM pulls them through a mirror on its loopback, which gets a short-lived token for each repository from the host, made with the credentials `docker login` saved on the host. The VM can pull but never push, and the credentials stay on the host:
+**Private container registries** listed in `~/.varmint/registries`, one host per line, can be pulled from in every VM without logging in there. Podman in the VM, which is also its `docker`, pulls them through a mirror on its loopback, which gets a short-lived token for each repository from the host, made with the credentials `docker login` saved on the host. The VM can pull but never push, and the credentials stay on the host:
 
 ```sh
 docker login registry.example.com
