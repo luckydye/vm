@@ -81,6 +81,8 @@ PUBLISH_DIR="$(mktemp -d "$OUTPUT_DIR/.partial.XXXXXX")"
 install -m 0644 "$stage/$kernel_name" "$PUBLISH_DIR/Image"
 install -m 0644 "$stage/$initrd_name" "$PUBLISH_DIR/initrd"
 
+# Deleted files leave their data in free blocks, which zstd would compress too.
+virt-sparsify --in-place "$work_image"
 zstd -T0 -19 -f "$work_image" -o "$PUBLISH_DIR/varmint-debian.raw.zst"
 sha256sum \
     "$PUBLISH_DIR/Image" \

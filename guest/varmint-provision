@@ -165,7 +165,7 @@ for group in sudo audio video render input; do
 done
 
 # Install the tools from /etc/mise/config.toml (guest/mise.toml).
-runuser -l varmint -c 'mise install'
+runuser -l varmint -c 'mise install && mise cache clear'
 
 # Claude Code skips its first-run theme picker and, with
 # CLAUDE_CODE_SANDBOXED, its trust dialog in every directory, so every VM
