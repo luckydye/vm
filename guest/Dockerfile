@@ -90,7 +90,8 @@ RUN printf 'Types: deb deb-src\nURIs: http://snapshot.debian.org/archive/debian/
     cd hyprland-*/ && \
     for patch in /opt/hyprland-patches/*.patch; do cp "$patch" debian/patches/ && basename "$patch" >> debian/patches/series; done && \
     DEB_BUILD_OPTIONS="nocheck parallel=$(nproc)" dpkg-buildpackage -b -uc -us && \
-    install -Dm0644 -t /opt/hyprland-debs /src/hyprland_*.deb
+    install -Dm0644 -t /opt/hyprland-debs /src/hyprland_*.deb && \
+    rm -rf /src /var/lib/apt/lists/*
 
 FROM debian:trixie-slim
 

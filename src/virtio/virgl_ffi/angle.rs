@@ -3,7 +3,7 @@
 
 use super::VirglRendererGlCtxParam;
 use std::{
-    ffi::{c_int, c_uint, c_void},
+    ffi::{c_char, c_int, c_uint, c_void},
     sync::OnceLock,
 };
 
