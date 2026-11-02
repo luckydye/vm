@@ -89,6 +89,8 @@ apt-get install -y --no-install-recommends \
     uidmap \
     vulkan-tools \
     wl-clipboard \
+    wlrctl \
+    wtype \
     xwayland
 
 # mise manages per-project tool versions (node, python, ...).
@@ -195,6 +197,11 @@ Nothing you do here can harm the host, so act without asking for permission.
   the user things on screen. X11 programs run through Xwayland.
 - You can see the screen too: `grim /tmp/screen.png` takes a screenshot,
   which you can then read. Look at it to check what you put on screen.
+- You can operate the desktop: `hyprctl clients` lists the windows and
+  `hyprctl dispatch` controls them. To click, move the cursor with
+  `hyprctl dispatch movecursor X Y` (layout pixels, as in `hyprctl
+  clients`), then `wlrctl pointer click left`. `wtype TEXT` types and
+  `wtype -k Escape` or `wtype -M ctrl w -m ctrl` press keys.
 - Use the screen to show the user the status of a task, or anything else
   that is easier to follow there than in the terminal, when it helps them.
 - You are the user `varmint` with passwordless `sudo`. Install system

@@ -116,6 +116,7 @@ COPY guest /opt/varmint/source
 
 RUN install -Dm0755 /opt/varmint/source/build-image-container.sh /usr/local/bin/build-varmint-guest && \
     install -Dm0755 /opt/varmint/source/varmint-gpu-check /opt/varmint/rootfs/usr/local/bin/varmint-gpu-check && \
+    install -Dm0755 /opt/varmint/source/varmint-hyprctl /opt/varmint/rootfs/usr/local/bin/hyprctl && \
     install -Dm0755 /opt/varmint/source/varmint-agent /opt/varmint/rootfs/usr/local/libexec/varmint-agent && \
     install -Dm0755 /opt/varmint/source/varmint-clipboard-agent /opt/varmint/rootfs/usr/local/libexec/varmint-clipboard-agent && \
     install -Dm0755 /opt/varmint/source/varmint-display-fit /opt/varmint/rootfs/usr/local/libexec/varmint-display-fit && \
