@@ -315,6 +315,16 @@ fn run(args: &[String]) {
     }
     .unwrap_or_else(|error| fail(error));
 
+    // A persistent VM keeps the buckets it was last given.
+    let persist = launch.instance.hardware().unwrap_or_else(|error| fail(error)).persist;
+    if persist {
+        if grants.is_empty() {
+            grants = launch.instance.stores().unwrap_or_else(|error| fail(error));
+        } else {
+            launch.instance.set_stores(&grants).unwrap_or_else(|error| fail(error));
+        }
+    }
+
     let name = launch.instance.name.clone();
     let log = launch.instance.log();
     spawn_vmm(launch, window, &mounts, &seeds, &grants, &environment);

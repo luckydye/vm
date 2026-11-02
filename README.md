@@ -103,7 +103,7 @@ varmint exec "$vm" -- podman pull registry.example.com/team/app
 ```
 
 ## Shared store
-VMs share data through an object store on the host, in `~/.varmint/store`. A VM may use only the buckets it was started with, read-only with `:ro`, and reaches them through an S3-like HTTP API on `127.0.0.1:5101` in the guest, which its agent relays to the host without any network between them. Every put and delete adds a version, so nothing is lost until you run `varmint store gc`, and every request is logged with the VM that made it:
+VMs share data through an object store on the host, in `~/.varmint/store`. A VM may use only the buckets it was started with, read-only with `:ro`, and reaches them through an S3-like HTTP API on `127.0.0.1:5101` in the guest, which its agent relays to the host without any network between them. A persistent VM starts again with the buckets it was last given unless `run` names new ones. Every put and delete adds a version, so nothing is lost until you run `varmint store gc`, and every request is logged with the VM that made it:
 
 ```sh
 a=$(varmint run --store shared)

@@ -39,7 +39,9 @@ VM and exits with the command's exit code.
 
 Without --persist the VM is ephemeral and deleted when it stops. Running
 `varmint run NAME` for a stopped persistent VM starts it again with its disk
-intact; hardware options only apply when a VM is created.
+intact; hardware options only apply when a VM is created. A persistent VM
+starts with the buckets it was last given with --store unless new ones are
+named.
 
 CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY, and variables named with
 --env, are copied from your environment into the VM's shells, commands and

@@ -4,7 +4,10 @@
 //! lock is released by the kernel when the process dies, so stale VMs are
 //! detected without pid files.
 
-use crate::config::{GIB, Hardware, Resources};
+use crate::{
+    config::{GIB, Hardware, Resources},
+    store::Grant,
+};
 use std::{
     env,
     fs::{self, File, OpenOptions},
@@ -163,6 +166,30 @@ impl Instance {
         let path = self.hardware_path();
         let source = fs::read(&path).map_err(|error| format!("failed to read {}: {error}", path.display()))?;
         serde_json::from_slice(&source).map_err(|error| format!("failed to parse {}: {error}", path.display()))
+    }
+
+    fn stores_path(&self) -> PathBuf {
+        self.dir.join("stores.json")
+    }
+
+    /// The buckets a persistent VM is started with when `run` names none.
+    pub fn stores(&self) -> Result<Vec<Grant>, String> {
+        let path = self.stores_path();
+        let source = match fs::read(&path) {
+            Ok(source) => source,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(format!("failed to read {}: {error}", path.display())),
+        };
+        let specs: Vec<String> =
+            serde_json::from_slice(&source).map_err(|error| format!("failed to parse {}: {error}", path.display()))?;
+        specs.iter().map(|spec| Grant::parse(spec)).collect()
+    }
+
+    pub fn set_stores(&self, grants: &[Grant]) -> Result<(), String> {
+        let path = self.stores_path();
+        let specs: Vec<String> = grants.iter().map(Grant::spec).collect();
+        fs::write(&path, serde_json::to_vec_pretty(&specs).unwrap())
+            .map_err(|error| format!("failed to write {}: {error}", path.display()))
     }
 
     /// The lock file the VM process holds while it runs.
