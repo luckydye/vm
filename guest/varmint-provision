@@ -102,6 +102,12 @@ Package: docker.io docker-ce docker-ce-cli docker-cli docker-compose docker-comp
 Pin: release *
 Pin-Priority: -1
 EOF_NODOCKER
+# Short names like `nginx` resolve to Docker Hub, as with docker. A drop-in,
+# since a per-user registries.conf would hide the agent's mirror drop-in.
+install -d -m 0755 /etc/containers/registries.conf.d
+cat > /etc/containers/registries.conf.d/10-varmint-docker-hub.conf <<'EOF_DOCKER_HUB'
+unqualified-search-registries = ["docker.io"]
+EOF_DOCKER_HUB
 
 # mise manages per-project tool versions (node, python, ...).
 install -d -m 0755 /etc/apt/keyrings
