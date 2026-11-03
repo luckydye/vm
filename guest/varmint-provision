@@ -32,6 +32,7 @@ EOF_BACKPORTS
 apt-get update
 # Ephemeral VMs are never upgraded in place.
 apt-get purge -y \
+    apt-listchanges \
     pipewire-alsa \
     pipewire-audio \
     pipewire-pulse \
