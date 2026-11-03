@@ -362,6 +362,13 @@ cat > /etc/chromium.d/varmint-gpu <<'EOF_CHROMIUM'
 export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --use-angle=vulkan --enable-features=Vulkan,VulkanFromANGLE,DefaultANGLEVulkan --disable-angle-features=allowMultisampledRenderToTextureEmulation --ignore-gpu-blocklist"
 EOF_CHROMIUM
 
+# Recommended (not managed) policy: the bookmark bar starts hidden, but the
+# user can still show it with Ctrl+Shift+B.
+install -d -m 0755 /etc/chromium/policies/recommended
+cat > /etc/chromium/policies/recommended/varmint.json <<'EOF_CHROMIUM_POLICY'
+{ "BookmarkBarEnabled": false }
+EOF_CHROMIUM_POLICY
+
 install -d -m 0755 /etc/udev/rules.d
 cat > /etc/udev/rules.d/70-varmint-clipboard.rules <<'EOF_UDEV'
 SUBSYSTEM=="virtio-ports", ATTR{name}=="clipboard", MODE="0660", TAG+="uaccess"
