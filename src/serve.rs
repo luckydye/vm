@@ -198,6 +198,12 @@ pub fn token() -> Result<String, String> {
 /// answered by [`web`] with the web UI and its API. With `tls`, every
 /// connection is TLS.
 pub fn serve(listener: TcpListener, token: &str, ui: bool, tls: Option<Arc<rustls::ServerConfig>>) -> ! {
+    // Keeps the Mac awake while serving, also with the screen locked or off.
+    #[cfg(target_os = "macos")]
+    let _awake = objc2_foundation::NSProcessInfo::processInfo().beginActivityWithOptions_reason(
+        objc2_foundation::NSActivityOptions::IdleSystemSleepDisabled,
+        &objc2_foundation::NSString::from_str("varmint serve"),
+    );
     thread::scope(|scope| {
         loop {
             let (connection, peer) = match listener.accept() {

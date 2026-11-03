@@ -475,6 +475,9 @@ the server's environment when set, unless env names them. stores is a
 list of buckets the VM may use, as in --store, like [\"shared\", \"specs:ro\"].
 Mounts and seeds are not available remotely, since they name host files.
 
+While it serves, the Mac does not sleep when idle, also with the screen
+locked or off. Closing the lid still sleeps it.
+
 attach hands the connection to the VM's control socket after its reply,
 with request as the first line there: stream for the screen as H.264
 (codec h264) or raw pixels (codec rgb), with \"audio\": true for the
