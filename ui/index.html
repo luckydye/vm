@@ -37,6 +37,13 @@
   </aside>
   <span class="spacer"></span>
   <span class="host" id="host"></span>
+  <span class="window-menu" id="window-menu">
+    <button class="btn" id="open-display">Display</button>
+    <button class="btn" id="open-shell">New terminal</button>
+  </span>
+  <button class="btn icon" id="machine-info" popovertarget="facts-popover" aria-label="Machine info" title="Machine info">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>
+  </button>
   <button class="btn" id="machine-power"></button>
   <button class="btn danger" id="machine-delete">Delete</button>
   <button class="btn primary" id="new">New machine</button>
@@ -57,57 +64,10 @@
   </section>
 
   <section class="machine" id="machine">
-    <div class="views" id="views">
-      <div class="pane shell-pane">
-        <div class="shell" id="shell"></div>
-        <div class="keys shell-keys" id="shell-keys">
-          <button class="key keyboard" aria-label="On-screen keyboard"></button>
-          <button class="key paste" id="shell-paste" aria-label="Paste" title="Paste">
-            <svg viewBox="0 0 24 24"><rect x="5" y="4.5" width="14" height="16" rx="2"/><path d="M9 4.5V3.5h6v1M9 11h6M9 15h4"/></svg>
-          </button>
-          <span class="key-group modifier-keys"></span>
-          <span class="key-group named-keys"></span>
-        </div>
-        <p class="shell-status" id="shell-status"></p>
-      </div>
-      <div class="pane screen-pane">
-        <header class="screen-bar">
-          <span>Display</span>
-          <span class="sound">
-            <button class="mute" id="mute">
-              <svg viewBox="0 0 24 24"><path d="M11 5 6 9H3v6h3l5 4z"/><path class="waves" d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/><path class="cross" d="m16 9.5 5 5m0-5-5 5"/></svg>
-            </button>
-            <input class="volume" type="range" id="volume" min="0" max="1" step="0.01" aria-label="Volume">
-            <button class="btn quiet" id="screen-toggle"></button>
-          </span>
-        </header>
-        <div class="screen-frame" id="screen-frame">
-          <div class="screen">
-            <canvas id="screen" tabindex="0"></canvas>
-            <p class="hint" id="caption"></p>
-          </div>
-        </div>
-        <div class="keys" id="keys">
-          <button class="key keyboard" id="keyboard" aria-label="On-screen keyboard">
-            <svg viewBox="0 0 24 24"><rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M8 14h8"/></svg>
-          </button>
-          <input class="typing" id="typing" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="enter" aria-label="Type on the machine">
-          <button class="key paste" id="paste" aria-label="Paste" title="Paste">
-            <svg viewBox="0 0 24 24"><rect x="5" y="4.5" width="14" height="16" rx="2"/><path d="M9 4.5V3.5h6v1M9 11h6M9 15h4"/></svg>
-          </button>
-          <span class="key-group modifier-keys"></span>
-          <span class="key-group named-keys"></span>
-        </div>
-      </div>
-      <button class="shell-return" id="shell-return">
-        <svg viewBox="0 0 24 24"><path d="m5 16.5 5-4.5-5-4.5M12.5 17.5h6.5"/></svg>
-        <span>Back to shell<small>The shell keeps running while the display is open.</small></span>
-      </button>
-      <dl class="facts" id="machine-facts"></dl>
-      <div class="stopped" id="stopped">
-        <p>This machine is stopped. Its disk is kept until you delete it.</p>
-        <button class="btn primary" id="machine-start">Start</button>
-      </div>
+    <div class="workspace" id="workspace"></div>
+    <div class="stopped" id="stopped">
+      <p>This machine is stopped. Its disk is kept until you delete it.</p>
+      <button class="btn primary" id="machine-start">Start</button>
     </div>
   </section>
 </main>
@@ -164,6 +124,71 @@
   </form>
 </dialog>
 
+<!-- Windows not on the machine page wait here, keeping their connections. -->
+<div id="parked" hidden>
+  <article class="window" id="display-window">
+    <header class="window-bar">
+      <span class="window-title">Display</span>
+      <span class="sound">
+        <button class="mute" id="mute">
+          <svg viewBox="0 0 24 24"><path d="M11 5 6 9H3v6h3l5 4z"/><path class="waves" d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/><path class="cross" d="m16 9.5 5 5m0-5-5 5"/></svg>
+        </button>
+        <input class="volume" type="range" id="volume" min="0" max="1" step="0.01" aria-label="Volume">
+      </span>
+    </header>
+    <div class="screen-frame" id="screen-frame">
+      <div class="screen">
+        <canvas id="screen" tabindex="0"></canvas>
+        <p class="hint" id="caption"></p>
+      </div>
+    </div>
+    <div class="keys" id="keys">
+      <button class="key keyboard" id="keyboard" aria-label="On-screen keyboard">
+        <svg viewBox="0 0 24 24"><rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M8 14h8"/></svg>
+      </button>
+      <input class="typing" id="typing" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="enter" aria-label="Type on the machine">
+      <button class="key paste" id="paste" aria-label="Paste" title="Paste">
+        <svg viewBox="0 0 24 24"><rect x="5" y="4.5" width="14" height="16" rx="2"/><path d="M9 4.5V3.5h6v1M9 11h6M9 15h4"/></svg>
+      </button>
+      <span class="key-group modifier-keys"></span>
+      <span class="key-group named-keys"></span>
+    </div>
+  </article>
+</div>
+
+<template id="shell-window">
+  <article class="window">
+    <header class="window-bar"><span class="window-title"></span></header>
+    <div class="shell"></div>
+    <div class="keys shell-keys">
+      <button class="key keyboard" aria-label="On-screen keyboard">
+        <svg viewBox="0 0 24 24"><rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M8 14h8"/></svg>
+      </button>
+      <button class="key paste" aria-label="Paste" title="Paste">
+        <svg viewBox="0 0 24 24"><rect x="5" y="4.5" width="14" height="16" rx="2"/><path d="M9 4.5V3.5h6v1M9 11h6M9 15h4"/></svg>
+      </button>
+      <span class="key-group modifier-keys"></span>
+      <span class="key-group named-keys"></span>
+    </div>
+    <p class="shell-status"></p>
+  </article>
+</template>
+
+<template id="window-buttons">
+  <span class="window-buttons">
+    <button class="mute" data-action="zoom" aria-label="Fill the page" title="Fill the page">
+      <svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+    </button>
+    <button class="mute" data-action="close" aria-label="Close" title="Close">
+      <svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg>
+    </button>
+  </span>
+</template>
+
+<div class="drop" id="drop" hidden></div>
+<div class="facts-popover" id="facts-popover" popover>
+  <dl class="facts" id="machine-facts"></dl>
+</div>
 <ol class="toasts" id="toasts"></ol>
 </body>
 </html>

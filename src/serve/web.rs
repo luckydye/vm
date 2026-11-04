@@ -22,6 +22,7 @@ const FILES: &[(&str, &str, &[u8])] = &[
     ("/app.css", "text/css", include_bytes!("../../ui/app.css")),
     ("/ui.js", "text/javascript", include_bytes!("../../ui/ui.js")),
     ("/data.js", "text/javascript", include_bytes!("../../ui/data.js")),
+    ("/layout.js", "text/javascript", include_bytes!("../../ui/layout.js")),
     ("/logo.png", "image/png", include_bytes!("../../assets/logo.png")),
 ];
 

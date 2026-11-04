@@ -1,9 +1,12 @@
 // State and everything that talks to serve. The UI reads state through
 // subscribe and changes it only through the functions exported here.
 
+import * as layout from "./layout.js";
+
 const TOKEN_KEY = "varmint-token";
 const VOLUME_KEY = "varmint-volume";
 const MUTED_KEY = "varmint-muted";
+const LAYOUTS_KEY = "varmint-layouts";
 
 // The token from the URL `varmint serve --ui` prints, kept for later visits
 // and taken out of the address bar.
@@ -16,16 +19,13 @@ function initialToken() {
   return localStorage.getItem(TOKEN_KEY);
 }
 
-// The view a URL shows: `/`, `/vm/NAME`, or `/vm/NAME/display` with the
-// display expanded in place of the shell.
+// The view a URL shows: `/` or `/vm/NAME`.
 export function route(path) {
-  const match = path.match(/^\/vm\/([^/]+)(\/display)?$/);
-  return { selected: match ? decodeURIComponent(match[1]) : null, screenExpanded: Boolean(match?.[2]) };
+  const match = path.match(/^\/vm\/([^/]+)$/);
+  return { selected: match ? decodeURIComponent(match[1]) : null };
 }
 
-function pathOf({ selected, screenExpanded }) {
-  return selected ? `/vm/${encodeURIComponent(selected)}${screenExpanded ? "/display" : ""}` : "/";
-}
+const pathOf = ({ selected }) => (selected ? `/vm/${encodeURIComponent(selected)}` : "/");
 
 export const state = {
   // Sent with every request; null until the user gives one.
@@ -33,9 +33,16 @@ export const state = {
   vms: [],
   // One sample of what the host and its machines use per listing, the oldest first.
   usage: [],
-  // The machine shown and whether its display fills the page instead of the
-  // shell, both kept in the URL.
+  // The machine shown, kept in the URL.
   ...route(location.pathname),
+  // How the machine page tiles each machine's windows, by machine name and
+  // kept for later visits; see layout.js. A machine starts with the initial one.
+  layouts: JSON.parse(localStorage.getItem(LAYOUTS_KEY) ?? "{}"),
+  get layout() {
+    return this.layouts[this.selected] ?? layout.INITIAL;
+  },
+  // The window filling the machine page on its own, if any.
+  zoomed: null,
   creating: false,
   starting: [],
   pending: new Set(),
@@ -87,6 +94,12 @@ const USAGE_SAMPLES = 150;
 async function refresh() {
   const { vms, host } = await call("ls");
   state.vms = vms;
+  // Layouts of machines that are gone go with them.
+  const kept = Object.fromEntries(Object.entries(state.layouts).filter(([name]) => vms.some((vm) => vm.name === name)));
+  if (Object.keys(kept).length !== Object.keys(state.layouts).length) {
+    state.layouts = kept;
+    saveLayouts();
+  }
   const machines = Object.fromEntries(vms.filter((vm) => vm.running).map((vm) => [vm.name, { memory_bytes: vm.memory_bytes, cpu_ms: vm.cpu_ms }]));
   state.usage = [...state.usage.slice(1 - USAGE_SAMPLES), { host, machines }];
   const running = state.selected && vms.find((vm) => vm.name === state.selected)?.running;
@@ -182,13 +195,41 @@ function navigate() {
 
 export function select(name) {
   state.selected = name;
-  state.screenExpanded = false;
+  state.zoomed = null;
   navigate();
 }
 
-export function setScreenExpanded(expanded) {
-  state.screenExpanded = expanded;
-  navigate();
+const saveLayouts = () => localStorage.setItem(LAYOUTS_KEY, JSON.stringify(state.layouts));
+
+function setLayout(next) {
+  state.layouts[state.selected] = next;
+  saveLayouts();
+  if (!layout.windows(next).includes(state.zoomed)) state.zoomed = null;
+  changed();
+}
+
+export const moveWindow = (id, target, side) => setLayout(layout.placed(state.layout, id, target, side));
+export const resizeSplit = (path, ratio) => setLayout(layout.resized(state.layout, path, ratio));
+export function openWindow(id) {
+  state.zoomed = null;
+  setLayout(layout.added(state.layout, id));
+}
+export const openShell = () => openWindow(layout.newShell(state.layout));
+
+export const removeWindow = (id) => setLayout(layout.without(state.layout, id));
+
+// Closing a shell's window ends its tmux session.
+export function closeWindow(id) {
+  removeWindow(id);
+  const vm = state.vms.find((vm) => vm.name === state.selected);
+  if (!layout.isShell(id) || !vm?.running) return;
+  const ending = session(vm.name, { type: "exec", argv: ["tmux", "kill-session", "-t", id] }, () => {});
+  ending.exited.catch((error) => toast(`Ending shell ${id} failed: ${error.message}`, "error")).finally(ending.close);
+}
+
+export function setZoomed(id) {
+  state.zoomed = id;
+  changed();
 }
 
 // Every machine's audio plays through this gain, so volume and mute apply to all of them.
@@ -493,13 +534,15 @@ function encodeFrame(kind, payload) {
   return bytes;
 }
 
-// The machine's shared tmux session "main" on a terminal, created on first
+// The machine's shared tmux session `id` on a terminal, created on first
 // attach; `exited` resolves with the exit code of the tmux client.
-export function shellSession(name, cols, rows, onOutput) {
-  const attached = attach(name, {
-    op: "open",
-    session: { type: "pty", argv: ["tmux", "new-session", "-A", "-s", "main"], cols, rows, terminal: { TERM: "xterm-256color", COLORTERM: "truecolor" } },
-  });
+export function shellSession(name, id, cols, rows, onOutput) {
+  const terminal = { TERM: "xterm-256color", COLORTERM: "truecolor" };
+  return session(name, { type: "pty", argv: ["tmux", "new-session", "-A", "-s", id], cols, rows, terminal }, onOutput);
+}
+
+function session(name, request, onOutput) {
+  const attached = attach(name, { op: "open", session: request });
   const exited = (async () => {
     await attached.reply();
     for (;;) {

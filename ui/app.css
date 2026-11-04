@@ -230,27 +230,65 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: 
 .spacer { flex: 1; }
 .crumbs .state { display: flex; align-items: center; gap: 6px; font: 13px var(--sans); color: var(--gray-900); }
 
-/* The shell is the workspace; the display is a live preview beside it until
-   expanded into the shell's place, which keeps running underneath. */
+/* The machine's windows tile the page like a tiling window manager: each
+   split shares its space between two nodes, a divider between them. */
 .machine { flex: 1; min-height: 0; display: flex; padding: 12px; }
-.views {
-  --aspect: 1.6;
-  flex: 1;
+.workspace { flex: 1; min-width: 0; min-height: 0; display: flex; }
+.split { flex: 1 1 0; min-width: 0; min-height: 0; display: flex; }
+.split.column { flex-direction: column; }
+.split > * { flex-basis: 0; }
+.divider { flex: none; width: 12px; cursor: col-resize; touch-action: none; position: relative; }
+.split.column > .divider { width: auto; height: 12px; cursor: row-resize; }
+.divider::after { content: ""; position: absolute; inset: 0 5px; border-radius: 1px; }
+.split.column > .divider::after { inset: 5px 0; }
+.divider:hover::after, .divider:active::after { background: var(--gray-500); }
+.workspace-empty { margin: auto; color: var(--gray-900); }
+
+.window {
+  flex: 1 1 0;
+  min-width: 0;
   min-height: 0;
-  display: grid;
-  gap: 12px;
-  grid-template-columns: minmax(0, 1fr) 320px;
-  grid-template-rows: auto minmax(0, 1fr);
-  grid-template-areas: "main display" "main facts";
+  display: flex;
+  flex-direction: column;
+  border-radius: 10px;
+  border: 1px solid var(--gray-400);
+  background: var(--background);
+  overflow: hidden;
 }
-.shell-pane { grid-area: main; }
-.screen-pane { grid-area: display; }
-/* The key bar under the expanded display, scrolling sideways on narrow screens. */
-.keys { position: relative; display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none; }
-.views:not([data-expanded="true"]) .screen-pane .keys { display: none; }
-/* A physical keyboard has all of these, so the shell shows them only on touch screens. */
-.shell-keys { margin-top: 8px; }
-@media not (pointer: coarse) { .shell-keys { display: none; } }
+.window.dragging { opacity: 0.5; }
+.window-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 6px 0 12px;
+  border-bottom: 1px solid var(--gray-400);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+.window-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.window-buttons { display: flex; gap: 2px; }
+.window-buttons [aria-pressed="true"] { color: var(--gray-1000); background: var(--gray-200); }
+.window-menu { display: flex; gap: 6px; }
+/* Where a dragged window would go. */
+.drop {
+  position: fixed;
+  z-index: 4;
+  border-radius: 10px;
+  border: 2px solid var(--chart-machine);
+  background: color-mix(in srgb, var(--chart-machine) 16%, transparent);
+  pointer-events: none;
+  transition: left 0.1s, top 0.1s, width 0.1s, height 0.1s;
+}
+
+/* The key bars under the display and the shells, scrolling sideways on narrow screens. */
+.keys { position: relative; flex: none; display: flex; gap: 8px; padding: 8px; overflow-x: auto; scrollbar-width: none; }
+/* A physical keyboard has all of these, so the key bars show only on touch screens. */
+@media not (pointer: coarse) { .keys { display: none; } }
 .key-group { display: flex; gap: 4px; }
 .key {
   flex: none;
@@ -273,22 +311,6 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: 
 /* Takes the on-screen keyboard's text unseen; 16px keeps iOS from zooming in on focus. */
 .typing { position: absolute; left: 0; top: 0; width: 1px; height: 1px; padding: 0; border: 0; opacity: 0; font-size: 16px; }
 
-.shell-return { grid-area: display; }
-.facts { grid-area: facts; }
-.stopped { grid-area: main; }
-
-.views[data-expanded="true"] .screen-pane { grid-area: main; }
-.views[data-expanded="true"] .shell-pane { visibility: hidden; }
-.views:not([data-expanded="true"]) .shell-return { display: none; }
-.views[data-view="stopped"] :is(.shell-pane, .screen-pane, .shell-return) { display: none; }
-.views:not([data-view="stopped"]) .stopped { display: none; }
-
-.pane { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
-
-.screen-pane { padding: 8px; gap: 8px; border-radius: 10px; background: var(--background); border: 1px solid var(--gray-400); }
-.screen-bar { display: flex; align-items: center; justify-content: space-between; padding-left: 4px; font-size: 13px; font-weight: 500; }
-.screen-bar .btn { height: 26px; padding: 0 8px; font-size: 12.5px; color: var(--gray-900); }
-.screen-bar .btn:hover { color: var(--gray-1000); }
 .sound { display: flex; align-items: center; gap: 2px; }
 .mute { display: grid; place-items: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 6px; background: none; color: var(--gray-900); cursor: pointer; }
 .mute:hover { color: var(--gray-1000); background: var(--gray-100); }
@@ -302,8 +324,7 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: 
 .volume::-webkit-slider-thumb { width: 10px; height: 10px; margin-top: -3.5px; border: 0; border-radius: 50%; background: var(--gray-1000); appearance: none; }
 .volume::-moz-range-thumb { width: 10px; height: 10px; border: 0; border-radius: 50%; background: var(--gray-1000); }
 .volume:focus-visible { outline: 2px solid var(--gray-1000); outline-offset: 2px; border-radius: 2px; }
-.screen-frame { display: grid; place-items: center; container-type: size; aspect-ratio: var(--aspect); }
-.views[data-expanded="true"] .screen-frame { flex: 1; min-height: 0; aspect-ratio: auto; }
+.screen-frame { --aspect: 1.6; flex: 1; min-height: 0; display: grid; place-items: center; padding: 8px; container-type: size; }
 .screen { position: relative; width: min(100cqw, 100cqh * var(--aspect)); aspect-ratio: var(--aspect); }
 .screen canvas {
   display: block;
@@ -312,10 +333,10 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: 
   border-radius: 6px;
   background: var(--well);
   outline: none;
-  cursor: zoom-in;
+  cursor: pointer;
+  touch-action: none;
 }
-.views[data-expanded="true"] .screen canvas { cursor: pointer; touch-action: none; }
-.views[data-expanded="true"] .screen-frame.captured canvas { cursor: default; box-shadow: 0 0 0 2px var(--gray-1000); }
+.screen-frame.captured canvas { cursor: default; box-shadow: 0 0 0 2px var(--gray-1000); }
 .hint {
   position: absolute;
   left: 50%;
@@ -338,26 +359,42 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: 
 .screen:hover .hint, .screen-frame.flash .hint { opacity: 1; transform: translate(-50%, 0); }
 .screen-frame.captured:not(.flash) .hint { opacity: 0; }
 
-.shell-return {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 14px;
-  border-radius: 10px;
+/* The machine's facts hang from the info button, pointing at it, which stays
+   pressed while they are open. */
+#machine-info { anchor-name: --machine-info; }
+#machine-info[aria-expanded="true"] { background: var(--gray-100); border-color: var(--gray-500); }
+.facts-popover {
+  position-anchor: --machine-info;
+  inset: auto;
+  top: anchor(bottom);
+  right: anchor(right);
+  width: 320px;
+  margin: 10px 0 0;
+  padding: 4px 12px;
+  overflow: visible;
   border: 1px solid var(--gray-400);
+  border-radius: 10px;
   background: var(--background);
-  text-align: left;
-  font-size: 14px;
-  font-weight: 500;
-  cursor: pointer;
+  color: var(--gray-1000);
+  box-shadow: var(--shadow-lg);
 }
-.shell-return:hover { border-color: var(--gray-500); }
-.shell-return svg { flex: none; width: 18px; height: 18px; margin-top: 1px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
-.shell-return span { display: flex; flex-direction: column; gap: 2px; }
-.shell-return small { font-size: 12.5px; font-weight: 400; color: var(--gray-900); }
-
-/* Long port lists scroll inside the facts instead of squeezing the display. */
-.facts { align-self: start; max-height: 100%; overflow: auto; margin: 0; padding: 4px 12px; border-radius: 10px; border: 1px solid var(--gray-400); background: var(--background); font-size: 13px; }
+.facts-popover::before {
+  content: "";
+  position: absolute;
+  top: -6px;
+  right: 10px;
+  width: 10px;
+  height: 10px;
+  border: solid var(--gray-400);
+  border-width: 1px 0 0 1px;
+  background: var(--background);
+  transform: rotate(45deg);
+}
+/* Long port lists scroll inside the facts. */
+.facts-popover .facts { max-height: calc(100vh - 96px); overflow: auto; }
+.btn.icon { width: 32px; padding: 0; }
+.btn.icon svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.facts { margin: 0; font-size: 13px; }
 .facts div { display: flex; justify-content: space-between; padding: 8px 0; }
 .facts div + div { border-top: 1px solid var(--gray-400); }
 .facts dt { color: var(--gray-900); }
@@ -368,28 +405,15 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: 
 .facts dd a { color: inherit; text-underline-offset: 2px; }
 .facts dd .local { color: var(--gray-700); }
 
-.shell {
-  flex: 1;
-  min-height: 0;
-  padding: 10px 4px 6px 12px;
-  border-radius: 10px;
-  background: var(--background);
-  border: 1px solid var(--gray-400);
-}
+.shell { flex: 1; min-height: 0; padding: 10px 4px 6px 12px; }
 .shell .xterm { height: 100%; }
 .shell .xterm-viewport { background: transparent !important; scrollbar-width: thin; }
-.shell-status { display: flex; align-items: center; gap: 8px; margin: 8px 0 0; font-size: 13px; color: var(--gray-900); }
+.shell-status { display: flex; align-items: center; gap: 8px; margin: 0; padding: 8px 12px; border-top: 1px solid var(--gray-400); font-size: 13px; color: var(--gray-900); }
 .shell-status:empty { display: none; }
 .shell-status .btn { height: 26px; font-size: 13px; }
 
-.stopped { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; border: 1px dashed var(--gray-500); border-radius: 10px; background: var(--background); color: var(--gray-900); }
+.stopped { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; border: 1px dashed var(--gray-500); border-radius: 10px; background: var(--background); color: var(--gray-900); }
 .stopped p { margin: 0; }
-
-@media (max-width: 900px) {
-  .views { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; grid-template-areas: "main" "display"; }
-  .facts { display: none; }
-  .views:not([data-expanded="true"]) .screen-pane { justify-self: end; width: min(100%, 320px); }
-}
 
 /* The screen morphing between its tile and the machine page. */
 ::view-transition-group(screen) { animation-duration: 0.35s; animation-timing-function: cubic-bezier(0.2, 0.8, 0.2, 1); }

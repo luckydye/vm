@@ -1,8 +1,9 @@
 // Renders state from data.js and forwards user events to it. Live
-// connections (tile previews, the machine's screen and shell) are opened and
+// connections (tile previews, the machine's screen and shells) are opened and
 // closed as the rendered state asks for them.
 
 import * as data from "./data.js";
+import * as layout from "./layout.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -240,6 +241,8 @@ function renderMachine(state) {
   const vm = selected();
   $("machine").hidden = !vm;
   $("machine-power").hidden = !vm;
+  $("machine-info").hidden = !vm;
+  if (!vm) $("facts-popover").hidePopover();
   $("machine-delete").hidden = !vm?.hardware.persist;
   $("new").hidden = Boolean(vm);
   $("crumbs").replaceChildren();
@@ -295,25 +298,145 @@ function renderMachine(state) {
     if (!power.classList.contains("armed")) {
       power.textContent = busy ? (vm.running ? "Stopping…" : "Starting…") : vm.running ? (vm.hardware.persist ? "Stop" : "Stop and discard") : "Start";
     }
-    const views = $("views");
-    views.dataset.view = vm.running ? "running" : "stopped";
-    views.dataset.expanded = state.screenExpanded;
-    $("screen-toggle").textContent = state.screenExpanded ? "Collapse" : "Expand";
+    $("workspace").hidden = !vm.running;
+    $("stopped").hidden = vm.running;
     const level = state.muted ? 0 : state.volume;
     $("mute").dataset.muted = level === 0;
     $("mute").ariaLabel = state.muted ? "Unmute" : "Mute";
     $("volume").value = level;
     $("volume").style.setProperty("--level", `${level * 100}%`);
-    $("screen").tabIndex = state.screenExpanded ? 0 : -1;
     for (const button of document.querySelectorAll(".modifier-keys .key")) button.ariaPressed = state.modifiers.has(Number(button.dataset.code));
-    if (!state.screenExpanded && document.activeElement === $("screen")) $("screen").blur();
   }
+  const open = layout.windows(state.layout);
+  $("window-menu").hidden = !vm?.running;
+  $("open-display").hidden = open.includes(layout.DISPLAY);
   if (session?.name !== (vm?.running ? vm.name : null)) {
     closeSession();
     if (vm?.running) openSession(vm.name);
   }
-  session?.hint();
+  if (!session) return;
+  // A terminal opens once its window is in place, so it measures its size.
+  const shells = open.filter(layout.isShell);
+  for (const id of session.shells.keys()) if (!shells.includes(id)) closeShell(id);
+  const opening = shells.filter((id) => !session.shells.has(id)).map(shellWindow);
+  renderWorkspace(state);
+  opening.forEach(startShell);
 }
+
+// The windows tiled as the layout says, or the zoomed one alone. Windows are
+// moved, never rebuilt, so their connections keep running; a resize only sets
+// the sizes of the splits rendered for the same structure.
+
+const STATIC_WINDOWS = { [layout.DISPLAY]: $("display-window") };
+let structure = null;
+let splits = [];
+
+const windowElements = () => [...Object.values(STATIC_WINDOWS), ...[...session.shells.values()].map((entry) => entry.window)];
+
+function decorate(window, id) {
+  window.dataset.window = id;
+  window.querySelector(".window-bar").append($("window-buttons").content.cloneNode(true));
+}
+for (const [id, window] of Object.entries(STATIC_WINDOWS)) decorate(window, id);
+
+function build(node, path) {
+  if (typeof node === "string") return STATIC_WINDOWS[node] ?? session.shells.get(node).window;
+  const split = element("div", `split ${node.split}`);
+  split.append(build(node.first, [...path, "first"]), element("div", "divider"), build(node.second, [...path, "second"]));
+  splits.push({ split, path });
+  return split;
+}
+
+function renderWorkspace(state) {
+  const tiling = state.zoomed ?? state.layout;
+  const next = JSON.stringify(tiling, (key, value) => (key === "ratio" ? undefined : value));
+  if (next !== structure) {
+    structure = next;
+    splits = [];
+    // A window keeps no share from the split it was in before.
+    for (const window of windowElements()) window.style.flexGrow = "";
+    $("parked").append(...windowElements());
+    $("workspace").replaceChildren(tiling === null ? element("p", "workspace-empty", "No windows open. Open one from the bar above.") : build(tiling, []));
+  }
+  for (const { split, path } of splits) {
+    const { ratio } = layout.at(tiling, path);
+    split.firstElementChild.style.flexGrow = ratio;
+    split.lastElementChild.style.flexGrow = 1 - ratio;
+  }
+  for (const window of windowElements()) window.querySelector("[data-action=zoom]").ariaPressed = state.zoomed === window.dataset.window;
+}
+
+const toggleZoom = (id) => data.setZoomed(data.state.zoomed === id ? null : id);
+
+$("workspace").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-action]");
+  if (!button) return;
+  const id = button.closest(".window").dataset.window;
+  if (button.dataset.action === "close") data.closeWindow(id);
+  else toggleZoom(id);
+});
+$("workspace").addEventListener("dblclick", (event) => {
+  const bar = event.target.closest(".window-bar");
+  if (bar && !event.target.closest("button, input")) toggleZoom(bar.closest(".window").dataset.window);
+});
+$("workspace").addEventListener("pointerdown", (event) => {
+  if (event.target.classList.contains("divider")) return resizeSplit(event);
+  const bar = event.target.closest(".window-bar");
+  if (bar && !event.target.closest("button, input") && !data.state.zoomed) dragWindow(event, bar);
+});
+
+// Dragging a divider sets the share of its split under the pointer.
+function resizeSplit(event) {
+  const divider = event.target;
+  const split = divider.parentElement;
+  const { path } = splits.find((entry) => entry.split === split);
+  const row = split.classList.contains("row");
+  const move = (event) => {
+    const box = split.getBoundingClientRect();
+    data.resizeSplit(path, row ? (event.clientX - box.left) / box.width : (event.clientY - box.top) / box.height);
+  };
+  divider.setPointerCapture(event.pointerId);
+  divider.addEventListener("pointermove", move);
+  divider.addEventListener("lostpointercapture", () => divider.removeEventListener("pointermove", move), { once: true });
+}
+
+// Dragging a window by its bar onto another shows where it would go: beside
+// it on the edge nearest the pointer, or in its place in the middle.
+const DROP_AREAS = { left: [0, 0, 0.5, 1], right: [0.5, 0, 0.5, 1], top: [0, 0, 1, 0.5], bottom: [0, 0.5, 1, 0.5], center: [0, 0, 1, 1] };
+
+function dragWindow(event, bar) {
+  const window = bar.closest(".window");
+  let drop = null;
+  const move = (event) => {
+    const target = document.elementFromPoint(event.clientX, event.clientY)?.closest("#workspace .window");
+    window.classList.add("dragging");
+    $("drop").hidden = !target || target === window;
+    if ($("drop").hidden) return (drop = null);
+    const box = target.getBoundingClientRect();
+    drop = { target: target.dataset.window, side: layout.dropSide((event.clientX - box.left) / box.width, (event.clientY - box.top) / box.height) };
+    const [left, top, width, height] = DROP_AREAS[drop.side];
+    Object.assign($("drop").style, {
+      left: `${box.left + left * box.width}px`,
+      top: `${box.top + top * box.height}px`,
+      width: `${width * box.width}px`,
+      height: `${height * box.height}px`,
+    });
+  };
+  const up = () => drop && data.moveWindow(window.dataset.window, drop.target, drop.side);
+  bar.setPointerCapture(event.pointerId);
+  bar.addEventListener("pointermove", move);
+  bar.addEventListener("pointerup", up);
+  bar.addEventListener("lostpointercapture", () => {
+    bar.removeEventListener("pointermove", move);
+    bar.removeEventListener("pointerup", up);
+    window.classList.remove("dragging");
+    $("drop").hidden = true;
+  }, { once: true });
+}
+
+$("open-display").onclick = () => data.openWindow(layout.DISPLAY);
+$("open-shell").onclick = data.openShell;
+$("facts-popover").addEventListener("toggle", (event) => ($("machine-info").ariaExpanded = event.newState === "open"));
 
 function keyButton({ label, name, code }) {
   const button = element("button", "key", label);
@@ -322,15 +445,15 @@ function keyButton({ label, name, code }) {
   return button;
 }
 
-// The key bars under the screen and the shell. Pressing a key keeps the focus
-// where it is, so the screen or shell keeps the keyboard and the on-screen
-// keyboard stays open.
-$("shell-keys").querySelector(".keyboard").append($("keyboard").firstElementChild.cloneNode(true));
-for (const bar of [$("keys"), $("shell-keys")]) {
+// The key bars under the screen and the shells. Pressing a key keeps the
+// focus where it is, so the screen or shell keeps the keyboard and the
+// on-screen keyboard stays open.
+function keyBar(bar) {
   bar.querySelector(".modifier-keys").append(...data.MODIFIERS.map(keyButton));
   bar.querySelector(".named-keys").append(...data.KEYS.map(keyButton));
   bar.addEventListener("pointerdown", (event) => event.target !== $("typing") && event.preventDefault());
 }
+keyBar($("keys"));
 
 confirming(
   $("machine-power"),
@@ -340,18 +463,10 @@ confirming(
 );
 confirming($("machine-delete"), "Delete machine?", () => data.remove(selected().name));
 $("machine-start").onclick = () => data.start(selected().name);
-// The display is a preview beside the shell until expanded into its place.
-$("screen-toggle").onclick = () => data.setScreenExpanded(!data.state.screenExpanded);
-$("shell-return").onclick = () => data.setScreenExpanded(false);
 $("mute").onclick = () => data.setMuted(!data.state.muted);
 $("volume").oninput = (event) => data.setVolume(Number(event.target.value));
 document.addEventListener("pointerdown", data.resumeAudio);
 document.addEventListener("keydown", data.resumeAudio);
-document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && data.state.screenExpanded && !event.target.closest("canvas, .xterm, .typing, dialog")) {
-    data.setScreenExpanded(false);
-  }
-});
 // Returns to the overview, the screen shrinking back into its tile.
 function closeMachine(show = () => data.select(null)) {
   const vm = selected();
@@ -370,7 +485,7 @@ window.addEventListener("popstate", () => {
   else data.followLocation();
 });
 
-// The selected machine's screen with input, and a shell sized to its view.
+// The selected machine's screen with input, and its shells sized to their windows.
 
 let session = null;
 
@@ -385,13 +500,13 @@ function openSession(name) {
   const on = (target, type, listener) => target.addEventListener(type, listener, { signal: events.signal });
   const paint = paintInto(canvas);
   let frame = null;
-  const idle = () => caption(data.state.screenExpanded ? "Click to control" : "Click to expand");
+  const idle = () => caption("Click to control");
 
   caption("Connecting…");
   const screen = data.screenStream(name, 60, (next) => {
     if (!frame) idle();
     frame = next;
-    $("views").style.setProperty("--aspect", frame.width / frame.height);
+    frameBox.style.setProperty("--aspect", frame.width / frame.height);
     paint(frame);
   }, true);
   screen.done.catch((error) => {
@@ -405,11 +520,6 @@ function openSession(name) {
     const typing = $("typing");
     const pointer = (event) => {
       event.preventDefault();
-      // The preview is too small to aim at, so a click there only expands it.
-      if (!data.state.screenExpanded) {
-        if (event.type === "pointerdown") data.setScreenExpanded(true);
-        return;
-      }
       // A touch keeps the on-screen keyboard open while it is in use.
       if (event.type === "pointerdown" && document.activeElement !== typing) canvas.focus();
       if (event.type === "pointerdown") canvas.setPointerCapture(event.pointerId);
@@ -486,10 +596,7 @@ function openSession(name) {
     });
   }).catch((error) => caption(`Input unavailable: ${error.message}`));
 
-  // Refreshes the hint when the display is expanded or collapsed.
-  const hint = () => frame && ![canvas, $("typing")].includes(document.activeElement) && idle();
-  session = { name, screen, input, events, shell: null, hint };
-  openShell(name);
+  session = { name, screen, input, events, shells: new Map() };
 }
 
 function terminalTheme() {
@@ -521,10 +628,21 @@ function terminalTheme() {
   };
 }
 
-function openShell(name) {
-  const host = $("shell");
+function shellWindow(id) {
+  const window = $("shell-window").content.firstElementChild.cloneNode(true);
+  decorate(window, id);
+  window.querySelector(".window-title").textContent = `Terminal ${id}`;
+  keyBar(window.querySelector(".shell-keys"));
+  const entry = { id, window, connection: null };
+  session.shells.set(id, entry);
+  return entry;
+}
+
+function startShell(entry) {
+  const host = entry.window.querySelector(".shell");
+  const status = entry.window.querySelector(".shell-status");
   host.replaceChildren();
-  $("shell-status").replaceChildren();
+  status.replaceChildren();
   const terminal = new Terminal({
     fontFamily: '"Geist Mono", ui-monospace, Menlo, monospace',
     fontSize: 13,
@@ -536,10 +654,10 @@ function openShell(name) {
   terminal.open(host);
   terminal.loadAddon(new CanvasAddon.CanvasAddon());
   fit.fit();
-  const shell = data.shellSession(name, terminal.cols, terminal.rows, (bytes) => terminal.write(bytes));
+  const shell = data.shellSession(session.name, entry.id, terminal.cols, terminal.rows, (bytes) => terminal.write(bytes));
   terminal.onData((text) => shell.write(data.terminalText(text)));
   const keys = new AbortController();
-  $("shell-keys").addEventListener("click", (event) => {
+  entry.window.querySelector(".shell-keys").addEventListener("click", (event) => {
     const button = event.target.closest(".key");
     if (!button) return;
     if (button.classList.contains("keyboard")) return terminal.textarea === document.activeElement ? terminal.blur() : terminal.focus();
@@ -562,25 +680,34 @@ function openShell(name) {
   }, true);
   const resizes = new ResizeObserver(() => host.clientWidth && host.clientHeight && fit.fit());
   resizes.observe(host);
-  session.shell = { shell, terminal, resizes, keys };
-  const ended = (text) => {
-    if (session?.shell?.shell !== shell) return;
+  entry.connection = { shell, terminal, resizes, keys };
+  // A shell that exits closes its window; one that lost its connection offers a new one.
+  const current = () => entry.connection?.shell === shell;
+  shell.exited.then(() => current() && data.removeWindow(entry.id), (error) => {
+    if (!current()) return;
     const restart = element("button", "btn", "New shell");
     restart.onclick = () => {
-      closeShell();
-      openShell(name);
+      stopShell(entry);
+      startShell(entry);
     };
-    $("shell-status").replaceChildren(text, restart);
-  };
-  shell.exited.then((code) => ended(`Shell exited with ${code}.`), (error) => ended(`Shell disconnected: ${error.message}.`));
+    status.replaceChildren(`Shell disconnected: ${error.message}.`, restart);
+  });
 }
 
-function closeShell() {
-  session.shell.shell.close();
-  session.shell.terminal.dispose();
-  session.shell.resizes.disconnect();
-  session.shell.keys.abort();
-  session.shell = null;
+function stopShell(entry) {
+  const { shell, terminal, resizes, keys } = entry.connection;
+  shell.close();
+  terminal.dispose();
+  resizes.disconnect();
+  keys.abort();
+  entry.connection = null;
+}
+
+function closeShell(id) {
+  const entry = session.shells.get(id);
+  stopShell(entry);
+  entry.window.remove();
+  session.shells.delete(id);
 }
 
 function closeSession() {
@@ -588,10 +715,11 @@ function closeSession() {
   session.screen.close();
   session.input.close();
   session.events.abort();
-  closeShell();
+  for (const id of [...session.shells.keys()]) closeShell(id);
   $("screen").blur();
   $("typing").blur();
   session = null;
+  structure = null;
 }
 
 // New machine
