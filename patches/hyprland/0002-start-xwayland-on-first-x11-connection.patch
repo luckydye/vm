@@ -1,0 +1,73 @@
+diff --git a/src/xwayland/Server.cpp b/src/xwayland/Server.cpp
+index 8fe46da..d8fd6be 100644
+--- a/src/xwayland/Server.cpp
++++ b/src/xwayland/Server.cpp
+@@ -176,9 +176,14 @@ static bool openSockets(std::array<CFileDescriptor, 2>& sockets, int display) {
+     return true;
+ }
+ 
+-static void startServer(void* data) {
+-    if (!g_pXWayland->m_server->start())
++static int startServer(int fd, uint32_t mask, void* data) {
++    auto& server = g_pXWayland->m_server;
++    wl_event_source_remove(server->m_xFDReadEvents[0]);
++    wl_event_source_remove(server->m_xFDReadEvents[1]);
++    server->m_xFDReadEvents = {nullptr, nullptr};
++    if (!server->start())
+         Log::logger->log(Log::ERR, "The XWayland server could not start! XWayland will not work...");
++    return 0;
+ }
+ 
+ static int xwaylandReady(int fd, uint32_t mask, void* data) {
+@@ -293,9 +298,9 @@ bool CXWaylandServer::create() {
+ 
+     setenv("DISPLAY", m_displayName.c_str(), true);
+ 
+-    // TODO: lazy mode
+-
+-    m_idleSource = wl_event_loop_add_idle(g_pCompositor->m_wlEventLoop, ::startServer, nullptr);
++    // Xwayland starts on the first X11 connection, so it costs nothing until an X11 client runs.
++    for (size_t i = 0; i < m_xFDs.size(); ++i)
++        m_xFDReadEvents[i] = wl_event_loop_add_fd(g_pCompositor->m_wlEventLoop, m_xFDs[i].get(), WL_EVENT_READABLE, ::startServer, nullptr);
+ 
+     return true;
+ }
+@@ -322,7 +327,6 @@ void CXWaylandServer::runXWayland(CFileDescriptor& notifyFD) {
+ }
+ 
+ bool CXWaylandServer::start() {
+-    m_idleSource  = nullptr;
+     int wlPair[2] = {-1, -1};
+     if (socketpair(AF_UNIX, SOCK_STREAM, 0, wlPair) != 0) {
+         Log::logger->log(Log::ERR, "socketpair failed (1)");
+diff --git a/src/xwayland/Server.hpp b/src/xwayland/Server.hpp
+index 7266a9b..05edbc4 100644
+--- a/src/xwayland/Server.hpp
++++ b/src/xwayland/Server.hpp
+@@ -7,7 +7,6 @@
+ struct wl_event_source;
+ struct wl_client;
+ 
+-// TODO: add lazy mode
+ class CXWaylandServer {
+   public:
+     CXWaylandServer();
+@@ -24,7 +23,8 @@ class CXWaylandServer {
+ 
+     void       die();
+ 
+-    wl_client* m_xwaylandClient = nullptr;
++    wl_client*                      m_xwaylandClient = nullptr;
++    std::array<wl_event_source*, 2> m_xFDReadEvents  = {nullptr, nullptr};
+ 
+   private:
+     bool                                          tryOpenSockets();
+@@ -33,8 +33,6 @@ class CXWaylandServer {
+     std::string                                   m_displayName;
+     int                                           m_display = -1;
+     std::array<Hyprutils::OS::CFileDescriptor, 2> m_xFDs;
+-    std::array<wl_event_source*, 2>               m_xFDReadEvents = {nullptr, nullptr};
+-    wl_event_source*                              m_idleSource    = nullptr;
+     wl_event_source*                              m_pipeSource    = nullptr;
+     Hyprutils::OS::CFileDescriptor                m_pipeFd;
+     std::array<Hyprutils::OS::CFileDescriptor, 2> m_xwmFDs;

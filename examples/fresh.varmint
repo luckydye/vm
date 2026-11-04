@@ -1,7 +1,0 @@
-format_version = 1
-
-memory_mib = 16384
-vcpus = 12
-
-disk = "fresh.raw"
-disk_size_gib = 24

@@ -4,6 +4,7 @@ use crate::virtio::{
     input::keys::*,
 };
 use num_enum::TryFromPrimitive;
+use std::collections::VecDeque;
 use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 pub mod keys;
@@ -80,6 +81,8 @@ pub struct Input {
     kind: InputKind,
     select: u8,
     subsel: u8,
+    /// Events waiting for the guest to post buffers, so bursts are not dropped.
+    pending: VecDeque<Event>,
 }
 
 fn set_bit(bitmap: &mut [u8], bit: usize) {
@@ -92,6 +95,7 @@ impl Input {
             kind: InputKind::Keyboard,
             select: 0,
             subsel: 0,
+            pending: VecDeque::new(),
         }
     }
 
@@ -100,6 +104,7 @@ impl Input {
             kind: InputKind::Tablet,
             select: 0,
             subsel: 0,
+            pending: VecDeque::new(),
         }
     }
 
@@ -108,6 +113,7 @@ impl Input {
             kind: InputKind::Mouse,
             select: 0,
             subsel: 0,
+            pending: VecDeque::new(),
         }
     }
 
@@ -260,6 +266,17 @@ impl Input {
     }
 }
 
+impl Input {
+    fn flush(&mut self, ctx: &mut DeviceContext<'_>) {
+        while let Some(event) = self.pending.front() {
+            if !ctx.deliver(QueueType::Event as usize, &[event.as_bytes()]) {
+                break;
+            }
+            self.pending.pop_front();
+        }
+    }
+}
+
 impl Device for Input {
     fn id(&self) -> u32 {
         DEVICE_ID
@@ -290,7 +307,7 @@ impl Device for Input {
 
     fn queue_notified(&mut self, queue_idx: usize, ctx: &mut DeviceContext<'_>) {
         match QueueType::try_from(queue_idx).unwrap() {
-            QueueType::Event => {}
+            QueueType::Event => self.flush(ctx),
             QueueType::Status => {
                 while let Some(chain) = ctx.pop_chain(queue_idx) {
                     ctx.complete(chain.token, 0);
@@ -302,6 +319,7 @@ impl Device for Input {
     fn reset(&mut self) {
         self.select = 0;
         self.subsel = 0;
+        self.pending.clear();
     }
 }
 
@@ -317,16 +335,13 @@ impl ExternalEventHandler for Input {
     type Event<'a> = ExternalInput;
 
     fn on_event(&mut self, input: ExternalInput, ctx: &mut DeviceContext<'_>) {
+        let pending = &mut self.pending;
         let mut ev = |t: u16, c: u16, v: u32| {
-            ctx.deliver(
-                QueueType::Event as usize,
-                &[Event {
-                    r#type: t,
-                    code: c,
-                    value: v,
-                }
-                .as_bytes()],
-            )
+            pending.push_back(Event {
+                r#type: t,
+                code: c,
+                value: v,
+            })
         };
 
         match input {
@@ -360,5 +375,7 @@ impl ExternalEventHandler for Input {
                 }
             }
         }
+
+        self.flush(ctx);
     }
 }

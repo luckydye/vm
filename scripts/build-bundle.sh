@@ -3,8 +3,7 @@ build_varmint() {
   local cargo_args=(build --release)
   local dylib
 
-  require_commands cargo pkg-config codesign
-  need_file "$ENTITLEMENTS"
+  require_commands cargo pkg-config
   for dylib in "${RUNTIME_DYLIBS[@]}"; do
     need_file "$PREFIX/lib/$dylib"
   done
@@ -13,52 +12,14 @@ build_varmint() {
   log "build varmint"
   (
     cd "$ROOT"
-    MACOSX_DEPLOYMENT_TARGET="$MINIMUM_MACOS" \
+    # MACOSX_DEPLOYMENT_TARGET would also apply to proc-macro dylibs, which
+    # rustc then fails to load.
     PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}" \
     RUSTFLAGS="-L native=$PREFIX/lib ${RUSTFLAGS:-}" \
     CARGO_TARGET_DIR="$cargo_target_dir" \
       cargo "${cargo_args[@]}"
   )
-
-  mkdir -p "$(dirname "$BINARY")"
-  install -m 755 "$cargo_target_dir/release/varmint" "$BINARY"
-  codesign --force --sign - --timestamp=none --entitlements "$ENTITLEMENTS" "$BINARY"
-  codesign --verify --strict --verbose=2 "$BINARY"
-}
-
-build_icon() {
-  log "build app icon"
-  local runtime="$BUILD_ROOT/runtime"
-  local source="$runtime/Varmint.icon"
-  local output="$runtime/icon-assets"
-  local plist="$runtime/icon-partial-info.plist"
-
-  need_cmd xcrun
-  [ -d "$ICON_SOURCE" ] || die "missing Icon Composer asset: $ICON_SOURCE"
-  need_file "$ICON_SOURCE/icon.json"
-
-  rm -rf "$source" "$output"
-  rm -f "$ICON" "$plist"
-  mkdir -p "$output" "$(dirname "$ICON")"
-  cp -R "$ICON_SOURCE" "$source"
-  xcrun actool "$source" \
-    --compile "$output" \
-    --output-format human-readable-text \
-    --notices --warnings --errors \
-    --output-partial-info-plist "$plist" \
-    --app-icon Varmint \
-    --include-all-app-icons \
-    --enable-on-demand-resources NO \
-    --development-region en \
-    --target-device mac \
-    --minimum-deployment-target "$MINIMUM_MACOS" \
-    --platform macosx
-
-  need_file "$output/Assets.car"
-  install -m 644 "$output/Assets.car" "$ICON"
-  xcrun --sdk macosx assetutil --info "$ICON" >/dev/null
-  rm -rf "$source" "$output"
-  rm -f "$plist"
+  BUILT_BINARY="$cargo_target_dir/release/varmint"
 }
 
 find_vmnet_helper() {
@@ -72,77 +33,37 @@ find_vmnet_helper() {
 
   need_cmd brew
   prefix="$(brew --prefix vmnet-helper 2>/dev/null)" \
-    || die "vmnet-helper is not installed; run: brew tap nirs/vmnet-helper && brew install vmnet-helper"
+    || die "vmnet-helper is not installed; run: brew tap nirs/vmnet-helper && brew trust nirs/vmnet-helper && brew install vmnet-helper"
   helper="$prefix/libexec/vmnet-helper"
   need_file "$helper"
   printf '%s\n' "$helper"
 }
 
-assemble_app() {
-  log "assemble app"
-  local contents="$APP_BUNDLE/Contents"
+# DIST is an install prefix: bin/varmint and its runtime in share/varmint.
+assemble() {
+  log "assemble $DIST"
+  local runtime="$DIST/share/varmint"
   local helper file
 
-  require_commands plutil
-  for file in "$BINARY" "$KERNEL" "$INITRD" "$BASE_IMAGE" "$ICON" "$MANIFEST"; do
+  for file in "$BUILT_BINARY" "$KERNEL" "$INITRD" "$BASE_IMAGE"; do
     need_file "$file"
   done
   helper="$(find_vmnet_helper)"
   need_file "$PREFIX/libexec/virgl_render_server"
-  need_file "$PREFIX/lib/x86_64/libd3dmetal-native.dylib"
 
-  rm -rf "$APP_BUNDLE"
+  rm -rf "$DIST"
   mkdir -p \
-    "$contents/MacOS" \
-    "$contents/Helpers" \
-    "$contents/Frameworks" \
-    "$contents/Resources/kernel" \
-    "$contents/Resources/runtime"
-  install -m 755 "$BINARY" "$contents/MacOS/varmint"
-  install -m 755 "$helper" "$contents/Helpers/vmnet-helper"
-  install -m 755 "$PREFIX/libexec/virgl_render_server" "$contents/Helpers/virgl_render_server"
-  install -m 755 "$PREFIX/lib/x86_64/libd3dmetal-native.dylib" \
-    "$contents/Frameworks/libd3dmetal-native.dylib"
-  install -m 644 "$KERNEL" "$contents/Resources/kernel/Image"
-  install -m 644 "$INITRD" "$contents/Resources/kernel/initrd"
-  install -m 644 "$BASE_IMAGE" "$contents/Resources/runtime/base.raw.zst"
-  install -m 644 "$ICON" "$contents/Resources/Assets.car"
-  install -m 644 "$MANIFEST" "$contents/Resources/runtime-manifest.toml"
-
-  cat > "$contents/Info.plist" <<EOF_PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleDevelopmentRegion</key>
-    <string>en</string>
-    <key>CFBundleDisplayName</key>
-    <string>Varmint</string>
-    <key>CFBundleExecutable</key>
-    <string>varmint</string>
-    <key>CFBundleIdentifier</key>
-    <string>dev.varmint.Varmint</string>
-    <key>CFBundleIconName</key>
-    <string>Varmint</string>
-    <key>CFBundleInfoDictionaryVersion</key>
-    <string>6.0</string>
-    <key>CFBundleName</key>
-    <string>Varmint</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>$APP_VERSION</string>
-    <key>CFBundleVersion</key>
-    <string>$APP_VERSION</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>$MINIMUM_MACOS</string>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-</dict>
-</plist>
-EOF_PLIST
-  printf 'APPL????' > "$contents/PkgInfo"
-  plutil -lint "$contents/Info.plist"
+    "$DIST/bin" \
+    "$runtime/Helpers" \
+    "$runtime/Frameworks" \
+    "$runtime/Resources/kernel" \
+    "$runtime/Resources/runtime"
+  install -m 755 "$BUILT_BINARY" "$DIST/bin/varmint"
+  install -m 755 "$helper" "$runtime/Helpers/vmnet-helper"
+  install -m 755 "$PREFIX/libexec/virgl_render_server" "$runtime/Helpers/virgl_render_server"
+  install -m 644 "$KERNEL" "$runtime/Resources/kernel/Image"
+  install -m 644 "$INITRD" "$runtime/Resources/kernel/initrd"
+  install -m 644 "$BASE_IMAGE" "$runtime/Resources/runtime/base.raw.zst"
 }
 
 is_system_dependency() {
@@ -165,6 +86,11 @@ list_rpaths() {
   '
 }
 
+list_dependencies() {
+  otool -L "$1" | sed -nE 's/^[[:space:]]+(.+)[[:space:]]+\(compatibility version.*$/\1/p'
+}
+
+# Leaves exactly one rpath, WANTED, in a thin or universal Mach-O file.
 normalize_rpath() {
   local file="$1"
   local wanted="$2"
@@ -218,7 +144,7 @@ resolve_dependency() {
 
 copy_runtime_library() {
   local source="$1"
-  local destination="$APP_BUNDLE/Contents/Frameworks/$(basename "$source")"
+  local destination="$DIST/share/varmint/Frameworks/$(basename "$source")"
 
   need_file "$source"
   [ -f "$destination" ] && return
@@ -227,35 +153,11 @@ copy_runtime_library() {
   MACHO_QUEUE+=("$destination")
 }
 
-process_macho() {
+# Copies FILE's non-system dependencies into Frameworks, points FILE at them
+# through @rpath and gives it the single rpath RPATH.
+relink() {
   local file="$1"
-  local executable="$2"
-  local dependency source basename
-
-  [ "$file" = "$executable" ] \
-    || install_name_tool -id "@rpath/$(basename "$file")" "$file"
-
-  while IFS= read -r dependency; do
-    [ -n "$dependency" ] || continue
-    is_system_dependency "$dependency" && continue
-    source="$(resolve_dependency "$dependency")"
-    basename="$(basename "$source")"
-    copy_runtime_library "$source"
-    install_name_tool -change "$dependency" "@rpath/$basename" "$file"
-  done < <(
-    otool -L "$file" |
-      sed -nE 's/^[[:space:]]+(.+)[[:space:]]+\(compatibility version.*$/\1/p'
-  )
-
-  if [ "$file" = "$executable" ]; then
-    normalize_rpath "$file" '@executable_path/../Frameworks'
-  else
-    normalize_rpath "$file" '@loader_path'
-  fi
-}
-
-process_runtime_executable() {
-  local file="$1"
+  local rpath="$2"
   local dependency source basename
 
   while IFS= read -r dependency; do
@@ -265,266 +167,100 @@ process_runtime_executable() {
     basename="$(basename "$source")"
     copy_runtime_library "$source"
     install_name_tool -change "$dependency" "@rpath/$basename" "$file"
-  done < <(
-    otool -L "$file" |
-      sed -nE 's/^[[:space:]]+(.+)[[:space:]]+\(compatibility version.*$/\1/p'
-  )
-
-  normalize_rpath "$file" '@executable_path/../Frameworks'
+  done < <(list_dependencies "$file")
+  normalize_rpath "$file" "$rpath"
 }
 
-write_framework_plist() {
-  local stem="$1"
-  local plist="$2"
-
-  cat > "$plist" <<EOF_PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CFBundleDevelopmentRegion</key><string>en</string>
-  <key>CFBundleExecutable</key><string>$stem</string>
-  <key>CFBundleIdentifier</key><string>dev.varmint.angle.$stem</string>
-  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-  <key>CFBundleName</key><string>$stem</string>
-  <key>CFBundlePackageType</key><string>FMWK</string>
-  <key>CFBundleShortVersionString</key><string>1.0</string>
-  <key>CFBundleVersion</key><string>1</string>
-</dict>
-</plist>
-EOF_PLIST
-}
-
-create_angle_frameworks() {
-  local frameworks="$APP_BUNDLE/Contents/Frameworks"
-  local stem loose framework binary resources
-
-  for stem in EGL GLESv2; do
-    loose="$frameworks/lib${stem}.dylib"
-    framework="$frameworks/${stem}.framework"
-    binary="$framework/Versions/A/$stem"
-    resources="$framework/Versions/A/Resources"
-    need_file "$loose"
-
-    mkdir -p "$resources"
-    mv "$loose" "$binary"
-    write_framework_plist "$stem" "$resources/Info.plist"
-    ln -s A "$framework/Versions/Current"
-    ln -s "Versions/Current/$stem" "$framework/$stem"
-    ln -s Versions/Current/Resources "$framework/Resources"
-    ln -s "${stem}.framework/Versions/Current/$stem" "$loose"
-  done
-}
-
-fix_rpaths() {
+bundle_libraries() {
   log "bundle runtime libraries"
-  local executable="$APP_BUNDLE/Contents/MacOS/varmint"
-  local render_server="$APP_BUNDLE/Contents/Helpers/virgl_render_server"
-  local d3dmetal="$APP_BUNDLE/Contents/Frameworks/libd3dmetal-native.dylib"
-  local dylib index=0
+  local dylib stem index=0
 
-  require_commands otool install_name_tool
-  need_file "$executable"
-  need_file "$render_server"
-  need_file "$d3dmetal"
-  MACHO_QUEUE=("$executable")
+  require_commands otool install_name_tool lipo
+  MACHO_QUEUE=()
   for dylib in "${RUNTIME_DYLIBS[@]}"; do
     copy_runtime_library "$PREFIX/lib/$dylib"
   done
-
-  process_runtime_executable "$render_server"
-
-  # x86_64-only payload loaded by the Rosetta render-server worker.
-  install_name_tool -id '@rpath/libd3dmetal-native.dylib' "$d3dmetal"
-  normalize_rpath "$d3dmetal" '@loader_path'
-
+  relink "$DIST/bin/varmint" '@executable_path/../share/varmint/Frameworks'
+  relink "$DIST/share/varmint/Helpers/virgl_render_server" '@executable_path/../Frameworks'
   while [ "$index" -lt "${#MACHO_QUEUE[@]}" ]; do
-    process_macho "${MACHO_QUEUE[$index]}" "$executable"
+    dylib="${MACHO_QUEUE[$index]}"
+    install_name_tool -id "@rpath/$(basename "$dylib")" "$dylib"
+    relink "$dylib" '@loader_path'
     index=$((index + 1))
   done
-  create_angle_frameworks
-  otool -L "$executable"
+
+  # UTM's ANGLE and epoxy load ANGLE from framework paths like EGL.framework/Versions/Current/EGL.
+  for stem in EGL GLESv2; do
+    mkdir -p "$DIST/share/varmint/Frameworks/$stem.framework/Versions/Current"
+    ln -s "../../../lib$stem.dylib" "$DIST/share/varmint/Frameworks/$stem.framework/Versions/Current/$stem"
+  done
 }
 
-sign_app() {
-  log "sign app"
-  local frameworks="$APP_BUNDLE/Contents/Frameworks"
-  local stem dylib
+sign() {
+  log "sign"
+  local runtime="$DIST/share/varmint"
+  local dylib
 
-  need_cmd codesign
+  require_commands codesign
   need_file "$ENTITLEMENTS"
   need_file "$VMNET_HELPER_ENTITLEMENTS"
-  codesign --force --sign - --timestamp=none \
-    --entitlements "$VMNET_HELPER_ENTITLEMENTS" "$APP_BUNDLE/Contents/Helpers/vmnet-helper"
-  codesign_file "$APP_BUNDLE/Contents/Helpers/virgl_render_server"
-  while IFS= read -r -d '' dylib; do
+  for dylib in "$runtime"/Frameworks/*.dylib; do
     codesign_file "$dylib"
-  done < <(find "$frameworks" -maxdepth 1 -type f -name '*.dylib' -print0)
-  for stem in EGL GLESv2; do
-    need_file "$frameworks/${stem}.framework/Versions/A/$stem"
-    need_file "$frameworks/${stem}.framework/Versions/A/Resources/Info.plist"
-    codesign_file "$frameworks/${stem}.framework"
   done
+  codesign_file "$runtime/Helpers/virgl_render_server"
   codesign --force --sign - --timestamp=none \
-    --entitlements "$ENTITLEMENTS" "$APP_BUNDLE"
+    --entitlements "$VMNET_HELPER_ENTITLEMENTS" "$runtime/Helpers/vmnet-helper"
+  codesign --force --sign - --timestamp=none --entitlements "$ENTITLEMENTS" "$DIST/bin/varmint"
 }
 
-verify_bundle_dependency() {
-  local owner="$1"
-  local dependency="$2"
-  local executable="$3"
-  local frameworks="$4"
-  local resolved
-
-  is_system_dependency "$dependency" && return
-  case "$dependency" in
-    @rpath/*) resolved="$frameworks/${dependency##*/}" ;;
-    @loader_path/*) resolved="$(dirname "$owner")/${dependency#@loader_path/}" ;;
-    @executable_path/*) resolved="$(dirname "$executable")/${dependency#@executable_path/}" ;;
-    *) die "$owner contains forbidden dependency: $dependency" ;;
-  esac
-  [ -f "$resolved" ] || die "$owner references missing dependency: $dependency"
-}
-
-verify_bundle_macho() {
+# Every non-system dependency must resolve inside Frameworks through the one
+# allowed rpath.
+verify_macho() {
   local file="$1"
-  local executable="$2"
-  local frameworks="$3"
-  local expected_arch="${4:-$ARCH}"
-  local dependency rpath id expected_id
+  local rpath="$2"
+  local frameworks="$DIST/share/varmint/Frameworks"
+  local dependency
 
-  lipo -archs "$file" | tr ' ' '\n' | grep -qx "$expected_arch" \
-    || die "$file does not contain $expected_arch"
+  lipo -archs "$file" | tr ' ' '\n' | grep -qx "$ARCH" || die "$file does not contain $ARCH"
+  [ "$(list_rpaths "$file")" = "$rpath" ] || die "$file has rpaths other than $rpath"
   while IFS= read -r dependency; do
-    [ -n "$dependency" ] && verify_bundle_dependency \
-      "$file" "$dependency" "$executable" "$frameworks"
-  done < <(
-    otool -L "$file" |
-      sed -nE 's/^[[:space:]]+(.+)[[:space:]]+\(compatibility version.*$/\1/p'
-  )
-  while IFS= read -r rpath; do
-    case "$rpath" in
-      '@executable_path/../Frameworks'|'@loader_path') ;;
-      *) die "$file contains forbidden rpath: $rpath" ;;
+    [ -n "$dependency" ] || continue
+    is_system_dependency "$dependency" && continue
+    case "$dependency" in
+      @rpath/*) need_file "$frameworks/${dependency#@rpath/}" ;;
+      *) die "$file contains forbidden dependency: $dependency" ;;
     esac
-  done < <(list_rpaths "$file")
-
-  [ "$file" = "$executable" ] && return
-  case "$file" in
-    "$frameworks/EGL.framework/Versions/A/EGL") expected_id='@rpath/libEGL.dylib' ;;
-    "$frameworks/GLESv2.framework/Versions/A/GLESv2") expected_id='@rpath/libGLESv2.dylib' ;;
-    *) expected_id="@rpath/$(basename "$file")" ;;
-  esac
-  id="$(otool -D "$file" | sed -n '2p')"
-  [ "$id" = "$expected_id" ] || die "$file has invalid install name: $id"
+  done < <(list_dependencies "$file")
+  codesign --verify --strict "$file" || die "$file is not signed"
 }
 
-verify_app() {
-  local contents="$APP_BUNDLE/Contents"
-  local executable="$contents/MacOS/varmint"
-  local helper="$contents/Helpers/vmnet-helper"
-  local render_server="$contents/Helpers/virgl_render_server"
-  local frameworks="$contents/Frameworks"
-  local resources="$contents/Resources"
-  local bundled_manifest="$resources/runtime-manifest.toml"
-  local stem dylib file signed_entitlements
+verify() {
+  log "verify"
+  local runtime="$DIST/share/varmint"
+  local dylib stem
 
-  require_commands cmp plutil otool lipo codesign xcrun
-  for file in \
-    "$contents/Info.plist" \
-    "$executable" \
-    "$helper" \
-    "$render_server" \
-    "$resources/kernel/Image" \
-    "$resources/kernel/initrd" \
-    "$resources/runtime/base.raw.zst" \
-    "$resources/Assets.car" \
-    "$bundled_manifest"; do
-    need_file "$file"
+  verify_macho "$DIST/bin/varmint" '@executable_path/../share/varmint/Frameworks'
+  verify_macho "$runtime/Helpers/virgl_render_server" '@executable_path/../Frameworks'
+  for dylib in "$runtime"/Frameworks/*.dylib; do
+    verify_macho "$dylib" '@loader_path'
+    [ "$(otool -D "$dylib" | sed -n '2p')" = "@rpath/$(basename "$dylib")" ] \
+      || die "$dylib has an invalid install name"
   done
-  cmp -s "$MANIFEST" "$bundled_manifest" || die "bundled runtime manifest differs from source"
   for stem in EGL GLESv2; do
-    need_file "$frameworks/${stem}.framework/Versions/A/$stem"
-    need_file "$frameworks/${stem}.framework/Versions/A/Resources/Info.plist"
+    need_file "$runtime/Frameworks/$stem.framework/Versions/Current/$stem"
   done
-
-  log "verify app"
-  plutil -lint "$contents/Info.plist" >/dev/null
-  ! plutil -extract CFBundleIconFile raw -o - "$contents/Info.plist" >/dev/null 2>&1 \
-    || die "Info.plist still contains legacy CFBundleIconFile"
-  [ "$(plutil -extract CFBundleExecutable raw -o - "$contents/Info.plist")" = varmint ] \
-    || die "Info.plist does not reference varmint"
-  [ "$(plutil -extract CFBundleIconName raw -o - "$contents/Info.plist")" = Varmint ] \
-    || die "Info.plist does not reference the Varmint asset icon"
-  [ "$(plutil -extract LSMinimumSystemVersion raw -o - "$contents/Info.plist")" = "$MINIMUM_MACOS" ] \
-    || die "Info.plist minimum macOS does not match runtime manifest"
-  for file in "$resources/kernel/Image" "$resources/kernel/initrd" "$resources/runtime/base.raw.zst" "$resources/Assets.car"; do
-    [ -s "$file" ] || die "bundled resource is empty: $file"
-  done
-  xcrun --sdk macosx assetutil --info "$resources/Assets.car" >/dev/null
-
-  for stem in EGL GLESv2; do
-    plutil -lint "$frameworks/${stem}.framework/Versions/A/Resources/Info.plist" >/dev/null
-    [ "$(readlink "$frameworks/lib${stem}.dylib")" = "${stem}.framework/Versions/Current/$stem" ] \
-      || die "lib${stem}.dylib is not linked to ${stem}.framework"
-  done
-
-  python3 - "$APP_BUNDLE" <<'PY'
-from pathlib import Path
-import sys
-
-bundle = Path(sys.argv[1]).resolve()
-for link in Path(sys.argv[1]).rglob("*"):
-    if not link.is_symlink():
-        continue
-    try:
-        target = link.resolve(strict=True)
-    except FileNotFoundError:
-        raise SystemExit(f"broken bundle symlink: {link}")
-    if target != bundle and bundle not in target.parents:
-        raise SystemExit(f"bundle symlink escapes app: {link} -> {target}")
-PY
-
-  verify_bundle_macho "$executable" "$executable" "$frameworks"
-  verify_bundle_macho "$render_server" "$render_server" "$frameworks"
-  lipo -archs "$render_server" | grep -qw arm64 \
-    || die "virgl_render_server is missing arm64 slice"
-  lipo -archs "$render_server" | grep -qw x86_64 \
-    || die "virgl_render_server is missing x86_64 slice"
-  while IFS= read -r -d '' dylib; do
-    if [ "$(basename "$dylib")" = "libd3dmetal-native.dylib" ]; then
-      verify_bundle_macho "$dylib" "$executable" "$frameworks" x86_64
-    else
-      verify_bundle_macho "$dylib" "$executable" "$frameworks"
-    fi
-  done < <(find "$frameworks" -maxdepth 1 -type f -name '*.dylib' -print0)
-  for stem in EGL GLESv2; do
-    verify_bundle_macho "$frameworks/${stem}.framework/Versions/A/$stem" "$executable" "$frameworks"
-  done
-  for dylib in "${RUNTIME_DYLIBS[@]}"; do
-    need_file "$frameworks/$dylib"
-  done
-
-  for stem in EGL GLESv2; do
-    codesign --verify --strict --verbose=2 "$frameworks/${stem}.framework"
-  done
-  codesign --verify --strict --verbose=2 "$render_server"
-  codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
-  signed_entitlements="$(codesign -d --entitlements :- "$helper" 2>&1)"
-  printf '%s\n' "$signed_entitlements" | grep -q '<key>com.apple.security.virtualization</key>' \
+  codesign -d --entitlements :- "$runtime/Helpers/vmnet-helper" 2>&1 \
+    | grep -q '<key>com.apple.security.virtualization</key>' \
     || die "vmnet-helper is missing the Virtualization entitlement"
-  signed_entitlements="$(codesign -d --entitlements :- "$executable" 2>&1)"
-  printf '%s\n' "$signed_entitlements" | grep -q '<key>com.apple.security.hypervisor</key>' \
-    || die "main executable is missing the Hypervisor entitlement"
-  ! printf '%s\n' "$signed_entitlements" | grep -q '<key>com.apple.vm.networking</key>' \
-    || die "ad-hoc bundle contains restricted com.apple.vm.networking entitlement"
+  codesign -d --entitlements :- "$DIST/bin/varmint" 2>&1 \
+    | grep -q '<key>com.apple.security.hypervisor</key>' \
+    || die "varmint is missing the Hypervisor entitlement"
 }
 
-build_app_bundle() {
+build_bundle() {
   build_varmint
-  build_icon
-  assemble_app
-  fix_rpaths
-  sign_app
-  verify_app
+  assemble
+  bundle_libraries
+  sign
+  verify
 }

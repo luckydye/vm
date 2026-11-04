@@ -1,7 +1,8 @@
+#[cfg(target_os = "macos")]
+use crate::macos_ui;
 use crate::{
     devices::{RuntimeEvent, RuntimeInputEvent},
     display::{DisplayBuffer, DisplayEvent, PresentMode, Presenter},
-    macos_ui,
     virtio::input::keys::*,
 };
 use std::{
@@ -16,7 +17,7 @@ use winit::{
     event::{DeviceEvent, ElementState, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
-    window::{CursorGrabMode, Fullscreen, Window, WindowId},
+    window::{CursorGrabMode, Window, WindowId},
 };
 
 fn display_refresh_millihertz(window: &Window) -> u32 {
@@ -158,13 +159,15 @@ struct AppState<'a> {
     rel_mouse_frac_dy: f64,
 
     stats_visible: bool,
+    initial_size: (u32, u32),
 }
 
 impl<'a> AppState<'a> {
-    fn new(display: &'a Mutex<DisplayBuffer>, host_tx: Sender<RuntimeEvent>) -> Self {
+    fn new(display: &'a Mutex<DisplayBuffer>, host_tx: Sender<RuntimeEvent>, initial_size: (u32, u32)) -> Self {
         Self {
             display,
             host_tx,
+            initial_size,
             presenter: None,
             surface_w: 0,
             surface_h: 0,
@@ -222,6 +225,16 @@ impl<'a> AppState<'a> {
         }
 
         presented
+    }
+
+    fn toggle_statistics(&mut self) {
+        self.stats_visible = !self.stats_visible;
+        #[cfg(target_os = "macos")]
+        macos_ui::set_statistics_checked(self.stats_visible);
+        if let Some(presenter) = self.presenter.as_mut() {
+            presenter.set_stats_visible(self.stats_visible);
+        }
+        self.present(PresentMode::Redraw);
     }
 
     fn set_present_refresh_millihertz(&mut self, refresh_millihertz: u32) {
@@ -325,8 +338,7 @@ impl<'a> ApplicationHandler<DisplayEvent> for AppState<'a> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let attrs = Window::default_attributes()
             .with_title("Varmint")
-            .with_inner_size(LogicalSize::new(1024u32, 768u32))
-            .with_fullscreen(Some(Fullscreen::Borderless(None)))
+            .with_inner_size(LogicalSize::new(self.initial_size.0, self.initial_size.1))
             .with_resizable(true);
 
         let window = event_loop.create_window(attrs).unwrap();
@@ -335,7 +347,9 @@ impl<'a> ApplicationHandler<DisplayEvent> for AppState<'a> {
         self.surface_w = width;
         self.surface_h = height;
         self.presenter = Some(Presenter::new(window, width, height));
+        #[cfg(target_os = "macos")]
         macos_ui::install_main_menu();
+        #[cfg(target_os = "macos")]
         macos_ui::set_statistics_checked(self.stats_visible);
         if let Some(presenter) = self.presenter.as_mut() {
             presenter.set_stats_visible(self.stats_visible);
@@ -401,8 +415,8 @@ impl<'a> ApplicationHandler<DisplayEvent> for AppState<'a> {
                 }
             }
 
-            WindowEvent::Focused(focused) => {
-                self.set_mouse_capture(focused);
+            WindowEvent::Focused(false) => {
+                self.set_mouse_capture(false);
             }
 
             WindowEvent::KeyboardInput { event, .. } => {
@@ -411,6 +425,26 @@ impl<'a> ApplicationHandler<DisplayEvent> for AppState<'a> {
                     if code == KeyCode::F12 {
                         if pressed {
                             self.set_mouse_capture(!self.mouse_captured);
+                        }
+                        return;
+                    }
+                    // Without a menu bar, Linux toggles statistics with F10 and full screen with F11.
+                    #[cfg(target_os = "linux")]
+                    if code == KeyCode::F10 {
+                        if pressed {
+                            self.toggle_statistics();
+                        }
+                        return;
+                    }
+                    #[cfg(target_os = "linux")]
+                    if code == KeyCode::F11 {
+                        if let (true, Some(presenter)) = (pressed, self.presenter.as_ref()) {
+                            let window = presenter.window();
+                            let fullscreen = window
+                                .fullscreen()
+                                .is_none()
+                                .then_some(winit::window::Fullscreen::Borderless(None));
+                            window.set_fullscreen(fullscreen);
                         }
                         return;
                     }
@@ -506,14 +540,11 @@ impl<'a> ApplicationHandler<DisplayEvent> for AppState<'a> {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "macos")]
         if macos_ui::take_toggle_statistics() {
-            self.stats_visible = !self.stats_visible;
-            macos_ui::set_statistics_checked(self.stats_visible);
-            if let Some(presenter) = self.presenter.as_mut() {
-                presenter.set_stats_visible(self.stats_visible);
-            }
-            self.present(PresentMode::Redraw);
+            self.toggle_statistics();
         }
+        #[cfg(target_os = "macos")]
         if macos_ui::take_show_about() {
             macos_ui::show_about();
         }
@@ -537,7 +568,12 @@ pub fn event_loop() -> EventLoop<DisplayEvent> {
     EventLoop::<DisplayEvent>::with_user_event().build().unwrap()
 }
 
-pub fn run(event_loop: EventLoop<DisplayEvent>, display: &Mutex<DisplayBuffer>, host_tx: Sender<RuntimeEvent>) {
-    let mut app = AppState::new(display, host_tx);
+pub fn run(
+    event_loop: EventLoop<DisplayEvent>,
+    display: &Mutex<DisplayBuffer>,
+    host_tx: Sender<RuntimeEvent>,
+    initial_size: (u32, u32),
+) {
+    let mut app = AppState::new(display, host_tx, initial_size);
     event_loop.run_app(&mut app).unwrap();
 }

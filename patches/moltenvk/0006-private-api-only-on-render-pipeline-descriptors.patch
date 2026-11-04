@@ -1,0 +1,22 @@
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
+@@ -2296,7 +2296,8 @@
+                 colorDesc.sourceAlphaBlendFactor = mvkMTLBlendFactorFromVkBlendFactor(pCA->srcAlphaBlendFactor);
+                 colorDesc.destinationAlphaBlendFactor = mvkMTLBlendFactorFromVkBlendFactor(pCA->dstAlphaBlendFactor);
+ #if MVK_USE_METAL_PRIVATE_API
+-				if (getMVKConfig().useMetalPrivateAPI) {
++				// The private API properties exist only on MTLRenderPipelineDescriptor.
++				if constexpr (std::is_same_v<T, MTLRenderPipelineDescriptor>) if (getMVKConfig().useMetalPrivateAPI) {
+ 					plDesc.logicOperationEnabledMVK = pCreateInfo->pColorBlendState->logicOpEnable;
+ 					plDesc.logicOperationMVK = mvkMTLLogicOperationFromVkLogicOp(pCreateInfo->pColorBlendState->logicOp);
+ 				}
+@@ -2326,7 +2327,7 @@
+     if (_isRasterizing && pCreateInfo->pMultisampleState) {
+         plDesc.rasterSampleCount = mvkSampleCountFromVkSampleCountFlagBits(pCreateInfo->pMultisampleState->rasterizationSamples);
+ #if MVK_USE_METAL_PRIVATE_API
+-        if (getMVKConfig().useMetalPrivateAPI && pCreateInfo->pMultisampleState->pSampleMask) {
++        if constexpr (std::is_same_v<T, MTLRenderPipelineDescriptor>) if (getMVKConfig().useMetalPrivateAPI && pCreateInfo->pMultisampleState->pSampleMask) {
+             plDesc.sampleMaskMVK = pCreateInfo->pMultisampleState->pSampleMask[0];
+         }
+ #endif

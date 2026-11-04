@@ -1,7 +1,6 @@
 [Unit]
 Description=Grow Varmint root filesystem
 After=local-fs.target
-Before=varmint-firstboot.service
 
 [Service]
 Type=oneshot

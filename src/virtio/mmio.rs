@@ -1,7 +1,7 @@
 //! https://docs.oasis-open.org/virtio/virtio/v1.3/csd01/virtio-v1.3-csd01.html#x1-1820002
 
 use crate::{
-    irq::IrqLine,
+    hypervisor::IrqLine,
     memory::GuestMemory,
     virtio::{
         device::{self, Device, DeviceContext, ExternalEventHandler},
