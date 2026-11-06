@@ -850,6 +850,9 @@ def main():
             stream.reap()
             if stream.finished():
                 stream.finish()
+                # The host may never have sent EOF, e.g. when it only read the
+                # output, so release the stream's pipes before dropping it.
+                stream.kill()
                 del streams[stream_id]
 
 
