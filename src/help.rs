@@ -1,0 +1,575 @@
+//! Text of `vm help`, kept apart from the commands it documents.
+
+use crate::config::Hardware;
+
+pub struct Command {
+    pub name: &'static str,
+    group: &'static str,
+    usage: &'static str,
+    summary: &'static str,
+    description: String,
+    options: Vec<(&'static str, String)>,
+    examples: &'static [(&'static str, &'static str)],
+}
+
+const GROUPS: &[&str] = &["VMs", "Access", "Screen and input", "Remote"];
+
+const OVERVIEW_EXAMPLES: &[(&str, &str)] = &[
+    ("vm=$(vm run --mount .:work)", "start a VM with the current directory at ~/work"),
+    ("vm run $vm -- ls work", "run a command in it"),
+    ("vm screenshot $vm screen.png", "look at its screen"),
+    ("vm stop $vm", "stop and delete it"),
+];
+
+pub fn commands(defaults: &Hardware) -> Vec<Command> {
+    vec![
+        Command {
+            name: "run",
+            group: "VMs",
+            usage: "vm run [NAME] [OPTIONS] [-- COMMAND...]",
+            summary: "Start a VM, creating it if needed, and optionally run a command",
+            description: "\
+Creates a VM from the base image and boots it in the background, starts a
+stopped persistent VM, or attaches to one that already runs. Once the guest is
+ready, about a second later, the VM name is printed on stdout, so
+`vm=$(vm run)` works in scripts. NAME defaults to a random
+adjective-animal pair like swift-otter.
+
+With COMMAND, vm runs it in the VM and exits with its exit code. Like
+ssh, a command from a terminal gets a terminal in the VM too, so shells,
+editors and other interactive programs work and follow your window size; in
+scripts and pipes it gets none, and stdin, stdout and stderr are passed
+through separately. `vm run NAME --` opens a login shell. A VM that this
+run created and that is ephemeral is stopped afterwards and deleted;
+persistent VMs and VMs that were already running stay up.
+
+Without --persist the VM is ephemeral and deleted when it stops. Running
+`vm run NAME` for a stopped persistent VM starts it again with its disk
+intact; hardware options only apply when a VM is created. A persistent VM
+starts with the buckets it was last given with --store unless new ones are
+named. Mounts, seeds, stores, environment and --window apply when a VM
+starts, so they cannot be changed on one that is already running.
+
+CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY, and variables named with
+--env, are copied from your environment into the VM's shells, commands and
+ssh sessions. Values are never passed as arguments, so `ps` and shell history
+do not show them. Programs in the VM can read them.
+
+Seeds copy host files or directories into the VM at every start, for
+example an agent's skills, settings or ssh key. The contents of the
+~/.vm/seeds directory go into the guest home of every VM; symlinks in it
+are followed. A directory in a git work tree leaves out what .gitignore
+ignores. Changes in the VM never reach the host.
+
+In an interactive session, Ctrl+V first puts the image on the host clipboard
+into the guest clipboard, so programs like Claude Code can paste it."
+                .into(),
+            options: vec![
+                ("--persist", "Keep the VM and its disk after it stops".into()),
+                ("--window", "Show the screen in a window and share the clipboard".into()),
+                (
+                    "--wait-network",
+                    "Return only once the guest has network and DNS (about a second more)".into(),
+                ),
+                (
+                    "--mount HOST:GUEST[:ro]",
+                    "Share a host directory at GUEST; relative GUEST paths are under\n\
+                     /home/varmint and :ro makes the share read-only. Repeatable, up to 7"
+                        .into(),
+                ),
+                (
+                    "--store BUCKET[:ro]",
+                    "Let the VM use BUCKET of the shared store, see `vm store`;\n\
+                     :ro makes it read-only. Repeatable"
+                        .into(),
+                ),
+                (
+                    "--env NAME",
+                    "Copy a variable from your environment into the VM. Repeatable"
+                        .into(),
+                ),
+                (
+                    "--seed HOST:GUEST",
+                    "Copy a host file or directory to GUEST at start; ~/ in HOST is your\n\
+                     home, relative GUEST paths are under /home/varmint. Repeatable"
+                        .into(),
+                ),
+                (
+                    "--base IMAGE",
+                    "Create the VM from an image made with `vm save` instead of\n\
+                     the stock Debian image"
+                        .into(),
+                ),
+                ("--cpus N", format!("Virtual CPUs (default {})", defaults.cpus)),
+                ("--memory MIB", format!("Memory in MiB (default {})", defaults.memory_mib)),
+                ("--disk GIB", format!("Disk size in GiB (default {})", defaults.disk_gib)),
+                (
+                    "--size WxH",
+                    format!("Screen size in pixels (default {}x{})", defaults.width, defaults.height),
+                ),
+            ],
+            examples: &[
+                ("vm=$(vm run)", "ephemeral VM without a window"),
+                ("vm run sandbox --persist", "persistent VM named sandbox"),
+                ("vm run sandbox", "start sandbox again after it stopped"),
+                ("vm run sandbox -- htop", "interactive program in sandbox"),
+                ("vm run sandbox --", "interactive shell in sandbox"),
+                ("vm run --mount .:work --wait-network", "current directory at ~/work, network ready"),
+                ("vm run --window --size 1920x1080", "VM with a window"),
+                ("vm run --env GITHUB_TOKEN", "pass a variable from your shell"),
+                ("vm run --mount .:work -- make -C work test", "one-off VM for a single command"),
+                (
+                    "echo hello | vm run $vm -- cat",
+                    "stdin is forwarded",
+                ),
+                ("vm run --seed ~/.gitconfig:.gitconfig", "copy a config file into the VM"),
+            ],
+        },
+        Command {
+            name: "ls",
+            group: "VMs",
+            usage: "vm ls",
+            summary: "List VMs",
+            description: "\
+Lists all VMs with their state, whether they persist, and their hardware.
+In a pipe it prints only the names, one per line."
+                .into(),
+            options: vec![],
+            examples: &[("vm ls", ""), ("vm ls | vm stop --delete", "delete all VMs")],
+        },
+        Command {
+            name: "stop",
+            group: "VMs",
+            usage: "vm stop NAME... [--delete]",
+            summary: "Stop VMs; ephemeral VMs are deleted",
+            description: "\
+Stops running VMs; stopped ones are left alone. With --delete, deletes the
+VMs and their disks, stopping them first if they run. Persistent VMs flush
+their disk before stopping and can be started again with `vm run NAME`;
+ephemeral VMs are deleted when they stop either way. The host log of a
+deleted VM is kept in ~/.vm/logs (the newest 20). Without NAME the names
+are read from stdin, one per line."
+                .into(),
+            options: vec![("--delete", "Delete the VMs and their disks after stopping them".into())],
+            examples: &[
+                ("vm stop $vm", ""),
+                ("vm stop sandbox --delete", "stop sandbox and delete its disk"),
+                ("vm ls | vm stop", "stop all VMs"),
+                ("vm ls | vm stop --delete", "delete all VMs"),
+            ],
+        },
+        Command {
+            name: "save",
+            group: "VMs",
+            usage: "vm save NAME IMAGE",
+            summary: "Save a persistent VM as an image to create VMs from",
+            description: "\
+Stops the running persistent VM NAME and saves its disk, with everything
+installed in it, as IMAGE in ~/.vm/images. `vm run --base IMAGE`
+creates VMs from it like from the stock image.
+
+The VM's machine id and SSH host keys are cleared first, so VMs from the
+image do not share them; NAME gets new ones too when it starts again.
+Delete an image by removing its directory."
+                .into(),
+            options: vec![],
+            examples: &[
+                ("vm run sandbox --persist", "make a VM to customize"),
+                ("vm run sandbox -- sudo apt-get install -y ripgrep", "install what you need"),
+                ("vm save sandbox tools", "save it as the image tools"),
+                ("vm=$(vm run --base tools)", "start a VM from it"),
+            ],
+        },
+        Command {
+            name: "ssh",
+            group: "Access",
+            usage: "vm ssh NAME [SSH ARGS...]",
+            summary: "Connect with ssh, tunneled through the guest agent",
+            description: "\
+Runs your ssh client as varmint@NAME through `vm proxy`, so it needs no
+network setup. Your ~/.ssh/*.pub keys and a key in ~/.vm/ssh are
+authorized in every VM. Remaining arguments are passed to ssh."
+                .into(),
+            options: vec![],
+            examples: &[
+                ("vm ssh $vm", "interactive session"),
+                ("vm ssh $vm uptime", "run a command"),
+                ("vm ssh $vm -L 8080:localhost:8080", "forward a port"),
+            ],
+        },
+        Command {
+            name: "store",
+            group: "Access",
+            usage: "vm store ls|get|put|rm|log|gc [ARGS]",
+            summary: "Read, write and audit the object store shared by VMs",
+            description: "\
+The store keeps buckets of versioned objects in ~/.vm/store. A VM may
+use only the buckets it was started with (`vm run --store BUCKET[:ro]`),
+through an S3-like HTTP API on http://127.0.0.1:5101 in the guest:
+
+  GET    /                               buckets this VM may use
+  GET    /BUCKET?prefix=P[&versions]     objects, or all their versions
+  GET    /BUCKET/KEY[?versionId=N]       an object, or one of its versions
+  HEAD   /BUCKET/KEY                     its headers
+  PUT    /BUCKET/KEY                     a new version, with Content-Length
+  DELETE /BUCKET/KEY                     a delete marker as the new version
+
+Replies carry the version in x-amz-version-id; lists and errors are JSON.
+Nothing is overwritten or removed until gc runs, and every request, allowed
+or not, is logged with the VM that made it. From the host, these commands
+may use every bucket and are logged as host:
+
+  ls [BUCKET [PREFIX]] [--versions]   buckets, objects or versions as JSON
+  get BUCKET KEY [--version N]        an object on stdout
+  put BUCKET KEY                      stdin as a new version
+  rm BUCKET KEY                       add a delete marker
+  log [BUCKET]                        time, caller, method, status, key, version, error
+  gc --keep N                         remove all but the newest N versions of each key"
+                .into(),
+            options: vec![],
+            examples: &[
+                ("vm run --store shared --store specs:ro", "a VM with two buckets"),
+                ("curl -T notes.md localhost:5101/shared/notes.md", "in the VM: store a file"),
+                ("curl localhost:5101/shared/notes.md", "in the VM: read it"),
+                ("vm store get shared notes.md --version 3", "an earlier version on the host"),
+                ("vm store log shared", "who did what"),
+            ],
+        },
+        Command {
+            name: "proxy",
+            group: "Access",
+            usage: "vm proxy NAME PORT",
+            summary: "Connect stdin and stdout to a TCP port in a VM",
+            description: "\
+Pipes stdin and stdout to PORT on the guest's localhost, for use as an ssh
+ProxyCommand or to talk to a guest service. A service that is still starting
+gets up to 30 seconds to accept the connection."
+                .into(),
+            options: vec![],
+            examples: &[
+                (
+                    "scp -o ProxyCommand=\"vm proxy $vm 22\" file varmint@$vm:",
+                    "copy a file with scp",
+                ),
+                (
+                    "printf 'GET / HTTP/1.0\\r\\n\\r\\n' | vm proxy $vm 8080",
+                    "talk to a guest web server",
+                ),
+            ],
+        },
+        Command {
+            name: "screenshot",
+            group: "Screen and input",
+            usage: "vm screenshot NAME [FILE]",
+            summary: "Save the screen as a PNG",
+            description: "\
+Writes the VM's screen to FILE, NAME.png by default, or to stdout when FILE
+is -. Pixel positions in the image are the coordinates move and click take."
+                .into(),
+            options: vec![],
+            examples: &[
+                ("vm screenshot $vm", "writes $vm.png"),
+                ("vm screenshot $vm - > screen.png", "PNG on stdout"),
+            ],
+        },
+        Command {
+            name: "screen",
+            group: "Screen and input",
+            usage: "vm screen [NAME] [--fps N]",
+            summary: "Use the screen live in the terminal, with mouse and keyboard",
+            description: "\
+Shows the VM's screen in the terminal and updates it as the screen changes.
+The VM's display takes the terminal's aspect ratio and follows it when the
+window is resized, keeping at most the VM's configured pixel count. The mouse
+and keyboard control the VM: every key, including Ctrl and the other
+modifiers, goes to the VM. Press Ctrl+] to quit. Without NAME, the name is
+read from stdin, so `vm run | vm screen` works.
+
+Needs a terminal with the Kitty graphics and keyboard protocols and pixel
+mouse reporting, such as Ghostty, Kitty or WezTerm."
+                .into(),
+            options: vec![("--fps N", "Most frames per second (default 30, at most 60)".into())],
+            examples: &[
+                ("vm screen $vm", ""),
+                ("vm screen $vm --fps 60", "smoother, more CPU"),
+                ("vm run | vm screen", "new VM straight onto the screen"),
+            ],
+        },
+        Command {
+            name: "stream",
+            group: "Screen and input",
+            usage: "vm stream NAME [--fps N] [--no-audio]",
+            summary: "Write the screen as H.264 and the sound as Opus to stdout",
+            description: "\
+Streams the screen, and the sound unless --no-audio, until the VM stops or
+the reader goes away, for programs that show the screen elsewhere. Each
+message starts with a u8 kind; numbers are little-endian:
+
+  video  0, width u32, height u32, keyframe u8 (1 or 0), length u32,
+         then an H.264 access unit in Annex B form
+  audio  1, length u32, then an Opus packet of 20 ms, 48 kHz stereo
+
+The first video message is a keyframe with its parameter sets. Video is sent
+only when the screen changes, so a still screen sends nothing."
+                .into(),
+            options: vec![
+                ("--fps N", "Most frames per second (default 30, at most 60)".into()),
+                ("--no-audio", "Leave out the sound".into()),
+            ],
+            examples: &[
+                ("vm stream $vm > screen.bin", ""),
+                ("vm stream $vm --no-audio | my-viewer", ""),
+            ],
+        },
+        Command {
+            name: "input",
+            group: "Screen and input",
+            usage: "vm input NAME",
+            summary: "Send mouse and keyboard events from stdin",
+            description: "\
+Reads one JSON event per line from stdin and sends each to the VM as it
+arrives, until stdin closes. Positions are screenshot pixels; keys and
+buttons are Linux evdev codes (BTN_LEFT 272, BTN_RIGHT 273, BTN_MIDDLE 274):
+
+  {\"move\": {\"x\": 640, \"y\": 400}}
+  {\"button\": {\"button\": 272, \"down\": true}}
+  {\"key\": {\"code\": 30, \"down\": true}}
+  {\"scroll\": {\"value\": -1, \"horizontal\": false}}
+
+A line that is not one of these stops it with an error."
+                .into(),
+            options: vec![],
+            examples: &[(
+                "echo '{\"move\": {\"x\": 640, \"y\": 400}}' | vm input $vm",
+                "",
+            )],
+        },
+        Command {
+            name: "move",
+            group: "Screen and input",
+            usage: "vm move NAME X Y",
+            summary: "Move the mouse pointer",
+            description: "Moves the pointer to screenshot pixel X Y.".into(),
+            options: vec![],
+            examples: &[("vm move $vm 640 400", "")],
+        },
+        Command {
+            name: "click",
+            group: "Screen and input",
+            usage: "vm click NAME [X Y] [--right | --middle] [--double]",
+            summary: "Click a mouse button",
+            description: "Clicks at screenshot pixel X Y, or where the pointer is without X Y.".into(),
+            options: vec![
+                ("--right", "Click the right button".into()),
+                ("--middle", "Click the middle button".into()),
+                ("--double", "Double-click".into()),
+            ],
+            examples: &[
+                ("vm click $vm 568 775", "left click"),
+                ("vm click $vm 300 200 --right", "open a context menu"),
+                ("vm click $vm 60 80 --double", "select a word"),
+            ],
+        },
+        Command {
+            name: "type",
+            group: "Screen and input",
+            usage: "vm type NAME TEXT",
+            summary: "Type text",
+            description: "\
+Types TEXT with a US keyboard layout. Printable ASCII, newlines and tabs are
+supported; use `vm key` for other keys and shortcuts."
+                .into(),
+            options: vec![],
+            examples: &[
+                ("vm type $vm 'hello world'", ""),
+                ("vm type $vm $'ls -la\\n'", "type a command and press enter"),
+            ],
+        },
+        Command {
+            name: "key",
+            group: "Screen and input",
+            usage: "vm key NAME COMBO...",
+            summary: "Press keys and shortcuts",
+            description: "\
+Presses each COMBO in turn. A combo is one or more keys joined with +, held
+down together. Keys are ctrl, shift, alt, super, enter, esc, tab, space,
+backspace, delete, insert, home, end, pageup, pagedown, up, down, left,
+right, f1 to f12, or a single character."
+                .into(),
+            options: vec![],
+            examples: &[
+                ("vm key $vm enter", ""),
+                ("vm key $vm ctrl+alt+t", "shortcut"),
+                ("vm key $vm ctrl+a ctrl+c", "several combos in a row"),
+            ],
+        },
+        Command {
+            name: "scroll",
+            group: "Screen and input",
+            usage: "vm scroll NAME AMOUNT [--horizontal]",
+            summary: "Scroll the mouse wheel",
+            description: "\
+Scrolls AMOUNT wheel steps at the pointer. Positive scrolls up, negative
+scrolls down."
+                .into(),
+            options: vec![("--horizontal", "Scroll sideways; positive scrolls right".into())],
+            examples: &[
+                ("vm scroll $vm -5", "scroll down"),
+                ("vm scroll $vm 3 --horizontal", "scroll right"),
+            ],
+        },
+        Command {
+            name: "serve",
+            group: "Remote",
+            usage: "vm serve [ADDRESS] [--ui] [--cert FILE --key FILE]",
+            summary: "Provision VMs over the network",
+            description: "\
+Listens on ADDRESS (default 127.0.0.1:7420) for provisioning requests. Each
+connection sends one JSON line and gets one JSON line back, then closes.
+Every request carries the token from ~/.vm/serve-token, which is
+created on first use:
+
+  {\"token\": \"...\", \"op\": \"run\", \"persist\": false, \"cpus\": 4, \"memory_mib\": 6144,
+   \"disk_gib\": 64, \"size\": [1920, 1080], \"wait_network\": true}
+                                               -> {\"name\": \"swift-otter\"}
+  {\"token\": \"...\", \"op\": \"ls\"}           -> {\"vms\": [{\"name\", \"running\", \"hardware\", \"memory_bytes\", \"cpu_ms\"}],
+                                                   \"host\": {\"memory_bytes\", \"used_bytes\", \"cpu_busy_ms\", \"cpu_total_ms\"}}
+  {\"token\": \"...\", \"op\": \"stop\", \"name\": \"swift-otter\"} -> {}
+  {\"token\": \"...\", \"op\": \"rm\", \"name\": \"swift-otter\"}   -> {}
+  {\"token\": \"...\", \"op\": \"network\", \"name\": \"swift-otter\"}
+                                               -> {\"network\": {\"addresses\": [\"192.168.64.5\"],
+                                                   \"ports\": [{\"port\": 22, \"loopback\": false, \"forwarded\": null}]}}
+  {\"token\": \"...\", \"op\": \"forward\", \"name\": \"swift-otter\", \"port\": 3000}
+                                               -> {\"local_port\": 3000}, a listener on the host's 127.0.0.1
+                                                  (this port if free) that relays to the guest's port
+  {\"token\": \"...\", \"op\": \"unforward\", \"name\": \"swift-otter\", \"port\": 3000} -> {}
+  {\"token\": \"...\", \"op\": \"attach\", \"name\": \"swift-otter\",
+   \"request\": {\"op\": \"stream\", \"fps\": 30, \"codec\": \"h264\", \"audio\": true}}
+                                               -> {} and then the VM's stream
+
+A failed request answers {\"error\": \"...\"}. All fields of run are
+optional, plus name and base as in `vm run`, and env, an object of
+guest variables. CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY come from
+the server's environment when set, unless env names them. stores is a
+list of buckets the VM may use, as in --store, like [\"shared\", \"specs:ro\"].
+Mounts and seeds are not available remotely, since they name host files.
+
+While it serves, the Mac does not sleep when idle, also with the screen
+locked or off. Closing the lid still sleeps it.
+
+attach hands the connection to the VM's control socket after its reply,
+with request as the first line there: stream for the screen as H.264
+(codec h264) or raw pixels (codec rgb), with \"audio\": true for the
+sound as Opus in H.264 streams, inputstream for mouse and keyboard
+events, or open for a shell. Only VMs with a window play their sound on
+the host.
+
+stderr is an event log of CloudEvents 1.0 as JSON lines, with the types
+dev.vm.serve.request (with only the names of env), .exec (args,
+exit_code, duration_ms), .reply and .error (a client that left before
+the reply, or a failed accept). The extension attributes peer and requestid name the client and
+tie the events of one request together. Tokens are never logged.
+
+With --ui the same address also serves a web UI over HTTP, with a live
+wall of every VM's screen and each VM's shell and display. It prints a link
+that carries the token; the browser keeps it, so open the link once.
+
+With --cert and --key, a PEM certificate chain and its private key, every
+connection is TLS and the web UI is on https, which browsers on other
+machines need for its video. mkcert makes a certificate they trust.
+Without them the connection is not encrypted: keep ADDRESS on the loopback
+or a private network and reach it through a relay or tunnel."
+                .into(),
+            options: vec![
+                ("--ui", "Also serve the web UI on ADDRESS".into()),
+                ("--cert FILE", "Serve TLS with this PEM certificate chain".into()),
+                ("--key FILE", "The PEM private key of --cert".into()),
+            ],
+            examples: &[
+                ("vm serve", "listen on 127.0.0.1:7420"),
+                ("vm serve 0.0.0.0:7420", "listen on all interfaces"),
+                ("vm serve --ui", "with the web UI at http://127.0.0.1:7420"),
+                (
+                    "vm serve --ui 0.0.0.0:7420 --cert mac.pem --key mac-key.pem",
+                    "with the web UI over https for the local network",
+                ),
+            ],
+        },
+    ]
+}
+
+fn render_examples(out: &mut String, examples: &[(&str, &str)]) {
+    let width = examples.iter().map(|(command, _)| command.len()).max().unwrap_or(0);
+    for (command, comment) in examples {
+        match comment.is_empty() {
+            true => out.push_str(&format!("  {command}\n")),
+            false => out.push_str(&format!("  {command:<width$}  # {comment}\n")),
+        }
+    }
+}
+
+/// `user_commands` are names with their summaries.
+pub fn overview(commands: &[Command], user_commands: &[(String, String)]) -> String {
+    let mut out = String::from(
+        "\
+vm - quick, disposable Linux VMs on macOS and Linux
+
+Every VM is a copy-on-write clone of a Debian desktop image and starts in
+about a second. VMs are ephemeral unless created with --persist. State and
+usage telemetry live in ~/.vm (set VM_HOME to move it).
+
+Usage: vm COMMAND [ARGS]
+",
+    );
+    let width = commands
+        .iter()
+        .map(|command| command.name.len())
+        .chain(user_commands.iter().map(|(name, _)| name.len()))
+        .max()
+        .unwrap_or(0);
+    for group in GROUPS {
+        out.push_str(&format!("\n{group}:\n"));
+        for command in commands.iter().filter(|command| command.group == *group) {
+            out.push_str(&format!("  {:<width$}  {}\n", command.name, command.summary));
+        }
+    }
+    if !user_commands.is_empty() {
+        out.push_str("\nYour commands (~/.vm/commands):\n");
+        for (name, summary) in user_commands {
+            out.push_str(format!("  {name:<width$}  {summary}").trim_end());
+            out.push('\n');
+        }
+    }
+    out.push_str(
+        "\nRun `vm help COMMAND` or `vm COMMAND --help` for options and examples.\n\
+         Add your own commands as executables in ~/.vm/commands; `vm NAME`\n\
+         runs ~/.vm/commands/NAME with the remaining arguments. A comment on\n\
+         the line after the shebang is its summary here.\n\nExamples:\n",
+    );
+    render_examples(&mut out, OVERVIEW_EXAMPLES);
+    out
+}
+
+pub fn command(command: &Command) -> String {
+    let mut out = format!("{}\n\nUsage: {}\n\n{}\n", command.summary, command.usage, command.description);
+    if !command.options.is_empty() {
+        out.push_str("\nOptions:\n");
+        let width = command.options.iter().map(|(flag, _)| flag.len()).max().unwrap_or(0);
+        for (flag, text) in &command.options {
+            let indent = " ".repeat(width + 4);
+            let text = text.replace('\n', &format!("\n{indent}"));
+            out.push_str(&format!("  {flag:<width$}  {text}\n"));
+        }
+    }
+    out.push_str("\nExamples:\n");
+    render_examples(&mut out, command.examples);
+    out
+}
+
+/// Short message for wrong arguments to a command.
+pub fn usage_error(command: &Command) -> String {
+    format!(
+        "usage: {}\nRun `vm {} --help` for options and examples.",
+        command.usage, command.name
+    )
+}

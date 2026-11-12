@@ -1,0 +1,29 @@
+#!/bin/sh
+# Installed as FEX and FEXBash: runs the FEX command of the same name once the
+# x86-64 rootfs exists. The rootfs is not part of the image; the first use in
+# a VM downloads the pinned image from the FEX project, checks and unpacks it.
+# Also installed as FEXRootFSFetcher, which only downloads: FEX points there
+# when an x86-64 program runs directly before the rootfs exists.
+set -eu
+url=https://rootfs.fex-emu.gg/Ubuntu_24_04/2026-08-11/Ubuntu_24_04.sqsh
+sha256=2854b06d3ff1b8f6e526135bfb6dd5b7b30ab3ab73e79ae933a3d9fed959a178
+dir="$HOME/.local/share/fex-emu/RootFS"
+rootfs="$dir/Ubuntu_24_04"
+
+if [ ! -d "$rootfs" ]; then
+    mkdir -p "$dir"
+    exec 9>"$dir/.lock"
+    flock 9
+    if [ ! -d "$rootfs" ]; then
+        download=$(mktemp -d "$dir/.download.XXXXXX")
+        curl -fL --retry 3 -o "$download/rootfs.sqsh" "$url"
+        echo "$sha256  $download/rootfs.sqsh" | sha256sum -c --quiet
+        unsquashfs -q -d "$download/rootfs" "$download/rootfs.sqsh"
+        mv "$download/rootfs" "$rootfs"
+        rm -rf "$download"
+    fi
+    exec 9>&-
+fi
+
+name=$(basename "$0")
+[ "$name" = FEXRootFSFetcher ] || exec "/usr/bin/$name" "$@"

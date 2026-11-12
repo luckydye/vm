@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vm</title>
+<link rel="icon" href="/logo.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css">
+<link rel="stylesheet" href="/app.css">
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-canvas@0.7.0/lib/addon-canvas.js"></script>
+<script type="module" src="/ui.js"></script>
+</head>
+<body>
+<header class="top">
+  <button class="brand" id="home">vm</button>
+  <nav class="crumbs" id="crumbs"></nav>
+  <aside class="summary" id="summary">
+    <div class="metric">
+      <div>
+        <h3>CPU<small id="cpu-summary"></small></h3>
+        <p class="usage-legend" id="cpu-legend"></p>
+      </div>
+      <svg class="usage-chart" id="cpu-chart" preserveAspectRatio="none"></svg>
+    </div>
+    <div class="metric">
+      <div>
+        <h3>Memory<small id="memory-summary"></small></h3>
+        <p class="usage-legend" id="memory-legend"></p>
+      </div>
+      <svg class="usage-chart" id="memory-chart" preserveAspectRatio="none"></svg>
+    </div>
+  </aside>
+  <span class="spacer"></span>
+  <span class="host" id="host"></span>
+  <span class="window-menu" id="window-menu">
+    <button class="btn" id="open-display">Display</button>
+    <button class="btn" id="open-shell">New terminal</button>
+  </span>
+  <button class="btn icon" id="machine-info" popovertarget="facts-popover" aria-label="Machine info" title="Machine info">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>
+  </button>
+  <button class="btn" id="machine-power"></button>
+  <button class="btn danger" id="machine-delete">Delete</button>
+  <button class="btn primary" id="new">New machine</button>
+</header>
+
+<main>
+  <section class="overview" id="overview">
+    <div class="wall-area" id="wall-area">
+      <ul class="wall" id="grid"></ul>
+      <ul class="shelf" id="shelf"></ul>
+      <div class="blank" id="blank">
+        <h2>No machines</h2>
+        <p>Each machine is a disposable Debian desktop that starts in about a second.</p>
+        <button class="btn primary" id="blank-new">New machine</button>
+        <code>or run <span>vm run</span> in a terminal</code>
+      </div>
+    </div>
+  </section>
+
+  <section class="machine" id="machine">
+    <div class="workspace" id="workspace"></div>
+    <div class="stopped" id="stopped">
+      <p>This machine is stopped. Its disk is kept until you delete it.</p>
+      <button class="btn primary" id="machine-start">Start</button>
+    </div>
+  </section>
+</main>
+
+<dialog class="sheet" id="sheet">
+  <form id="create" method="dialog">
+    <div class="sheet-body">
+      <h2>New machine</h2>
+      <fieldset class="sizes" id="presets"><legend>Size</legend></fieldset>
+      <label class="field">
+        <span>Name</span>
+        <input name="name" placeholder="Random, like swift-otter" autocomplete="off" spellcheck="false">
+      </label>
+      <label class="check">
+        <input name="persist" type="checkbox">
+        <span>Keep after stop<small>The disk survives stopping, so the machine can be started again.</small></span>
+      </label>
+      <label class="check">
+        <input name="wait_network" type="checkbox">
+        <span>Wait for network<small>Return once the guest has network and DNS.</small></span>
+      </label>
+      <details>
+        <summary>Advanced</summary>
+        <div class="advanced">
+          <label class="field"><span>Base image</span><input name="base" placeholder="default" spellcheck="false"></label>
+          <label class="field"><span>Disk</span><input name="disk_gib" type="number" min="1" placeholder="64 GiB"></label>
+          <label class="field"><span>Display</span><input name="size" placeholder="1280x800" spellcheck="false"></label>
+          <label class="field"><span>Store buckets</span><input name="stores" placeholder="shared, specs:ro" spellcheck="false"></label>
+          <label class="field wide"><span>Environment</span><textarea name="env" placeholder="NAME=value, one per line" spellcheck="false"></textarea></label>
+        </div>
+      </details>
+    </div>
+    <footer>
+      <button class="btn" value="cancel" formnovalidate>Cancel</button>
+      <button class="btn primary" value="create">Create</button>
+    </footer>
+  </form>
+</dialog>
+
+<dialog class="sheet" id="login">
+  <form id="login-form" method="dialog">
+    <div class="sheet-body">
+      <h2>Connect to vm</h2>
+      <p class="sheet-note">Open the link <code>vm serve --ui</code> prints, or paste the token from <code>~/.vm/serve-token</code> on the Mac that serves.</p>
+      <label class="field">
+        <span>Token</span>
+        <input name="token" required autocomplete="off" spellcheck="false">
+      </label>
+    </div>
+    <footer>
+      <span></span>
+      <button class="btn primary" value="connect">Connect</button>
+    </footer>
+  </form>
+</dialog>
+
+<!-- Windows not on the machine page wait here, keeping their connections. -->
+<div id="parked" hidden>
+  <article class="window" id="display-window">
+    <header class="window-bar">
+      <span class="window-title">Display</span>
+      <span class="sound">
+        <button class="mute" id="mute">
+          <svg viewBox="0 0 24 24"><path d="M11 5 6 9H3v6h3l5 4z"/><path class="waves" d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/><path class="cross" d="m16 9.5 5 5m0-5-5 5"/></svg>
+        </button>
+        <input class="volume" type="range" id="volume" min="0" max="1" step="0.01" aria-label="Volume">
+      </span>
+    </header>
+    <div class="screen-frame" id="screen-frame">
+      <div class="screen">
+        <canvas id="screen" tabindex="0"></canvas>
+        <p class="hint" id="caption"></p>
+      </div>
+    </div>
+    <div class="keys" id="keys">
+      <button class="key keyboard" id="keyboard" aria-label="On-screen keyboard">
+        <svg viewBox="0 0 24 24"><rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M8 14h8"/></svg>
+      </button>
+      <input class="typing" id="typing" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="enter" aria-label="Type on the machine">
+      <button class="key paste" id="paste" aria-label="Paste" title="Paste">
+        <svg viewBox="0 0 24 24"><rect x="5" y="4.5" width="14" height="16" rx="2"/><path d="M9 4.5V3.5h6v1M9 11h6M9 15h4"/></svg>
+      </button>
+      <span class="key-group modifier-keys"></span>
+      <span class="key-group named-keys"></span>
+    </div>
+  </article>
+</div>
+
+<template id="shell-window">
+  <article class="window">
+    <header class="window-bar"><span class="window-title"></span></header>
+    <div class="shell"></div>
+    <div class="keys shell-keys">
+      <button class="key keyboard" aria-label="On-screen keyboard">
+        <svg viewBox="0 0 24 24"><rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M8 14h8"/></svg>
+      </button>
+      <button class="key paste" aria-label="Paste" title="Paste">
+        <svg viewBox="0 0 24 24"><rect x="5" y="4.5" width="14" height="16" rx="2"/><path d="M9 4.5V3.5h6v1M9 11h6M9 15h4"/></svg>
+      </button>
+      <span class="key-group modifier-keys"></span>
+      <span class="key-group named-keys"></span>
+    </div>
+    <p class="shell-status"></p>
+  </article>
+</template>
+
+<template id="window-buttons">
+  <span class="window-buttons">
+    <button class="mute" data-action="zoom" aria-label="Fill the page" title="Fill the page">
+      <svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+    </button>
+    <button class="mute" data-action="close" aria-label="Close" title="Close">
+      <svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg>
+    </button>
+  </span>
+</template>
+
+<div class="drop" id="drop" hidden></div>
+<div class="facts-popover" id="facts-popover" popover>
+  <dl class="facts" id="machine-facts"></dl>
+</div>
+<ol class="toasts" id="toasts"></ol>
+</body>
+</html>

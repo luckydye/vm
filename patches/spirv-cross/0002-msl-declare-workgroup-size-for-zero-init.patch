@@ -1,0 +1,25 @@
+diff --git a/spirv_msl.cpp b/spirv_msl.cpp
+index 07c72c96..cb7056de 100644
+--- a/spirv_msl.cpp
++++ b/spirv_msl.cpp
+@@ -356,7 +356,9 @@ void CompilerMSL::build_implicit_builtins()
+ 	bool need_local_invocation_index =
+ 		(msl_options.emulate_subgroups && active_input_builtins.get(BuiltInSubgroupId)) || is_mesh_shader() ||
+ 		needs_workgroup_zero_init || needs_local_invocation_index;
+-	bool need_workgroup_size = msl_options.emulate_subgroups && active_input_builtins.get(BuiltInNumSubgroups);
++	// Zero-initializing composite workgroup variables loops with a stride of the workgroup size.
++	bool need_workgroup_size =
++		(msl_options.emulate_subgroups && active_input_builtins.get(BuiltInNumSubgroups)) || needs_workgroup_zero_init;
+ 	bool force_frag_depth_passthrough =
+ 	    get_execution_model() == ExecutionModelFragment && !uses_explicit_early_fragment_test() && need_subpass_input &&
+ 	    msl_options.enable_frag_depth_builtin && msl_options.input_attachment_is_ds_attachment;
+@@ -22352,7 +22354,8 @@ void CompilerMSL::emit_workgroup_initialization(const SPIRVariable &var)
+ 		statement("threadgroup uint *", var_ptr_name, " = (threadgroup uint *)&", var_name, ";");
+ 		statement("uint ", var_size_name, " = ", "sizeof(", var_name, ");");
+ 		statement("uint ", var_pos_name, " = gl_LocalInvocationIndex;");
+-		statement("uint ", var_stride_name, " = gl_WorkGroupSize.x * gl_WorkGroupSize.y * gl_WorkGroupSize.z;");
++		string size_expr = to_expression(builtin_workgroup_size_id);
++		statement("uint ", var_stride_name, " = ", size_expr, ".x * ", size_expr, ".y * ", size_expr, ".z;");
+ 
+ 		statement("while (sizeof(uint) * ", var_pos_name, " < ", var_size_name, ")");
+ 		begin_scope();

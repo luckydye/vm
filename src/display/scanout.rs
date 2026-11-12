@@ -1,21 +1,26 @@
-use super::{DisplayBuffer, DisplayEvent, Rect, angle::AngleCopy, iosurface::ScopedIOSurface};
+use super::{DisplayBuffer, DisplayNotifier, Rect};
+#[cfg(target_os = "macos")]
+use super::{angle::AngleCopy, iosurface::ScopedIOSurface};
 use crate::virtio::gpu::{PresentFrame, PresentSource, Presentation};
 use std::sync::Mutex;
-use winit::event_loop::EventLoopProxy;
 
 pub struct ScanoutPublisher<'a> {
     display: &'a Mutex<DisplayBuffer>,
-    display_proxy: EventLoopProxy<DisplayEvent>,
+    display_notifier: DisplayNotifier,
+    #[cfg(target_os = "macos")]
     angle_copy: AngleCopy,
+    #[cfg(target_os = "macos")]
     iosurface: Option<ScopedIOSurface>,
 }
 
 impl<'a> ScanoutPublisher<'a> {
-    pub fn new(display: &'a Mutex<DisplayBuffer>, display_proxy: EventLoopProxy<DisplayEvent>) -> Self {
+    pub fn new(display: &'a Mutex<DisplayBuffer>, display_notifier: DisplayNotifier) -> Self {
         Self {
             display,
-            display_proxy,
+            display_notifier,
+            #[cfg(target_os = "macos")]
             angle_copy: AngleCopy::new(),
+            #[cfg(target_os = "macos")]
             iosurface: None,
         }
     }
@@ -32,7 +37,7 @@ impl<'a> ScanoutPublisher<'a> {
 
     fn configure(&mut self, width: u32, height: u32) {
         self.display.lock().unwrap().resize(width as usize, height as usize);
-        let _ = self.display_proxy.send_event(DisplayEvent::Changed);
+        self.display_notifier.notify();
     }
 
     fn present_frame(&mut self, frame: PresentFrame<'_>) -> bool {
@@ -56,6 +61,9 @@ impl<'a> ScanoutPublisher<'a> {
                     .unwrap()
                     .publish_pixels(data, stride as usize, source, damage)
             }
+            #[cfg(target_os = "linux")]
+            PresentSource::NativeTexture(texture) => match texture {},
+            #[cfg(target_os = "macos")]
             PresentSource::NativeTexture(texture) => {
                 let recreate = self.iosurface.as_ref().is_none_or(|surface| {
                     surface.width() != frame.source_rect.width || surface.height() != frame.source_rect.height
@@ -91,7 +99,7 @@ impl<'a> ScanoutPublisher<'a> {
         };
 
         if published {
-            let _ = self.display_proxy.send_event(DisplayEvent::Changed);
+            self.display_notifier.notify();
         }
 
         true

@@ -25,16 +25,13 @@ require_commands() {
 load_metadata() {
   local metadata
   need_cmd python3
-  need_file "$ROOT/Cargo.toml"
-  metadata="$(python3 - "$MANIFEST" "$ROOT/Cargo.toml" <<'PY'
+  metadata="$(python3 - "$MANIFEST" <<'PY'
 import shlex
 import sys
 import tomllib
 
 with open(sys.argv[1], "rb") as f:
     manifest = tomllib.load(f)
-with open(sys.argv[2], "rb") as f:
-    cargo = tomllib.load(f)
 
 if manifest.get("schema_version") != 1:
     raise SystemExit("unsupported runtime manifest schema")
@@ -45,7 +42,6 @@ if len(architectures) != 1:
 dependencies = manifest["dependencies"]
 values = {
     "ARCH": architectures[0],
-    "APP_VERSION": cargo["package"]["version"],
     "MINIMUM_MACOS": runtime["minimum_macos"],
     "ANGLE_REPOSITORY": dependencies["angle"]["repository"],
     "ANGLE_COMMIT": dependencies["angle"]["commit"],
@@ -56,10 +52,6 @@ values = {
     "MOLTENVK_VERSION": dependencies["moltenvk"]["version"],
     "VIRGL_REPOSITORY": dependencies["virglrenderer"]["repository"],
     "VIRGL_COMMIT": dependencies["virglrenderer"]["commit"],
-    "DXMT_REPOSITORY": dependencies["dxmt"]["repository"],
-    "DXMT_COMMIT": dependencies["dxmt"]["commit"],
-    "D3DMETAL_REPOSITORY": dependencies["d3dmetal"]["repository"],
-    "D3DMETAL_COMMIT": dependencies["d3dmetal"]["commit"],
 }
 for key, value in values.items():
     print(f"{key}={shlex.quote(str(value))}")
