@@ -46,8 +46,8 @@ use std::{
 /// How long a client may take to send its whole request.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Requests are a few hundred bytes; a longer line is cut off and fails to parse.
-const MAX_REQUEST_BYTES: u64 = 64 * 1024;
+/// Requests are normally a few hundred bytes; a long `type` can be larger.
+const MAX_REQUEST_BYTES: u64 = 1024 * 1024;
 
 /// Pause after a failed accept, so a lasting error such as running out of
 /// file descriptors does not spin the loop.
@@ -60,9 +60,9 @@ const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 /// Mounts and seeds are left out on purpose: they name host files, which a
 /// remote client must not reach. `stores` grants buckets of the shared store,
 /// `BUCKET[:ro]` as in `--store`.
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "lowercase", deny_unknown_fields)]
-enum Request {
+pub(crate) enum Request {
     Run {
         name: Option<String>,
         base: Option<String>,
@@ -86,6 +86,11 @@ enum Request {
     Rm {
         name: String,
     },
+    /// Saves a persistent VM as an image on this node.
+    Save {
+        name: String,
+        image: String,
+    },
     /// The addresses and listening ports of a running VM, asked of the guest.
     Network {
         name: String,
@@ -107,58 +112,65 @@ enum Request {
     },
 }
 
-#[derive(Serialize, Default)]
-struct Reply {
+#[derive(Serialize, Deserialize, Default)]
+#[serde(default)]
+pub(crate) struct Reply {
     #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
+    pub(crate) error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<String>,
+    pub(crate) name: Option<String>,
+    /// Whether `run` created the VM, rather than starting an existing one.
     #[serde(skip_serializing_if = "Option::is_none")]
-    vms: Option<Vec<Vm>>,
+    pub(crate) created: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    host: Option<Host>,
+    pub(crate) vms: Option<Vec<Vm>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    network: Option<Network>,
+    pub(crate) host: Option<Host>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) network: Option<Network>,
     /// The host port a forward listens on.
     #[serde(skip_serializing_if = "Option::is_none")]
-    local_port: Option<u16>,
+    pub(crate) local_port: Option<u16>,
 }
 
-#[derive(Serialize)]
-struct Network {
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Network {
     /// Global IPv4 addresses of the guest.
-    addresses: Vec<String>,
-    ports: Vec<Port>,
+    pub(crate) addresses: Vec<String>,
+    pub(crate) ports: Vec<Port>,
 }
 
-#[derive(Serialize, PartialEq, Eq, PartialOrd, Ord)]
-struct Port {
-    port: u16,
+#[derive(Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Port {
+    pub(crate) port: u16,
     /// Only reachable from inside the guest, such as through `vm ssh -L`.
-    loopback: bool,
+    pub(crate) loopback: bool,
     /// The host port it is forwarded to.
-    forwarded: Option<u16>,
+    pub(crate) forwarded: Option<u16>,
 }
 
-#[derive(Serialize)]
-struct Vm {
-    name: String,
-    running: bool,
-    hardware: Hardware,
+#[derive(Serialize, Deserialize, Clone)]
+pub(crate) struct Vm {
+    pub(crate) name: String,
+    pub(crate) running: bool,
+    pub(crate) hardware: Hardware,
     /// What the VM process takes from the host, while it runs.
-    memory_bytes: Option<u64>,
+    pub(crate) memory_bytes: Option<u64>,
     /// CPU time the VM process used since it started, while it runs.
-    cpu_ms: Option<u64>,
+    pub(crate) cpu_ms: Option<u64>,
 }
 
-#[derive(Serialize)]
-struct Host {
-    memory_bytes: u64,
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Host {
+    pub(crate) memory_bytes: u64,
     /// Counted like Activity Monitor's "Memory Used" on macOS: app memory, wired and compressed.
-    used_bytes: u64,
+    pub(crate) used_bytes: u64,
     /// CPU time of all cores since boot: busy, and busy plus idle.
-    cpu_busy_ms: u64,
-    cpu_total_ms: u64,
+    pub(crate) cpu_busy_ms: u64,
+    pub(crate) cpu_total_ms: u64,
+    /// Host CPUs, so a client can avoid placing a VM with more vCPUs than cores.
+    #[serde(default)]
+    pub(crate) cpus: usize,
 }
 
 pub fn token_path() -> PathBuf {
@@ -431,8 +443,14 @@ fn execute(client: &Client, request: Request) -> Result<Reply, String> {
             stores,
         } => {
             let mut args = vec!["run".to_owned()];
+            let created = match &name {
+                Some(name) => {
+                    instance::validate_name(name, "VM")?;
+                    instance::Instance::open(name).is_err()
+                }
+                None => true,
+            };
             if let Some(name) = name {
-                instance::validate_name(&name, "VM")?;
                 args.push(name);
             }
             if let Some(base) = base {
@@ -464,28 +482,16 @@ fn execute(client: &Client, request: Request) -> Result<Reply, String> {
             let name = vm(client, &args, &env)?;
             Ok(Reply {
                 name: Some(name),
+                created: Some(created),
                 ..Reply::default()
             })
         }
         Request::Ls => {
-            instance::prune();
-            let vms = instance::list()
-                .into_iter()
-                .map(|instance| -> Result<Vm, String> {
-                    let usage = usage(&instance)?;
-                    Ok(Vm {
-                        running: usage.is_some(),
-                        hardware: instance.hardware()?,
-                        memory_bytes: usage.as_ref().map(|usage| usage.memory_bytes.expect("a usage reply has memory_bytes")),
-                        cpu_ms: usage.map(|usage| usage.cpu_ms.expect("a usage reply has cpu_ms")),
-                        name: instance.name,
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+            let (vms, host) = local_vms()?;
             forward::retain(&vms.iter().filter(|vm| vm.running).map(|vm| vm.name.as_str()).collect::<Vec<_>>());
             Ok(Reply {
                 vms: Some(vms),
-                host: Some(host()),
+                host: Some(host),
                 ..Reply::default()
             })
         }
@@ -495,7 +501,13 @@ fn execute(client: &Client, request: Request) -> Result<Reply, String> {
         }
         Request::Rm { name } => {
             instance::validate_name(&name, "VM")?;
-            vm(client, &["rm".to_owned(), name], &BTreeMap::new()).map(|_| Reply::default())
+            vm(client, &["stop".to_owned(), "--delete".to_owned(), name], &BTreeMap::new())
+                .map(|_| Reply::default())
+        }
+        Request::Save { name, image } => {
+            instance::validate_name(&name, "VM")?;
+            instance::validate_name(&image, "image")?;
+            vm(client, &["save".to_owned(), name, image], &BTreeMap::new()).map(|_| Reply::default())
         }
         Request::Network { name } => Ok(Reply {
             network: Some(network(&name)?),
@@ -518,6 +530,25 @@ fn execute(client: &Client, request: Request) -> Result<Reply, String> {
         }
         Request::Attach { .. } => unreachable!("attach is handled before execute"),
     }
+}
+
+/// The VMs and host capacity of this machine, the same answer `ls` gives.
+pub(crate) fn local_vms() -> Result<(Vec<Vm>, Host), String> {
+    instance::prune();
+    let vms = instance::list()
+        .into_iter()
+        .map(|instance| -> Result<Vm, String> {
+            let usage = usage(&instance)?;
+            Ok(Vm {
+                running: usage.is_some(),
+                hardware: instance.hardware()?,
+                memory_bytes: usage.as_ref().map(|usage| usage.memory_bytes.expect("a usage reply has memory_bytes")),
+                cpu_ms: usage.map(|usage| usage.cpu_ms.expect("a usage reply has cpu_ms")),
+                name: instance.name,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((vms, host()))
 }
 
 /// Asks the guest of VM `name` for its addresses and listening TCP ports.
@@ -588,11 +619,15 @@ fn guest_output(name: &str, argv: &[&str]) -> Result<String, String> {
 }
 
 /// What the process of a VM takes from the host, or None if the VM is not running.
-fn usage(instance: &instance::Instance) -> Result<Option<protocol::Reply>, String> {
+pub(crate) fn usage(instance: &instance::Instance) -> Result<Option<protocol::Reply>, String> {
     if !instance.is_running() {
         return Ok(None);
     }
     let reply = instance.connect().and_then(|mut control| {
+        control
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .and_then(|()| control.set_write_timeout(Some(Duration::from_secs(2))))
+            .map_err(|error| format!("failed to ask VM {} for its usage: {error}", instance.name))?;
         protocol::write_json(&mut control, &protocol::Request::Usage)
             .and_then(|()| protocol::read_json::<protocol::Reply>(&mut BufReader::new(control)))
             .map_err(|error| format!("failed to ask VM {} for its usage: {error}", instance.name))
@@ -609,7 +644,7 @@ fn usage(instance: &instance::Instance) -> Result<Option<protocol::Reply>, Strin
 }
 
 #[cfg(target_os = "macos")]
-fn host() -> Host {
+pub(crate) fn host() -> Host {
     use std::{mem, ptr, slice};
     let mut memory_bytes: u64 = 0;
     let mut size = size_of::<u64>();
@@ -672,12 +707,13 @@ fn host() -> Host {
         used_bytes: pages * page_bytes,
         cpu_busy_ms: busy_ticks * tick_ms,
         cpu_total_ms: total_ticks * tick_ms,
+        cpus: cpus as usize,
     }
 }
 
 /// Memory in use counts what is not available to start programs with, as `free` does.
 #[cfg(target_os = "linux")]
-fn host() -> Host {
+pub(crate) fn host() -> Host {
     let meminfo = fs::read_to_string("/proc/meminfo").expect("failed to read /proc/meminfo");
     let kib = |field: &str| -> u64 {
         meminfo
@@ -709,6 +745,7 @@ fn host() -> Host {
         used_bytes,
         cpu_busy_ms: busy_ticks * tick_ms,
         cpu_total_ms: total_ticks * tick_ms,
+        cpus: std::thread::available_parallelism().map_or(1, |count| count.get()),
     }
 }
 

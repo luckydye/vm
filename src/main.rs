@@ -17,6 +17,7 @@ mod machine;
 mod macos_ui;
 mod memory;
 mod net;
+mod node;
 mod protocol;
 mod registry;
 mod screen;

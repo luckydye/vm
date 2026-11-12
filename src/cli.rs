@@ -1,10 +1,11 @@
 use crate::{
-    clipboard, help, screen, serve,
+    clipboard, help, node, screen, serve,
     config::{self, GUEST_ENVIRONMENT_VARIABLE, Hardware, Mount, Seed},
     instance::{self, Instance, Launch},
     keymap,
     machine::MAX_SHARES,
-    protocol::{self, Codec, Frame, InputEvent, Reply, Request, Session, kind},
+    node::{Status, Target, Wire},
+    protocol::{self, Codec, Frame, InputEvent, Request, Session, kind},
     store::{self, Grant},
     virtio::input::keys::{BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, KEY_LEFTSHIFT},
     vmm,
@@ -18,13 +19,13 @@ use std::{
     net::TcpListener,
     os::{
         fd::{AsRawFd, FromRawFd, RawFd},
-        unix::{fs::PermissionsExt, net::UnixListener, net::UnixStream, process::CommandExt},
+        unix::{fs::PermissionsExt, net::UnixListener, process::CommandExt},
     },
     path::PathBuf,
     process::{Command, Stdio},
     sync::{Arc, Mutex},
     thread,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 const DEFAULT_HARDWARE: Hardware = Hardware {
@@ -65,7 +66,7 @@ pub fn main() {
 
     match command.as_str() {
         "run" => run(args),
-        "ls" => list(),
+        "ls" => list(args),
         "stop" => stop_all(args),
         "save" => save(args),
         "ssh" => ssh(args),
@@ -79,6 +80,7 @@ pub fn main() {
         "type" => type_text(args),
         "key" => key(args),
         "scroll" => scroll(args),
+        "nodes" => nodes_command(args),
         "serve" => serve_command(args),
         "store" => store_command(args),
         "__vmm" => vmm_process(args),
@@ -193,6 +195,10 @@ fn open(name: &str) -> Instance {
     Instance::open(name).unwrap_or_else(|error| fail(error))
 }
 
+fn resolve(name: &str) -> Target {
+    Target::resolve(name).unwrap_or_else(|error| fail(error))
+}
+
 fn parse<T: std::str::FromStr>(value: Option<&String>, what: &str) -> T {
     value
         .and_then(|value| value.parse().ok())
@@ -240,105 +246,186 @@ impl Vm {
     }
 }
 
+struct RunOptions {
+    name: Option<String>,
+    window: bool,
+    wait_network: bool,
+    mounts: Vec<String>,
+    environment: Vec<String>,
+    seeds: Vec<String>,
+    grants: Vec<Grant>,
+    hardware: Hardware,
+    hardware_flags: bool,
+    start_flags: bool,
+    image: Option<String>,
+    command: Vec<String>,
+    execute: bool,
+    node: Option<String>,
+    any: bool,
+}
+
+enum Placement {
+    Local,
+    Remote(node::Node),
+}
+
 fn run(args: &[String]) {
     let started = Instant::now();
-    let mut name = None;
-    let mut window = false;
-    let mut wait_network = false;
-    let mut mounts = Vec::new();
-    let mut environment = Vec::new();
-    let mut seeds = Vec::new();
-    let mut grants = Vec::new();
-    let mut hardware = DEFAULT_HARDWARE;
-    let mut hardware_flags = false;
-    let mut start_flags = false;
-    let mut image = None;
-    let mut command = Vec::new();
-    let mut execute = false;
+    let mut options = RunOptions {
+        name: None,
+        window: false,
+        wait_network: false,
+        mounts: Vec::new(),
+        environment: Vec::new(),
+        seeds: Vec::new(),
+        grants: Vec::new(),
+        hardware: DEFAULT_HARDWARE,
+        hardware_flags: false,
+        start_flags: false,
+        image: None,
+        command: Vec::new(),
+        execute: false,
+        node: None,
+        any: false,
+    };
 
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         if arg == "--" {
-            command = args.by_ref().cloned().collect();
-            execute = true;
+            options.command = args.by_ref().cloned().collect();
+            options.execute = true;
             break;
         }
         match arg.as_str() {
             "--window" => {
-                window = true;
-                start_flags = true;
+                options.window = true;
+                options.start_flags = true;
             }
-            "--wait-network" => wait_network = true,
+            "--wait-network" => options.wait_network = true,
             "--env" => {
-                environment.push(args.next().unwrap_or_else(|| usage_error("run")).clone());
-                start_flags = true;
+                options
+                    .environment
+                    .push(args.next().unwrap_or_else(|| usage_error("run")).clone());
+                options.start_flags = true;
             }
             "--seed" => {
-                seeds.push(args.next().unwrap_or_else(|| usage_error("run")).clone());
-                start_flags = true;
+                options
+                    .seeds
+                    .push(args.next().unwrap_or_else(|| usage_error("run")).clone());
+                options.start_flags = true;
             }
             "--store" => {
                 let spec = args.next().unwrap_or_else(|| fail("--store needs BUCKET[:ro]"));
-                grants.push(Grant::parse(spec).unwrap_or_else(|error| fail(error)));
-                start_flags = true;
+                options
+                    .grants
+                    .push(Grant::parse(spec).unwrap_or_else(|error| fail(error)));
+                options.start_flags = true;
             }
             "--mount" => {
                 let spec = args.next().unwrap_or_else(|| fail("--mount needs HOST:GUEST[:ro]"));
-                mounts.push(Mount::parse(spec).unwrap_or_else(|error| fail(error)));
-                // One share is reserved for the seeds.
-                if mounts.len() >= MAX_SHARES {
-                    fail(format!("at most {} mounts are supported", MAX_SHARES - 1));
-                }
-                start_flags = true;
+                options.mounts.push(spec.clone());
+                options.start_flags = true;
             }
             "--base" => {
-                image = Some(args.next().unwrap_or_else(|| usage_error("run")).clone());
-                hardware_flags = true;
+                options.image = Some(args.next().unwrap_or_else(|| usage_error("run")).clone());
+                options.hardware_flags = true;
             }
             "--persist" => {
-                hardware.persist = true;
-                hardware_flags = true;
+                options.hardware.persist = true;
+                options.hardware_flags = true;
             }
             "--cpus" => {
-                hardware.cpus = parse(args.next(), "--cpus");
-                hardware_flags = true;
+                options.hardware.cpus = parse(args.next(), "--cpus");
+                options.hardware_flags = true;
             }
             "--memory" => {
-                hardware.memory_mib = parse(args.next(), "--memory");
-                hardware_flags = true;
+                options.hardware.memory_mib = parse(args.next(), "--memory");
+                options.hardware_flags = true;
             }
             "--disk" => {
-                hardware.disk_gib = parse(args.next(), "--disk");
-                hardware_flags = true;
+                options.hardware.disk_gib = parse(args.next(), "--disk");
+                options.hardware_flags = true;
             }
             "--size" => {
                 let size = args.next().unwrap_or_else(|| fail("--size needs WxH"));
                 let (width, height) = size.split_once('x').unwrap_or_else(|| fail("--size needs WxH"));
-                hardware.width = parse(Some(&width.to_owned()), "--size width");
-                hardware.height = parse(Some(&height.to_owned()), "--size height");
-                hardware_flags = true;
+                options.hardware.width = parse(Some(&width.to_owned()), "--size width");
+                options.hardware.height = parse(Some(&height.to_owned()), "--size height");
+                options.hardware_flags = true;
             }
-            _ if name.is_none() && !arg.starts_with('-') => name = Some(arg.clone()),
+            "--node" => {
+                options.node = Some(args.next().unwrap_or_else(|| usage_error("run")).clone());
+            }
+            "--any" => options.any = true,
+            _ if options.name.is_none() && !arg.starts_with('-') => options.name = Some(arg.clone()),
             _ => usage_error("run"),
         }
     }
 
-    let environment = config::guest_environment(&environment).unwrap_or_else(|error| fail(error));
-    let seeds = config::seeds(&seeds).unwrap_or_else(|error| fail(error));
+    if let Some(name) = options.name.clone() {
+        if let Some((node_name, vm_name)) = name.split_once('/') {
+            if options.any {
+                fail("--any needs a bare NAME; use --node for a NODE/NAME");
+            }
+            if let Some(explicit) = &options.node {
+                if explicit != node_name {
+                    fail(format!("{name} is on node {node_name}, not {explicit}"));
+                }
+            }
+            options.node = Some(node_name.to_owned());
+            options.name = Some(vm_name.to_owned());
+        }
+    }
+    if options.any && options.node.is_some() {
+        fail("--any and --node cannot be combined");
+    }
+
+    let placement = if options.any {
+        place_any(&options)
+    } else {
+        match &options.node {
+            Some(name) if name == "local" => Placement::Local,
+            Some(name) => Placement::Remote(node::Node::find(name).unwrap_or_else(|error| fail(error))),
+            None => Placement::Local,
+        }
+    };
+
+    match placement {
+        Placement::Local => run_local(options, started),
+        Placement::Remote(node) => run_remote(node, options),
+    }
+}
+
+fn run_local(options: RunOptions, started: Instant) {
+    let mounts: Vec<Mount> = options
+        .mounts
+        .iter()
+        .map(|spec| Mount::parse(spec).unwrap_or_else(|error| fail(error)))
+        .collect();
+    if mounts.len() >= MAX_SHARES {
+        fail(format!("at most {} mounts are supported", MAX_SHARES - 1));
+    }
+    let seeds = config::seeds(&options.seeds).unwrap_or_else(|error| fail(error));
+    let environment = config::guest_environment(&options.environment).unwrap_or_else(|error| fail(error));
+    if options.image.as_ref().is_some_and(|image| image.contains('/')) {
+        fail("a local image name cannot contain a node; use --node or a bare image name");
+    }
     instance::prune();
 
-    let (vm, created) = match name {
+    let hardware = options.hardware;
+    let (vm, created) = match options.name {
         Some(name) => match Instance::open(&name) {
             Ok(instance) => {
-                if hardware_flags {
+                if options.hardware_flags {
                     fail(format!("VM {name} already exists; its hardware and base cannot be changed"));
                 }
                 match instance::start(&name).unwrap_or_else(|error| fail(error)) {
                     Some(launch) => (Vm::Booting(launch), false),
                     None => {
-                        if start_flags {
+                        if options.start_flags {
                             fail(format!(
-                                "VM {name} is already running; stop it before changing its mounts, seeds, stores, environment or window"
+                                "VM {name} is already running; stop it before changing its mounts, seeds, \
+                                 stores, environment or window"
                             ));
                         }
                         (Vm::Running(instance), false)
@@ -346,13 +433,16 @@ fn run(args: &[String]) {
                 }
             }
             Err(_) => (
-                Vm::Booting(instance::create(&name, &hardware, image.as_deref()).unwrap_or_else(|error| fail(error))),
+                Vm::Booting(
+                    instance::create(&name, &hardware, options.image.as_deref()).unwrap_or_else(|error| fail(error)),
+                ),
                 true,
             ),
         },
         None => {
             let name = random_name();
-            let launch = instance::create(&name, &hardware, image.as_deref()).unwrap_or_else(|error| fail(error));
+            let launch =
+                instance::create(&name, &hardware, options.image.as_deref()).unwrap_or_else(|error| fail(error));
             (Vm::Booting(launch), true)
         }
     };
@@ -360,6 +450,7 @@ fn run(args: &[String]) {
     let booting = matches!(&vm, Vm::Booting(_));
     let persist = vm.instance().hardware().unwrap_or_else(|error| fail(error)).persist;
     // A persistent VM keeps the buckets it was last given.
+    let mut grants = options.grants;
     if persist && booting {
         if grants.is_empty() {
             grants = vm.instance().stores().unwrap_or_else(|error| fail(error));
@@ -370,24 +461,24 @@ fn run(args: &[String]) {
 
     let name = vm.instance().name.clone();
     if let Vm::Booting(launch) = vm {
-        spawn_vmm(launch, window, &mounts, &seeds, &grants, &environment);
+        spawn_vmm(launch, options.window, &mounts, &seeds, &grants, &environment);
     }
 
-    let instance = open(&name);
+    let target = Target::Local(open(&name));
     let mut boot_ms = None;
     if booting {
-        let (_, reply) = request(&instance, &Request::Wait).unwrap_or_else(|_| {
-            let log = instance.log();
+        let control = node::request(&target, &Request::Wait).unwrap_or_else(|_| {
+            let log = open(&name).log();
             let log = fs::read_to_string(&log).unwrap_or_default();
             let tail: Vec<&str> = log.lines().rev().take(20).collect();
             let tail: Vec<&str> = tail.into_iter().rev().collect();
             fail(format!("VM {name} exited during boot:\n{}", tail.join("\n")))
         });
-        boot_ms = Some(reply.boot_ms.expect("wait reply without boot time") as f64 / 1000.0);
+        boot_ms = Some(control.reply.boot_ms.expect("wait reply without boot time") as f64 / 1000.0);
     }
 
-    if wait_network {
-        wait_for_network(&instance);
+    if options.wait_network {
+        wait_for_network(&target);
     }
 
     if let Some(boot_ms) = boot_ms {
@@ -397,7 +488,7 @@ fn run(args: &[String]) {
         );
     }
 
-    if !execute {
+    if !options.execute {
         println!("{name}");
         // stdin, not stdout: `vm=$(vm run)` in a shell pipes stdout but still copies.
         if io::stdin().is_terminal() {
@@ -407,17 +498,192 @@ fn run(args: &[String]) {
     }
 
     // Run the command; a VM this run created and that is ephemeral is gone afterwards.
-    let (session, interactive) = exec_session(command);
-    let code = run_session(&instance, session, interactive, true);
+    let (session, interactive) = exec_session(options.command);
+    let code = run_session(&target, session, interactive, true);
     if created && !persist {
-        stop(&instance);
+        stop(&target);
     }
     std::process::exit(code);
 }
 
+fn run_remote(node: node::Node, options: RunOptions) {
+    if options.window {
+        fail("--window needs the local desktop; use `vm screen` or `vm stream` for a remote VM");
+    }
+    if !options.mounts.is_empty() {
+        fail(
+            "--mount shares a local directory, which a remote node cannot see; \
+             use `vm ssh NAME -L` or copy files into the guest",
+        );
+    }
+    if !options.seeds.is_empty() {
+        fail("--seed copies local files, which a remote node cannot see; clone or copy files into the guest instead");
+    }
+    let environment = config::guest_environment(&options.environment).unwrap_or_else(|error| fail(error));
+    let image = match options.image {
+        Some(image) => match image.split_once('/') {
+            Some((image_node, image)) => {
+                if image_node != node.name {
+                    fail(format!("image {image_node}/{image} is not on node {}", node.name));
+                }
+                Some(image.to_owned())
+            }
+            None => Some(image),
+        },
+        None => None,
+    };
+    let hardware = options.hardware;
+    let request = serve::Request::Run {
+        name: options.name,
+        base: image,
+        persist: hardware.persist,
+        cpus: options.hardware_flags.then_some(hardware.cpus),
+        memory_mib: options.hardware_flags.then_some(hardware.memory_mib),
+        disk_gib: options.hardware_flags.then_some(hardware.disk_gib),
+        size: options.hardware_flags.then_some((hardware.width, hardware.height)),
+        wait_network: options.wait_network,
+        env: environment,
+        stores: options.grants.iter().map(Grant::spec).collect(),
+    };
+    let reply = node::rpc(&node, &request).unwrap_or_else(|error| fail(error));
+    let name = reply.name.unwrap_or_else(|| fail("the node did not return a VM name"));
+    let created = reply.created.unwrap_or(false);
+    let target = Target::Remote { node, name };
+    let qualified = target.qualified_name();
+
+    if !options.execute {
+        println!("{qualified}");
+        if io::stdin().is_terminal() {
+            clipboard::copy_text(qualified.as_bytes());
+        }
+        return;
+    }
+
+    let (session, interactive) = exec_session(options.command);
+    let code = run_session(&target, session, interactive, true);
+    if created && !hardware.persist {
+        stop(&target);
+    }
+    std::process::exit(code);
+}
+
+fn place_any(options: &RunOptions) -> Placement {
+    if options.window || !options.mounts.is_empty() || !options.seeds.is_empty() {
+        fail("--any cannot place local files or a window; use --node local or --node NAME");
+    }
+    if options.image.is_some() || !options.grants.is_empty() {
+        fail("--any cannot choose a node for --base or --store yet; use --node NAME");
+    }
+    let statuses = statuses();
+
+    if let Some(name) = &options.name {
+        let found: Vec<&Status> = statuses
+            .iter()
+            .filter(|status| status.vms.iter().any(|vm| &vm.name == name))
+            .collect();
+        match found.as_slice() {
+            [status] => return placement_of(status),
+            [] => {}
+            _ => fail(format!(
+                "VM {name} exists on {}; use NODE/NAME",
+                found.iter().map(|status| status.label().to_owned()).collect::<Vec<_>>().join(", ")
+            )),
+        }
+    }
+
+    let mut candidates: Vec<&Status> = statuses
+        .iter()
+        .filter(|status| fits(status, &options.hardware))
+        .collect();
+    candidates.sort_by(|a, b| {
+        let score = |status: &Status| {
+            let memory = status.host.used_bytes as f64 / status.host.memory_bytes.max(1) as f64;
+            let cpu = status.host.cpu_busy_ms as f64 / status.host.cpu_total_ms.max(1) as f64;
+            memory * 4.0 + cpu
+        };
+        score(a)
+            .total_cmp(&score(b))
+            .then_with(|| a.label().cmp(b.label()))
+    });
+    match candidates.first() {
+        Some(status) => placement_of(status),
+        None => fail(format!(
+            "no node has room for {} CPUs and {} MiB; configure nodes in {} or use --node",
+            options.hardware.cpus,
+            options.hardware.memory_mib,
+            node::Node::config_path().display()
+        )),
+    }
+}
+
+fn placement_of(status: &Status) -> Placement {
+    match &status.node {
+        Some(node) => Placement::Remote(node.clone()),
+        None => Placement::Local,
+    }
+}
+
+fn fits(status: &Status, hardware: &Hardware) -> bool {
+    let requested = hardware.memory_mib * 1024 * 1024;
+    let free = status.host.memory_bytes.saturating_sub(status.host.used_bytes);
+    let cpus = status.host.cpus == 0 || status.host.cpus >= hardware.cpus;
+    cpus && free >= requested + requested / 10
+}
+
+/// How long `ls` and placement wait for all configured nodes together.
+const NODE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Asks every node in parallel and returns the answers that arrived in time.
+fn remote_statuses(nodes: Vec<node::Node>) -> Vec<(String, Result<Status, String>)> {
+    let names: Vec<String> = nodes.iter().map(|node| node.name.clone()).collect();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    for node in nodes {
+        let sender = sender.clone();
+        thread::spawn(move || {
+            let result = Status::remote(&node);
+            let _ = sender.send((node.name.clone(), result));
+        });
+    }
+    drop(sender);
+
+    let deadline = Instant::now() + NODE_TIMEOUT;
+    let mut results = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match receiver.recv_timeout(remaining) {
+            Ok(result) => results.push(result),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    for name in names {
+        if !results.iter().any(|(answered, _)| answered == &name) {
+            results.push((name, Err("did not answer within 15s".to_owned())));
+        }
+    }
+    results.sort_by(|a, b| a.0.cmp(&b.0));
+    results
+}
+
+/// The local status plus every configured node.
+fn statuses() -> Vec<Status> {
+    let mut statuses = vec![Status::local().unwrap_or_else(|error| fail(error))];
+    let nodes = node::Node::load().unwrap_or_else(|error| fail(error));
+    for (name, result) in remote_statuses(nodes) {
+        match result {
+            Ok(status) => statuses.push(status),
+            Err(error) => eprintln!("vm: node {name}: {error}"),
+        }
+    }
+    statuses
+}
+
 /// Blocks until the guest has a configured link and a running DNS resolver.
 /// Both waits are systemd's own, so nothing here polls.
-fn wait_for_network(instance: &Instance) {
+fn wait_for_network(target: &Target) {
     let argv = [
         "sudo",
         "sh",
@@ -427,9 +693,12 @@ fn wait_for_network(instance: &Instance) {
     let session = Session::Exec {
         argv: argv.map(str::to_owned).to_vec(),
     };
-    let code = run_session(instance, session, false, false);
+    let code = run_session(target, session, false, false);
     if code != 0 {
-        fail(format!("network in VM {} did not come up (exit code {code})", instance.name));
+        fail(format!(
+            "network in VM {} did not come up (exit code {code})",
+            target.qualified_name()
+        ));
     }
 }
 
@@ -645,47 +914,97 @@ fn store_command(args: &[String]) {
     }
 }
 
-fn list() {
-    instance::prune();
-    let instances = instance::list();
+fn list(args: &[String]) {
+    let mut node_name = None;
+    let mut local_only = false;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--local" => local_only = true,
+            "--node" => node_name = Some(args.next().unwrap_or_else(|| usage_error("ls")).clone()),
+            _ => usage_error("ls"),
+        }
+    }
+    if local_only && node_name.is_some() {
+        fail("--local and --node cannot be combined");
+    }
+    let statuses = match node_name {
+        Some(name) => {
+            let node = node::Node::find(&name).unwrap_or_else(|error| fail(error));
+            let (_, result) = remote_statuses(vec![node])
+                .pop()
+                .expect("remote_statuses answers every node");
+            vec![result.unwrap_or_else(|error| fail(error))]
+        }
+        None if local_only => vec![Status::local().unwrap_or_else(|error| fail(error))],
+        None => statuses(),
+    };
+
+    let mut entries: Vec<(String, serve::Vm)> = Vec::new();
+    for status in &statuses {
+        for vm in &status.vms {
+            let name = match status.node.is_some() {
+                true => format!("{}/{}", status.label(), vm.name),
+                false => vm.name.clone(),
+            };
+            entries.push((name, vm.clone()));
+        }
+    }
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+
     // In pipes only the names, one per line, as in `vm ls | vm stop`.
     if !io::stdout().is_terminal() {
-        for instance in instances {
-            println!("{}", instance.name);
+        for (name, _) in entries {
+            println!("{name}");
         }
         return;
     }
-    if instances.is_empty() {
+    if entries.is_empty() {
         println!("No VMs. Start one with: vm run");
         return;
     }
-    println!("{:<20} {:<8} {:<8} {:>4} {:>8} {:>8}", "NAME", "STATE", "PERSIST", "CPUS", "MEMORY", "DISK");
-    for instance in instances {
-        let hardware = instance.hardware().unwrap_or_else(|error| fail(error));
+    println!("{:<30} {:<8} {:<8} {:>4} {:>8} {:>8}", "NAME", "STATE", "PERSIST", "CPUS", "MEMORY", "DISK");
+    for (name, vm) in entries {
         println!(
-            "{:<20} {:<8} {:<8} {:>4} {:>6}Mi {:>6}Gi",
-            instance.name,
-            if instance.is_running() { "running" } else { "stopped" },
-            if hardware.persist { "yes" } else { "no" },
-            hardware.cpus,
-            hardware.memory_mib,
-            hardware.disk_gib,
+            "{:<30} {:<8} {:<8} {:>4} {:>6}Mi {:>6}Gi",
+            name,
+            if vm.running { "running" } else { "stopped" },
+            if vm.hardware.persist { "yes" } else { "no" },
+            vm.hardware.cpus,
+            vm.hardware.memory_mib,
+            vm.hardware.disk_gib,
         );
     }
 }
 
-fn stop(instance: &Instance) {
-    let persist = instance.hardware().unwrap_or_else(|error| fail(error)).persist;
-    let lock = instance.lock_file();
-    if persist {
-        let code = run_session(instance, Session::Exec { argv: vec!["sync".into()] }, false, false);
-        if code != 0 {
-            fail(format!("sync in VM {} failed with exit code {code}", instance.name));
+fn stop(target: &Target) {
+    match target {
+        Target::Local(instance) => {
+            let persist = instance.hardware().unwrap_or_else(|error| fail(error)).persist;
+            let lock = instance.lock_file();
+            if persist {
+                let code = run_session(target, Session::Exec { argv: vec!["sync".into()] }, false, false);
+                if code != 0 {
+                    fail(format!(
+                        "sync in VM {} failed with exit code {code}",
+                        target.qualified_name()
+                    ));
+                }
+            }
+            node::request(target, &Request::Stop).unwrap_or_else(|error| fail(error));
+            // Blocks until the VM process has exited and released its lock.
+            lock.lock().unwrap_or_else(|error| fail(error));
+        }
+        Target::Remote { node, name } => {
+            node::rpc(
+                node,
+                &serve::Request::Stop {
+                    name: name.clone(),
+                },
+            )
+            .unwrap_or_else(|error| fail(error));
         }
     }
-    request(instance, &Request::Stop).unwrap_or_else(|error| fail(error));
-    // Blocks until the VM process has exited and released its lock.
-    lock.lock().unwrap_or_else(|error| fail(error));
 }
 
 /// Stops a persistent VM and saves its disk as an image for `run --base`.
@@ -693,33 +1012,60 @@ fn save(args: &[String]) {
     let [name, image] = args else {
         usage_error("save");
     };
-    let instance = open(name);
-    if !instance.hardware().unwrap_or_else(|error| fail(error)).persist {
-        fail(format!("VM {name} is ephemeral and would be deleted when it stops; only persistent VMs can be saved"));
-    }
-    if !instance.is_running() {
-        fail(format!("VM {name} is stopped; start it with `vm run {name}` so its identity can be cleared"));
-    }
-    instance::new_image(image).unwrap_or_else(|error| fail(error));
+    let target = resolve(name);
+    match &target {
+        Target::Local(instance) => {
+            if !instance.hardware().unwrap_or_else(|error| fail(error)).persist {
+                fail(format!(
+                    "VM {name} is ephemeral and would be deleted when it stops; only persistent VMs can be saved"
+                ));
+            }
+            if !instance.is_running() {
+                fail(format!(
+                    "VM {name} is stopped; start it with `vm run {name}` so its identity can be cleared"
+                ));
+            }
+            instance::new_image(image).unwrap_or_else(|error| fail(error));
 
-    // Like the published base image: VMs cloned from the image must not share
-    // a machine id or SSH host keys. The guest generates new ones at boot.
-    let argv = [
-        "sudo",
-        "sh",
-        "-c",
-        "truncate -s 0 /etc/machine-id && rm -f /var/lib/dbus/machine-id /etc/ssh/ssh_host_*",
-    ];
-    let session = Session::Exec {
-        argv: argv.map(str::to_owned).to_vec(),
-    };
-    let code = run_session(&instance, session, false, false);
-    if code != 0 {
-        fail(format!("clearing the identity of VM {name} failed with exit code {code}"));
+            // Like the published base image: VMs cloned from the image must not share
+            // a machine id or SSH host keys. The guest generates new ones at boot.
+            let argv = [
+                "sudo",
+                "sh",
+                "-c",
+                "truncate -s 0 /etc/machine-id && rm -f /var/lib/dbus/machine-id /etc/ssh/ssh_host_*",
+            ];
+            let session = Session::Exec {
+                argv: argv.map(str::to_owned).to_vec(),
+            };
+            let code = run_session(&target, session, false, false);
+            if code != 0 {
+                fail(format!(
+                    "clearing the identity of VM {name} failed with exit code {code}"
+                ));
+            }
+            stop(&target);
+            instance::save(instance, image).unwrap_or_else(|error| fail(error));
+            eprintln!("saved {name} as image {image}; start VMs from it with `vm run --base {image}`");
+        }
+        Target::Remote { node, name } => {
+            instance::validate_name(image, "image").unwrap_or_else(|error| fail(error));
+            node::rpc(
+                node,
+                &serve::Request::Save {
+                    name: name.clone(),
+                    image: image.clone(),
+                },
+            )
+            .unwrap_or_else(|error| fail(error));
+            eprintln!(
+                "saved {} as image {image} on node {}; start VMs from it with `vm run --node {} --base {image}`",
+                target.qualified_name(),
+                node.name,
+                node.name
+            );
+        }
     }
-    stop(&instance);
-    instance::save(&instance, image).unwrap_or_else(|error| fail(error));
-    eprintln!("saved {name} as image {image}; start VMs from it with `vm run --base {image}`");
 }
 
 /// The NAMEs, or without them the names on stdin, one per line, as in `vm ls | vm stop`.
@@ -743,12 +1089,23 @@ fn stop_all(args: &[String]) {
         }
     }
     for name in names_or_stdin("stop", &names) {
-        let instance = open(&name);
-        if instance.is_running() {
-            stop(&instance);
-        }
-        if delete && instance.dir.exists() {
-            instance::remove(&instance);
+        let target = resolve(&name);
+        match &target {
+            Target::Local(instance) => {
+                if instance.is_running() {
+                    stop(&target);
+                }
+                if delete && instance.dir.exists() {
+                    instance::remove(instance);
+                }
+            }
+            Target::Remote { node, name } => {
+                let request = match delete {
+                    true => serve::Request::Rm { name: name.clone() },
+                    false => serve::Request::Stop { name: name.clone() },
+                };
+                node::rpc(node, &request).unwrap_or_else(|error| fail(error));
+            }
         }
     }
 }
@@ -784,6 +1141,49 @@ fn serve_command(args: &[String]) {
         println!("web UI: {scheme}://{address}/#token={token}");
     }
     serve::serve(listener, &token, ui, tls)
+}
+
+fn nodes_command(args: &[String]) {
+    let mut check = false;
+    for arg in args {
+        match arg.as_str() {
+            "--check" => check = true,
+            _ => usage_error("nodes"),
+        }
+    }
+    let nodes = node::Node::load().unwrap_or_else(|error| fail(error));
+    if nodes.is_empty() {
+        println!(
+            "No remote nodes. Add lines to {}: NAME ADDRESS TOKEN [CA]",
+            node::Node::config_path().display()
+        );
+        return;
+    }
+    if !check {
+        println!("{:<20} {:<28} TLS", "NAME", "ADDRESS");
+        for node in nodes {
+            println!(
+                "{:<20} {:<28} {}",
+                node.name,
+                node.address,
+                if node.uses_tls() { "yes" } else { "no" }
+            );
+        }
+        return;
+    }
+    let mut failed = false;
+    for (name, result) in remote_statuses(nodes) {
+        match result {
+            Ok(status) => println!("{:<20} ok ({} VMs)", name, status.vms.len()),
+            Err(error) => {
+                println!("{:<20} {error}", name);
+                failed = true;
+            }
+        }
+    }
+    if failed {
+        std::process::exit(1);
+    }
 }
 
 fn pty_session(argv: Vec<String>, interactive: bool) -> Session {
@@ -823,14 +1223,15 @@ fn exec_session(argv: Vec<String>) -> (Session, bool) {
 
 fn proxy(args: &[String]) {
     let [name, port] = args else { usage_error("proxy") };
-    let instance = open(name);
+    let target = resolve(name);
     let port = parse(Some(port), "port");
-    std::process::exit(run_session(&instance, Session::Tcp { port }, false, true));
+    std::process::exit(run_session(&target, Session::Tcp { port }, false, true));
 }
 
 fn ssh(args: &[String]) {
     let name = name_arg("ssh", args);
-    open(name);
+    let target = resolve(name);
+    install_ssh_keys(&target);
     let key = instance::ssh_key();
     let executable = env::current_exe()
         .and_then(|path| path.canonicalize())
@@ -841,18 +1242,59 @@ fn ssh(args: &[String]) {
         .args(["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR"])
         .arg("-i")
         .arg(key)
-        .arg(format!("varmint@{name}"))
+        .arg(format!("varmint@{}", target.name()))
         .args(&args[1..])
         .exec();
     fail(format!("failed to run ssh: {error}"))
 }
 
+/// Puts the client's public keys into a remote guest, so `vm ssh` and scp can
+/// authenticate with the key they use locally.
+fn install_ssh_keys(target: &Target) {
+    if target.node().is_none() {
+        return;
+    }
+    let keys = instance::authorized_keys();
+    let session = Session::Exec {
+        argv: vec![
+            "sh".into(),
+            "-c".into(),
+            "umask 077; mkdir -p ~/.ssh; cat >> ~/.ssh/authorized_keys; \
+             chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys"
+                .into(),
+        ],
+    };
+    let mut control = node::request(target, &Request::Open { session }).unwrap_or_else(|error| fail(error));
+    protocol::write_frame(&mut control.writer, &Frame::new(0, kind::DATA, keys.into_bytes()))
+        .unwrap_or_else(|error| fail(error));
+    protocol::write_frame(&mut control.writer, &Frame::new(0, kind::EOF, Vec::new()))
+        .unwrap_or_else(|error| fail(error));
+    loop {
+        let frame = protocol::read_frame(&mut control.reader)
+            .unwrap_or_else(|error| fail(format!("VM {}: {error}", target.qualified_name())))
+            .unwrap_or_else(|| fail(format!("VM {} closed the connection", target.qualified_name())));
+        match frame.kind {
+            kind::EXIT => {
+                let code = i32::from_le_bytes(frame.payload.try_into().expect("malformed exit frame"));
+                if code != 0 {
+                    fail(format!(
+                        "installing ssh keys in VM {} failed with exit code {code}",
+                        target.qualified_name()
+                    ));
+                }
+                return;
+            }
+            kind::DATA | kind::STDERR => {}
+            other => fail(format!("unexpected frame kind {other} from the VM")),
+        }
+    }
+}
+
 /// Streams stdin/stdout through a guest session and returns its exit code.
-fn run_session(instance: &Instance, session: Session, raw: bool, forward_stdin: bool) -> i32 {
-    let stream = instance.connect().unwrap_or_else(|error| fail(error));
-    let mut writer = stream.try_clone().unwrap_or_else(|error| fail(error));
-    protocol::write_json(&mut writer, &Request::Open { session }).unwrap_or_else(|error| fail(error));
-    let mut reader = BufReader::new(stream);
+fn run_session(target: &Target, session: Session, raw: bool, forward_stdin: bool) -> i32 {
+    let control = node::request(target, &Request::Open { session }).unwrap_or_else(|error| fail(error));
+    let mut writer = control.writer;
+    let mut reader = control.reader;
 
     if raw {
         terminal::enable_raw_mode().unwrap_or_else(|error| fail(error));
@@ -915,7 +1357,7 @@ const PASTE_KEYS: [&[u8]; 3] = [b"\x16", b"\x1b[118;5u", b"\x1b[27;5;118~"];
 
 /// With `paste_images`, Ctrl+V first puts the host clipboard image into the guest
 /// clipboard, so programs like Claude Code can paste it. Text is pasted by the terminal.
-fn pump_stdin(writer: &Mutex<UnixStream>, paste_images: bool) {
+fn pump_stdin(writer: &Mutex<Wire>, paste_images: bool) {
     let mut stdin = io::stdin();
     let mut buffer = vec![0; 64 * 1024];
     loop {
@@ -948,7 +1390,7 @@ fn clipboard_image_frame() -> Frame {
 }
 
 /// Sends the terminal size to the guest pty whenever the window changes.
-fn forward_resizes(writer: Arc<Mutex<UnixStream>>) {
+fn forward_resizes(writer: Arc<Mutex<Wire>>) {
     screen::on_window_change(move || {
         let Ok((cols, rows)) = terminal::size() else {
             return;
@@ -959,27 +1401,20 @@ fn forward_resizes(writer: Arc<Mutex<UnixStream>>) {
     });
 }
 
-fn request(instance: &Instance, request: &Request) -> Result<(BufReader<UnixStream>, Reply), String> {
-    let mut stream = instance.connect()?;
-    protocol::write_json(&mut stream, request).map_err(|error| error.to_string())?;
-    let mut reader = BufReader::new(stream);
-    let reply: Reply = protocol::read_json(&mut reader).map_err(|error| error.to_string())?;
-    match reply.error {
-        Some(error) => Err(error),
-        None => Ok((reader, reply)),
-    }
-}
-
-fn send_input(name: &str, events: Vec<InputEvent>) {
-    request(&open(name), &Request::Input { events }).unwrap_or_else(|error| fail(error));
+fn send_input(target: &Target, events: Vec<InputEvent>) {
+    node::request(target, &Request::Input { events }).unwrap_or_else(|error| fail(error));
 }
 
 fn screenshot(args: &[String]) {
     let name = name_arg("screenshot", args);
-    let path = args.get(1).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(format!("{name}.png")));
-    let (mut reader, reply) = request(&open(name), &Request::Screenshot).unwrap_or_else(|error| fail(error));
-    let mut png = vec![0; reply.png_len.expect("screenshot reply without length")];
-    reader.read_exact(&mut png).unwrap_or_else(|error| fail(error));
+    let target = resolve(name);
+    let path = args
+        .get(1)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(format!("{}.png", target.qualified_name().replace('/', "-"))));
+    let mut control = node::request(&target, &Request::Screenshot).unwrap_or_else(|error| fail(error));
+    let mut png = vec![0; control.reply.png_len.expect("screenshot reply without length")];
+    control.reader.read_exact(&mut png).unwrap_or_else(|error| fail(error));
 
     if path.as_os_str() == "-" {
         io::stdout().write_all(&png).unwrap_or_else(|error| fail(error));
@@ -1005,20 +1440,24 @@ fn screen_command(args: &[String]) {
         _ => usage_error("screen"),
     };
 
-    let instance = open(&name);
-    let (frames, _) = request(&instance, &Request::Stream {
+    let target = resolve(&name);
+    let frames = node::request(
+        &target,
+        &Request::Stream {
             fps,
             codec: Codec::Rgb,
             audio: false,
-        }).unwrap_or_else(|error| fail(error));
-    let (input, _) = request(&instance, &Request::InputStream).unwrap_or_else(|error| fail(error));
+        },
+    )
+    .unwrap_or_else(|error| fail(error));
+    let input = node::request(&target, &Request::InputStream).unwrap_or_else(|error| fail(error));
     let resize = |width, height| {
-        request(&instance, &Request::Resize { width, height })
+        node::request(&target, &Request::Resize { width, height })
             .map(drop)
             .map_err(io::Error::other)
     };
-    let error = screen::run(frames, input.into_inner(), resize).unwrap_err();
-    fail(format!("VM {name}: {error}"))
+    let error = screen::run(frames.reader, input.writer, resize).unwrap_err();
+    fail(format!("VM {}: {error}", target.qualified_name()))
 }
 
 fn stream(args: &[String]) {
@@ -1034,11 +1473,17 @@ fn stream(args: &[String]) {
         }
     }
 
-    let (mut media, _) = request(&open(name), &Request::Stream {
+    let target = resolve(name);
+    let control = node::request(
+        &target,
+        &Request::Stream {
             fps,
             codec: Codec::H264,
             audio,
-        }).unwrap_or_else(|error| fail(error));
+        },
+    )
+    .unwrap_or_else(|error| fail(error));
+    let mut media = control.reader;
     // Unbuffered, since a frame held back until the next one is a frame late.
     let mut stdout = unsafe { File::from_raw_fd(io::stdout().as_raw_fd()) };
     let mut buffer = vec![0; 64 * 1024];
@@ -1046,7 +1491,7 @@ fn stream(args: &[String]) {
         let read = match media.read(&mut buffer) {
             Ok(0) => std::process::exit(0),
             Ok(read) => read,
-            Err(error) => fail(format!("VM {name}: {error}")),
+            Err(error) => fail(format!("VM {}: {error}", target.qualified_name())),
         };
         match stdout.write_all(&buffer[..read]) {
             Ok(()) => {}
@@ -1059,8 +1504,8 @@ fn stream(args: &[String]) {
 
 fn input(args: &[String]) {
     let [name] = args else { usage_error("input") };
-    let (events, _) = request(&open(name), &Request::InputStream).unwrap_or_else(|error| fail(error));
-    let mut events = events.into_inner();
+    let target = resolve(name);
+    let mut control = node::request(&target, &Request::InputStream).unwrap_or_else(|error| fail(error));
     for line in io::stdin().lock().lines() {
         let line = line.unwrap_or_else(|error| fail(error));
         if line.trim().is_empty() {
@@ -1068,7 +1513,8 @@ fn input(args: &[String]) {
         }
         let event: InputEvent =
             serde_json::from_str(&line).unwrap_or_else(|error| fail(format!("not an input event: {line}: {error}")));
-        protocol::write_json(&mut events, &event).unwrap_or_else(|error| fail(format!("VM {name}: {error}")));
+        protocol::write_json(&mut control.writer, &event)
+            .unwrap_or_else(|error| fail(format!("VM {}: {error}", target.qualified_name())));
     }
 }
 
@@ -1086,7 +1532,7 @@ fn name_from_stdin() -> String {
 fn move_pointer(args: &[String]) {
     let [name, x, y] = args else { usage_error("move") };
     send_input(
-        name,
+        &resolve(name),
         vec![InputEvent::Move {
             x: parse(Some(x), "x"),
             y: parse(Some(y), "y"),
@@ -1117,7 +1563,7 @@ fn click(args: &[String]) {
         events.push(InputEvent::Button { button, down: true });
         events.push(InputEvent::Button { button, down: false });
     }
-    send_input(name, events);
+    send_input(&resolve(name), events);
 }
 
 fn type_text(args: &[String]) {
@@ -1140,7 +1586,7 @@ fn type_text(args: &[String]) {
             });
         }
     }
-    send_input(name, events);
+    send_input(&resolve(name), events);
 }
 
 fn key(args: &[String]) {
@@ -1158,12 +1604,12 @@ fn key(args: &[String]) {
         events.extend(codes.iter().map(|&code| InputEvent::Key { code, down: true }));
         events.extend(codes.iter().rev().map(|&code| InputEvent::Key { code, down: false }));
     }
-    send_input(name, events);
+    send_input(&resolve(name), events);
 }
 
 fn scroll(args: &[String]) {
     let name = name_arg("scroll", args);
     let value = parse(args.get(1), "scroll amount");
     let horizontal = args[2..].iter().any(|arg| arg == "--horizontal");
-    send_input(name, vec![InputEvent::Scroll { value, horizontal }]);
+    send_input(&resolve(name), vec![InputEvent::Scroll { value, horizontal }]);
 }

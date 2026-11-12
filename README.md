@@ -199,6 +199,27 @@ guest OpenGL => Mesa VirGL => virglrenderer => host OpenGL driver over EGL (Linu
 
 In a window, F12 captures and releases the mouse. On macOS the View menu shows statistics and enters full screen; on Linux F10 and F11 do.
 
+## Nodes
+`vm` uses this machine by default. Add remote `vm serve` instances to `~/.vm/nodes` and their VMs join one pool:
+
+```text
+# name address token [ca]
+mini 192.168.1.20:7420 3f2a... ~/.vm/tls/mini-ca.pem
+```
+
+The token is the node's `~/.vm/serve-token`. The file holds tokens and must be readable only by you (`chmod 600`). With a CA, `vm` uses TLS and verifies the node's certificate; without one the token crosses the network in clear, so keep the node on a private network or tunnel it.
+
+```sh
+vm nodes --check                     # configured nodes and whether they answer
+vm ls                                # all VMs; remote names look like mini/swift-otter
+vm=$(vm run --any)                   # least loaded node with room
+vm=$(vm run --node mini)             # a specific node
+vm screenshot mini/swift-otter shot.png
+vm stop mini/swift-otter
+```
+
+Every command accepts `NODE/NAME`, so `vm ls | vm stop` and `vm run | vm screen` work across the pool. `run --any` picks by free memory and CPU. `--base` and `--store` are node-local, so use `--node` with them; a `vm save` of `mini/NAME` keeps the image on mini. Mounts, seeds and `--window` are local-only because they name this machine's files or desktop. Use `vm ssh NODE/NAME -L 3000:localhost:3000` for a guest port, or copy files into the guest.
+
 ## Remote provisioning
 `vm serve` takes provisioning requests over TCP, for a relay or an app to create and stop VMs on this host. Each connection sends one JSON line with the token from `~/.vm/serve-token` and gets one JSON line back:
 
@@ -207,9 +228,10 @@ vm serve                      # 127.0.0.1:7420, or pass ADDRESS
 vm serve --ui                 # also a web UI there; open the link it prints
 vm serve --ui 0.0.0.0:7420 --cert mac.pem --key mac-key.pem   # TLS, for browsers on other machines
 token=$(cat ~/.vm/serve-token)
-echo '{"token":"'$token'","op":"run","wait_network":true}' | nc 127.0.0.1 7420   # {"name":"swift-otter"}
+echo '{"token":"'$token'","op":"run","wait_network":true}' | nc 127.0.0.1 7420   # {"name":"swift-otter","created":true}
 echo '{"token":"'$token'","op":"ls"}' | nc 127.0.0.1 7420
 echo '{"token":"'$token'","op":"stop","name":"swift-otter"}' | nc 127.0.0.1 7420
+echo '{"token":"'$token'","op":"save","name":"swift-otter","image":"tools"}' | nc 127.0.0.1 7420
 ```
 
 `run` takes `name`, `base`, `persist`, `cpus`, `memory_mib`, `disk_gib`, `size` (`[width, height]`), `wait_network`, `stores`, the buckets as in `--store` (`["shared", "specs:ro"]`), and `env`, the guest variables. `CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_API_KEY` come from the server's environment when set, so its VMs share the host's credentials; a client's `env` replaces them, as in `"env": {"CLAUDE_CODE_OAUTH_TOKEN": "..."}`. Mounts and seeds are not available remotely, since they name host files. Without `--cert` and `--key` the connection is not encrypted, so keep it on the loopback or a private network. With them every connection is TLS, which browsers on other machines need for the web UI's video; [mkcert](https://github.com/FiloSottile/mkcert) makes a certificate they trust (`mkcert -cert-file mac.pem -key-file mac-key.pem your-mac.local 192.168.1.20`, then install its root CA on the other machine).

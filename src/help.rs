@@ -50,6 +50,13 @@ starts with the buckets it was last given with --store unless new ones are
 named. Mounts, seeds, stores, environment and --window apply when a VM
 starts, so they cannot be changed on one that is already running.
 
+NAME may be NODE/NAME to use a node from ~/.vm/nodes. --node NAME picks a
+node explicitly and --any picks the least loaded node with room. A remote
+VM keeps its name qualified, such as mini/swift-otter, which every command
+accepts. Mounts, seeds and --window name files or a desktop on this
+machine and are not available remotely; use --node with --base or --store,
+which are node-local.
+
 CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY, and variables named with
 --env, are copied from your environment into the VM's shells, commands and
 ssh sessions. Values are never passed as arguments, so `ps` and shell history
@@ -67,6 +74,8 @@ into the guest clipboard, so programs like Claude Code can paste it."
             options: vec![
                 ("--persist", "Keep the VM and its disk after it stops".into()),
                 ("--window", "Show the screen in a window and share the clipboard".into()),
+                ("--node NAME", "Run on a node from ~/.vm/nodes".into()),
+                ("--any", "Pick the least loaded node with room".into()),
                 (
                     "--wait-network",
                     "Return only once the guest has network and DNS (about a second more)".into(),
@@ -123,19 +132,30 @@ into the guest clipboard, so programs like Claude Code can paste it."
                     "stdin is forwarded",
                 ),
                 ("vm run --seed ~/.gitconfig:.gitconfig", "copy a config file into the VM"),
+                ("vm run --node mini --wait-network", "start a VM on the node mini"),
+                ("vm=$(vm run --any)", "start it on the least loaded node"),
             ],
         },
         Command {
             name: "ls",
             group: "VMs",
-            usage: "vm ls",
+            usage: "vm ls [--node NAME | --local]",
             summary: "List VMs",
             description: "\
 Lists all VMs with their state, whether they persist, and their hardware.
-In a pipe it prints only the names, one per line."
+VMs on configured nodes are included and named NODE/NAME. In a pipe it
+prints only the names, one per line, so `vm ls | vm stop` works across the
+pool. --node lists one node and --local skips the configured nodes."
                 .into(),
-            options: vec![],
-            examples: &[("vm ls", ""), ("vm ls | vm stop --delete", "delete all VMs")],
+            options: vec![
+                ("--node NAME", "List only this node".into()),
+                ("--local", "List only this machine".into()),
+            ],
+            examples: &[
+                ("vm ls", ""),
+                ("vm ls --node mini", "VMs on one node"),
+                ("vm ls | vm stop --delete", "delete all VMs in the pool"),
+            ],
         },
         Command {
             name: "stop",
@@ -147,8 +167,9 @@ Stops running VMs; stopped ones are left alone. With --delete, deletes the
 VMs and their disks, stopping them first if they run. Persistent VMs flush
 their disk before stopping and can be started again with `vm run NAME`;
 ephemeral VMs are deleted when they stop either way. The host log of a
-deleted VM is kept in ~/.vm/logs (the newest 20). Without NAME the names
-are read from stdin, one per line."
+deleted VM is kept in ~/.vm/logs (the newest 20). NAME may be NODE/NAME
+for a VM on a configured node. Without NAME the names are read from stdin,
+one per line."
                 .into(),
             options: vec![("--delete", "Delete the VMs and their disks after stopping them".into())],
             examples: &[
@@ -170,7 +191,9 @@ creates VMs from it like from the stock image.
 
 The VM's machine id and SSH host keys are cleared first, so VMs from the
 image do not share them; NAME gets new ones too when it starts again.
-Delete an image by removing its directory."
+For NODE/NAME the image stays on that node; start VMs from it there with
+`vm run --node NODE --base IMAGE`. Delete an image by removing its
+directory."
                 .into(),
             options: vec![],
             examples: &[
@@ -188,7 +211,8 @@ Delete an image by removing its directory."
             description: "\
 Runs your ssh client as varmint@NAME through `vm proxy`, so it needs no
 network setup. Your ~/.ssh/*.pub keys and a key in ~/.vm/ssh are
-authorized in every VM. Remaining arguments are passed to ssh."
+authorized in every VM; for a remote VM they are installed through the
+guest agent first. Remaining arguments are passed to ssh."
                 .into(),
             options: vec![],
             examples: &[
@@ -419,6 +443,30 @@ scrolls down."
             ],
         },
         Command {
+            name: "nodes",
+            group: "Remote",
+            usage: "vm nodes [--check]",
+            summary: "List configured remote nodes",
+            description: "\
+Reads ~/.vm/nodes, one node per line:
+
+  # name address token [ca]
+  mini 192.168.1.20:7420 3f2a... ~/.vm/tls/mini-ca.pem
+
+The token is the file ~/.vm/serve-token of that node. With a CA, the
+connection uses TLS and verifies the node's certificate against it.
+The file must be readable only by you (chmod 600). VMs on a node are named
+NODE/NAME; `vm ls` includes them and every command accepts that name.
+--check asks each node for its VMs."
+                .into(),
+            options: vec![("--check", "Connect to each node and report its VMs".into())],
+            examples: &[
+                ("vm nodes", "list configured nodes"),
+                ("vm nodes --check", "check that every node answers"),
+                ("vm run --node mini", "start a VM on mini"),
+            ],
+        },
+        Command {
             name: "serve",
             group: "Remote",
             usage: "vm serve [ADDRESS] [--ui] [--cert FILE --key FILE]",
@@ -431,11 +479,12 @@ created on first use:
 
   {\"token\": \"...\", \"op\": \"run\", \"persist\": false, \"cpus\": 4, \"memory_mib\": 6144,
    \"disk_gib\": 64, \"size\": [1920, 1080], \"wait_network\": true}
-                                               -> {\"name\": \"swift-otter\"}
+                                               -> {\"name\": \"swift-otter\", \"created\": true}
   {\"token\": \"...\", \"op\": \"ls\"}           -> {\"vms\": [{\"name\", \"running\", \"hardware\", \"memory_bytes\", \"cpu_ms\"}],
-                                                   \"host\": {\"memory_bytes\", \"used_bytes\", \"cpu_busy_ms\", \"cpu_total_ms\"}}
+                                                   \"host\": {\"memory_bytes\", \"used_bytes\", \"cpu_busy_ms\", \"cpu_total_ms\", \"cpus\"}}
   {\"token\": \"...\", \"op\": \"stop\", \"name\": \"swift-otter\"} -> {}
   {\"token\": \"...\", \"op\": \"rm\", \"name\": \"swift-otter\"}   -> {}
+  {\"token\": \"...\", \"op\": \"save\", \"name\": \"swift-otter\", \"image\": \"tools\"} -> {}
   {\"token\": \"...\", \"op\": \"network\", \"name\": \"swift-otter\"}
                                                -> {\"network\": {\"addresses\": [\"192.168.64.5\"],
                                                    \"ports\": [{\"port\": 22, \"loopback\": false, \"forwarded\": null}]}}
