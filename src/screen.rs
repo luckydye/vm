@@ -1,4 +1,4 @@
-//! `varmint screen`: an interactive view of a VM's screen in the terminal.
+//! `vm screen`: an interactive view of a VM's screen in the terminal.
 //!
 //! Frames are drawn with the Kitty graphics protocol. Input uses SGR mouse
 //! reporting in pixel mode and the Kitty keyboard protocol, which reports
@@ -212,7 +212,7 @@ fn draw(frame: &Frame, index: usize) -> io::Result<Geometry> {
     let previous_id = IMAGE_IDS[1 - index % 2];
 
     // Terminals only read and delete temporary files with this in their name.
-    let path = env::temp_dir().join(format!("tty-graphics-protocol-varmint-{}-{index}", process::id()));
+    let path = env::temp_dir().join(format!("tty-graphics-protocol-vm-{}-{index}", process::id()));
     fs::write(&path, &frame.rgb)?;
 
     let mut out = Vec::new();

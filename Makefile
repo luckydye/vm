@@ -1,4 +1,4 @@
-DIST := $(CURDIR)/dist/varmint
+DIST := $(CURDIR)/dist/vm
 GUEST_DIR := $(CURDIR)/build/guest
 PREFIX := $(CURDIR)/build/prefix
 
@@ -15,7 +15,7 @@ ifeq ($(shell uname -s),Linux)
 build bundle: guest-image
 	./scripts/build-linux.sh --kernel "$(KERNEL)" --initrd "$(INITRD)" --base-image "$(BASE_IMAGE)"
 
-# dist/varmint-linux-ARCH.tar.gz, which bundle also writes.
+# dist/vm-linux-ARCH.tar.gz, which bundle also writes.
 tarball: bundle
 
 test:
@@ -30,10 +30,10 @@ bundle: guest-image
 dependencies:
 	./scripts/build.sh --dependencies-only
 
-# Installer for /usr/local/bin/varmint and its runtime in /usr/local/share/varmint.
+# Installer for /usr/local/bin/vm and its runtime in /usr/local/share/vm.
 pkg: bundle
-	pkgbuild --root "$(DIST)" --install-location /usr/local --identifier dev.varmint.cli \
-		--version "$$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml)" "$(CURDIR)/dist/varmint.pkg"
+	pkgbuild --root "$(DIST)" --install-location /usr/local --identifier dev.vm.cli \
+		--version "$$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml)" "$(CURDIR)/dist/vm.pkg"
 
 test:
 	@test -f "$(PREFIX)/lib/libvirglrenderer.1.dylib" || \
@@ -51,7 +51,7 @@ install: bundle
 	./scripts/install.sh "$(INSTALL_PREFIX)"
 
 run: bundle
-	"$(DIST)/bin/varmint" run --window
+	"$(DIST)/bin/vm" run --window
 
 clean:
 	rm -rf "$(CURDIR)/build" "$(CURDIR)/dist"

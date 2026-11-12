@@ -1,5 +1,5 @@
-//! `varmint serve`: VM provisioning over TCP, one JSON request and one JSON
-//! reply per connection. Requests run the varmint CLI, so a failing request
+//! `vm serve`: VM provisioning over TCP, one JSON request and one JSON
+//! reply per connection. Requests run the vm CLI, so a failing request
 //! cannot take the server down and behaves exactly like the command.
 //!
 //! The log on stderr is JSON Lines of CloudEvents 1.0, for programs to act
@@ -7,12 +7,12 @@
 //! address) and `requestid`, shared by all events of one connection. Types, with
 //! their `data`:
 //!
-//! - `dev.varmint.serve.request`: the request as received, without its token
+//! - `dev.vm.serve.request`: the request as received, without its token
 //!   and with only the names of `env`
-//! - `dev.varmint.serve.exec`: `args`, `exit_code` (null if killed by a
-//!   signal) and `duration_ms` of a finished varmint command
-//! - `dev.varmint.serve.reply`: the reply as sent
-//! - `dev.varmint.serve.error`: `message` of a connection that failed, such
+//! - `dev.vm.serve.exec`: `args`, `exit_code` (null if killed by a
+//!   signal) and `duration_ms` of a finished vm command
+//! - `dev.vm.serve.reply`: the reply as sent
+//! - `dev.vm.serve.error`: `message` of a connection that failed, such
 //!   as a client that left before the reply, or of a failed accept, which has
 //!   no `peer` or `requestid`
 
@@ -55,7 +55,7 @@ const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 /// Hardware fields only apply when a VM is created, like the `run` flags.
 /// `env` holds the guest variables, which replace the server's own
-/// config::PASSED_VARIABLES; they reach `varmint run` in
+/// config::PASSED_VARIABLES; they reach `vm run` in
 /// GUEST_ENVIRONMENT_VARIABLE, never its arguments or its own variables.
 /// Mounts and seeds are left out on purpose: they name host files, which a
 /// remote client must not reach. `stores` grants buckets of the shared store,
@@ -134,7 +134,7 @@ struct Network {
 #[derive(Serialize, PartialEq, Eq, PartialOrd, Ord)]
 struct Port {
     port: u16,
-    /// Only reachable from inside the guest, such as through `varmint ssh -L`.
+    /// Only reachable from inside the guest, such as through `vm ssh -L`.
     loopback: bool,
     /// The host port it is forwarded to.
     forwarded: Option<u16>,
@@ -202,7 +202,7 @@ pub fn serve(listener: TcpListener, token: &str, ui: bool, tls: Option<Arc<rustl
     #[cfg(target_os = "macos")]
     let _awake = objc2_foundation::NSProcessInfo::processInfo().beginActivityWithOptions_reason(
         objc2_foundation::NSActivityOptions::IdleSystemSleepDisabled,
-        &objc2_foundation::NSString::from_str("varmint serve"),
+        &objc2_foundation::NSString::from_str("vm serve"),
     );
     thread::scope(|scope| {
         loop {
@@ -256,8 +256,8 @@ fn emit(kind: &str, client: Option<&Client>, data: Value) {
     let mut event = json!({
         "specversion": "1.0",
         "id": uuid::Uuid::new_v4().to_string(),
-        "source": "varmint/serve",
-        "type": format!("dev.varmint.serve.{kind}"),
+        "source": "vm/serve",
+        "type": format!("dev.vm.serve.{kind}"),
         "time": rfc3339(SystemTime::now()),
         "data": data,
     });
@@ -461,7 +461,7 @@ fn execute(client: &Client, request: Request) -> Result<Reply, String> {
                 store::Grant::parse(&spec)?;
                 args.extend(["--store".to_owned(), spec]);
             }
-            let name = varmint(client, &args, &env)?;
+            let name = vm(client, &args, &env)?;
             Ok(Reply {
                 name: Some(name),
                 ..Reply::default()
@@ -491,11 +491,11 @@ fn execute(client: &Client, request: Request) -> Result<Reply, String> {
         }
         Request::Stop { name } => {
             instance::validate_name(&name, "VM")?;
-            varmint(client, &["stop".to_owned(), name], &BTreeMap::new()).map(|_| Reply::default())
+            vm(client, &["stop".to_owned(), name], &BTreeMap::new()).map(|_| Reply::default())
         }
         Request::Rm { name } => {
             instance::validate_name(&name, "VM")?;
-            varmint(client, &["rm".to_owned(), name], &BTreeMap::new()).map(|_| Reply::default())
+            vm(client, &["rm".to_owned(), name], &BTreeMap::new()).map(|_| Reply::default())
         }
         Request::Network { name } => Ok(Reply {
             network: Some(network(&name)?),
@@ -739,10 +739,10 @@ fn relay<C: Connection>(mut reader: BufReader<io::Take<Deadline<C>>>, mut writer
     })
 }
 
-/// Runs a varmint command with `environment` as its guest variables and
-/// returns its stdout, or its error message without the `varmint: ` prefix,
+/// Runs a vm command with `environment` as its guest variables and
+/// returns its stdout, or its error message without the `vm: ` prefix,
 /// like the other errors of a reply.
-fn varmint(client: &Client, args: &[String], environment: &BTreeMap<String, String>) -> Result<String, String> {
+fn vm(client: &Client, args: &[String], environment: &BTreeMap<String, String>) -> Result<String, String> {
     let executable = env::current_exe()
         .and_then(|path| path.canonicalize())
         .map_err(|error| error.to_string())?;
@@ -755,7 +755,7 @@ fn varmint(client: &Client, args: &[String], environment: &BTreeMap<String, Stri
         )
         .stdin(Stdio::null())
         .output()
-        .map_err(|error| format!("failed to run varmint: {error}"))?;
+        .map_err(|error| format!("failed to run vm: {error}"))?;
     client.emit(
         "exec",
         json!({
@@ -767,7 +767,7 @@ fn varmint(client: &Client, args: &[String], environment: &BTreeMap<String, Stri
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let message = stderr.trim();
-        return Err(message.strip_prefix("varmint: ").unwrap_or(message).to_owned());
+        return Err(message.strip_prefix("vm: ").unwrap_or(message).to_owned());
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }

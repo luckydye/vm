@@ -11,7 +11,7 @@ BUILD_ROOT="$ROOT/build"
 PREFIX="$BUILD_ROOT/prefix"
 DEPS_SRC="$BUILD_ROOT/deps/src"
 DEPS_VENV="$BUILD_ROOT/deps/venv"
-DIST="$ROOT/dist/varmint"
+DIST="$ROOT/dist/vm"
 MANIFEST="$ROOT/runtime/manifest.toml"
 MOLTENVK_PATCHES=(
   "$ROOT/patches/moltenvk/0001-guard-null-multisample-state-in-mesh-pipeline.patch"

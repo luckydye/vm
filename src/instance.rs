@@ -1,4 +1,4 @@
-//! VM directories under `~/.varmint/vms/<name>`.
+//! VM directories under `~/.vm/vms/<name>`.
 //!
 //! A VM is running while its process holds the exclusive lock on `lock`. The
 //! lock is released by the kernel when the process dies, so stale VMs are
@@ -34,9 +34,9 @@ pub struct Launch {
 }
 
 pub fn home() -> PathBuf {
-    match env::var_os("VARMINT_HOME") {
+    match env::var_os("VM_HOME") {
         Some(home) => PathBuf::from(home),
-        None => PathBuf::from(env::var_os("HOME").expect("HOME is not set")).join(".varmint"),
+        None => PathBuf::from(env::var_os("HOME").expect("HOME is not set")).join(".vm"),
     }
 }
 
@@ -350,10 +350,10 @@ pub fn remove(instance: &Instance) {
         .unwrap_or_else(|error| panic!("failed to remove {}: {error}", instance.dir.display()));
 }
 
-/// Logs of deleted VMs kept in ~/.varmint/logs.
+/// Logs of deleted VMs kept in ~/.vm/logs.
 const KEPT_LOGS: usize = 20;
 
-/// Moves a VM's log to ~/.varmint/logs before its directory is deleted, so
+/// Moves a VM's log to ~/.vm/logs before its directory is deleted, so
 /// host-side errors of ephemeral VMs (GPU, virtio-fs, crashes) stay readable.
 pub fn archive_log(dir: &Path) -> io::Result<()> {
     let log = dir.join("vmm.log");
@@ -485,7 +485,7 @@ fn clone_file(source: &Path, destination: &Path) -> Result<(), String> {
     })
 }
 
-/// SSH key `varmint ssh` uses, created on first use.
+/// SSH key `vm ssh` uses, created on first use.
 pub fn ssh_key() -> PathBuf {
     let key = home().join("ssh").join("id_ed25519");
     if key.exists() {
@@ -494,7 +494,7 @@ pub fn ssh_key() -> PathBuf {
 
     fs::create_dir_all(key.parent().unwrap()).unwrap_or_else(|error| panic!("failed to create ssh key dir: {error}"));
     let status = Command::new("/usr/bin/ssh-keygen")
-        .args(["-q", "-t", "ed25519", "-N", "", "-C", "varmint", "-f"])
+        .args(["-q", "-t", "ed25519", "-N", "", "-C", "vm", "-f"])
         .arg(&key)
         .status()
         .unwrap_or_else(|error| panic!("failed to run ssh-keygen: {error}"));
@@ -502,9 +502,9 @@ pub fn ssh_key() -> PathBuf {
     key
 }
 
-/// Public keys installed for the guest user: the varmint key plus the user's own.
+/// Public keys installed for the guest user: the vm key plus the user's own.
 pub fn authorized_keys() -> String {
-    let mut keys = fs::read_to_string(ssh_key().with_extension("pub")).expect("failed to read varmint ssh key");
+    let mut keys = fs::read_to_string(ssh_key().with_extension("pub")).expect("failed to read vm ssh key");
     let user_ssh = PathBuf::from(env::var_os("HOME").expect("HOME is not set")).join(".ssh");
     if let Ok(entries) = fs::read_dir(user_ssh) {
         for entry in entries.flatten() {

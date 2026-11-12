@@ -128,17 +128,17 @@ pub fn install_main_menu() {
         let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
         let main_menu = new_menu("");
 
-        let app_menu = new_menu("Varmint");
+        let app_menu = new_menu("vm");
         add_item(
             app_menu,
-            new_menu_item("About Varmint", Some(sel!(varmintShowAbout:)), "", 0, app),
+            new_menu_item("About VM", Some(sel!(varmintShowAbout:)), "", 0, app),
         );
         add_separator(app_menu);
         add_item(
             app_menu,
-            new_menu_item("Quit Varmint", Some(sel!(terminate:)), "q", COMMAND, app),
+            new_menu_item("Quit vm", Some(sel!(terminate:)), "q", COMMAND, app),
         );
-        add_submenu(main_menu, "Varmint", app_menu);
+        add_submenu(main_menu, "vm", app_menu);
 
         let view_menu = new_menu("View");
         let _: () = msg_send![view_menu, setAutoenablesItems: false];
@@ -197,7 +197,7 @@ pub fn show_about() {
         let options: *mut AnyObject = msg_send![class!(NSMutableDictionary), new];
 
         let name_key = ns_string("ApplicationName");
-        let name = ns_string("Varmint");
+        let name = ns_string("vm");
         let version_key = ns_string("Version");
         let version = ns_string(env!("CARGO_PKG_VERSION"));
         let credits_key = ns_string("Credits");

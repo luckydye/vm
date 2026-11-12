@@ -1,4 +1,4 @@
-//! US keyboard layout used by `varmint type` and `varmint key`.
+//! US keyboard layout used by `vm type` and `vm key`.
 
 use crate::virtio::input::keys::*;
 

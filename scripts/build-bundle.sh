@@ -1,4 +1,4 @@
-build_varmint() {
+build_vm() {
   local cargo_target_dir="${CARGO_TARGET_DIR:-$BUILD_ROOT/cargo}"
   local cargo_args=(build --release)
   local dylib
@@ -9,7 +9,7 @@ build_varmint() {
   done
   [ ! -f "$ROOT/Cargo.lock" ] || cargo_args+=(--locked)
 
-  log "build varmint"
+  log "build vm"
   (
     cd "$ROOT"
     # MACOSX_DEPLOYMENT_TARGET would also apply to proc-macro dylibs, which
@@ -19,7 +19,7 @@ build_varmint() {
     CARGO_TARGET_DIR="$cargo_target_dir" \
       cargo "${cargo_args[@]}"
   )
-  BUILT_BINARY="$cargo_target_dir/release/varmint"
+  BUILT_BINARY="$cargo_target_dir/release/vm"
 }
 
 find_vmnet_helper() {
@@ -39,10 +39,10 @@ find_vmnet_helper() {
   printf '%s\n' "$helper"
 }
 
-# DIST is an install prefix: bin/varmint and its runtime in share/varmint.
+# DIST is an install prefix: bin/vm and its runtime in share/vm.
 assemble() {
   log "assemble $DIST"
-  local runtime="$DIST/share/varmint"
+  local runtime="$DIST/share/vm"
   local helper file
 
   for file in "$BUILT_BINARY" "$KERNEL" "$INITRD" "$BASE_IMAGE"; do
@@ -58,7 +58,7 @@ assemble() {
     "$runtime/Frameworks" \
     "$runtime/Resources/kernel" \
     "$runtime/Resources/runtime"
-  install -m 755 "$BUILT_BINARY" "$DIST/bin/varmint"
+  install -m 755 "$BUILT_BINARY" "$DIST/bin/vm"
   install -m 755 "$helper" "$runtime/Helpers/vmnet-helper"
   install -m 755 "$PREFIX/libexec/virgl_render_server" "$runtime/Helpers/virgl_render_server"
   install -m 644 "$KERNEL" "$runtime/Resources/kernel/Image"
@@ -99,7 +99,7 @@ normalize_rpath() {
 
   archs="$(lipo -archs "$file" 2>/dev/null || true)"
   if [ "$(printf '%s\n' "$archs" | wc -w | tr -d ' ')" -gt 1 ]; then
-    tmp="$(mktemp -d "${TMPDIR:-/tmp}/varmint-rpath.XXXXXX")"
+    tmp="$(mktemp -d "${TMPDIR:-/tmp}/vm-rpath.XXXXXX")"
     for arch in $archs; do
       thin="$tmp/$(basename "$file").$arch"
       lipo "$file" -thin "$arch" -output "$thin"
@@ -144,7 +144,7 @@ resolve_dependency() {
 
 copy_runtime_library() {
   local source="$1"
-  local destination="$DIST/share/varmint/Frameworks/$(basename "$source")"
+  local destination="$DIST/share/vm/Frameworks/$(basename "$source")"
 
   need_file "$source"
   [ -f "$destination" ] && return
@@ -180,8 +180,8 @@ bundle_libraries() {
   for dylib in "${RUNTIME_DYLIBS[@]}"; do
     copy_runtime_library "$PREFIX/lib/$dylib"
   done
-  relink "$DIST/bin/varmint" '@executable_path/../share/varmint/Frameworks'
-  relink "$DIST/share/varmint/Helpers/virgl_render_server" '@executable_path/../Frameworks'
+  relink "$DIST/bin/vm" '@executable_path/../share/vm/Frameworks'
+  relink "$DIST/share/vm/Helpers/virgl_render_server" '@executable_path/../Frameworks'
   while [ "$index" -lt "${#MACHO_QUEUE[@]}" ]; do
     dylib="${MACHO_QUEUE[$index]}"
     install_name_tool -id "@rpath/$(basename "$dylib")" "$dylib"
@@ -191,14 +191,14 @@ bundle_libraries() {
 
   # UTM's ANGLE and epoxy load ANGLE from framework paths like EGL.framework/Versions/Current/EGL.
   for stem in EGL GLESv2; do
-    mkdir -p "$DIST/share/varmint/Frameworks/$stem.framework/Versions/Current"
-    ln -s "../../../lib$stem.dylib" "$DIST/share/varmint/Frameworks/$stem.framework/Versions/Current/$stem"
+    mkdir -p "$DIST/share/vm/Frameworks/$stem.framework/Versions/Current"
+    ln -s "../../../lib$stem.dylib" "$DIST/share/vm/Frameworks/$stem.framework/Versions/Current/$stem"
   done
 }
 
 sign() {
   log "sign"
-  local runtime="$DIST/share/varmint"
+  local runtime="$DIST/share/vm"
   local dylib
 
   require_commands codesign
@@ -210,7 +210,7 @@ sign() {
   codesign_file "$runtime/Helpers/virgl_render_server"
   codesign --force --sign - --timestamp=none \
     --entitlements "$VMNET_HELPER_ENTITLEMENTS" "$runtime/Helpers/vmnet-helper"
-  codesign --force --sign - --timestamp=none --entitlements "$ENTITLEMENTS" "$DIST/bin/varmint"
+  codesign --force --sign - --timestamp=none --entitlements "$ENTITLEMENTS" "$DIST/bin/vm"
 }
 
 # Every non-system dependency must resolve inside Frameworks through the one
@@ -218,7 +218,7 @@ sign() {
 verify_macho() {
   local file="$1"
   local rpath="$2"
-  local frameworks="$DIST/share/varmint/Frameworks"
+  local frameworks="$DIST/share/vm/Frameworks"
   local dependency
 
   lipo -archs "$file" | tr ' ' '\n' | grep -qx "$ARCH" || die "$file does not contain $ARCH"
@@ -236,10 +236,10 @@ verify_macho() {
 
 verify() {
   log "verify"
-  local runtime="$DIST/share/varmint"
+  local runtime="$DIST/share/vm"
   local dylib stem
 
-  verify_macho "$DIST/bin/varmint" '@executable_path/../share/varmint/Frameworks'
+  verify_macho "$DIST/bin/vm" '@executable_path/../share/vm/Frameworks'
   verify_macho "$runtime/Helpers/virgl_render_server" '@executable_path/../Frameworks'
   for dylib in "$runtime"/Frameworks/*.dylib; do
     verify_macho "$dylib" '@loader_path'
@@ -252,13 +252,13 @@ verify() {
   codesign -d --entitlements :- "$runtime/Helpers/vmnet-helper" 2>&1 \
     | grep -q '<key>com.apple.security.virtualization</key>' \
     || die "vmnet-helper is missing the Virtualization entitlement"
-  codesign -d --entitlements :- "$DIST/bin/varmint" 2>&1 \
+  codesign -d --entitlements :- "$DIST/bin/vm" 2>&1 \
     | grep -q '<key>com.apple.security.hypervisor</key>' \
-    || die "varmint is missing the Hypervisor entitlement"
+    || die "vm is missing the Hypervisor entitlement"
 }
 
 build_bundle() {
-  build_varmint
+  build_vm
   assemble
   bundle_libraries
   sign

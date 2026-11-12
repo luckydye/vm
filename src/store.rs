@@ -1,9 +1,9 @@
-//! The shared object store in `~/.varmint/store`: buckets of versioned
+//! The shared object store in `~/.vm/store`: buckets of versioned
 //! objects that VMs reach over their agent link, as an S3-like HTTP API the
 //! guest agent serves on its loopback.
 //!
 //! Every put and delete adds a version; deletes add a delete marker, so a VM
-//! never erases history. `varmint store gc` drops old versions. Each VM may
+//! never erases history. `vm store gc` drops old versions. Each VM may
 //! only use the buckets it was started with (`--store BUCKET[:ro]`), and
 //! every request, allowed or not, goes into the log.
 //!
@@ -99,7 +99,7 @@ fn validate_bucket(bucket: &str) -> Result<(), String> {
 }
 
 pub enum Caller<'a> {
-    /// `varmint store` on the host, which may use every bucket.
+    /// `vm store` on the host, which may use every bucket.
     Host,
     Vm { name: &'a str, grants: &'a [Grant] },
 }

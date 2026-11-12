@@ -1,4 +1,4 @@
-//! The web UI of `varmint serve --ui`: HTTP on the serve port, told apart from
+//! The web UI of `vm serve --ui`: HTTP on the serve port, told apart from
 //! JSON requests by their first byte. The page and its files are compiled in.
 //! `POST /api` takes a serve request as its body and answers with the reply;
 //! a WebSocket on `/attach` takes an attach request as its first message and

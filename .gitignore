@@ -8,7 +8,7 @@ build
 dist
 patches/neptune-debug
 patches/wip
-*.varmint
+*.vm
 *.raw
 *.boot
 _dxmt.log

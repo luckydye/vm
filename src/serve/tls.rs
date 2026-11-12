@@ -1,4 +1,4 @@
-//! TLS for `varmint serve --cert FILE --key FILE`, so browsers on other
+//! TLS for `vm serve --cert FILE --key FILE`, so browsers on other
 //! machines get a secure context. Two threads per connection move bytes
 //! between the TLS session and one end of a socket pair, whose other end the
 //! server handles like a plain TCP connection.

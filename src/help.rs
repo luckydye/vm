@@ -1,4 +1,4 @@
-//! Text of `varmint help`, kept apart from the commands it documents.
+//! Text of `vm help`, kept apart from the commands it documents.
 
 use crate::config::Hardware;
 
@@ -15,10 +15,10 @@ pub struct Command {
 const GROUPS: &[&str] = &["VMs", "Access", "Screen and input", "Remote"];
 
 const OVERVIEW_EXAMPLES: &[(&str, &str)] = &[
-    ("vm=$(varmint run --mount .:work)", "start a VM with the current directory at ~/work"),
-    ("varmint run $vm -- ls work", "run a command in it"),
-    ("varmint screenshot $vm screen.png", "look at its screen"),
-    ("varmint stop $vm", "stop and delete it"),
+    ("vm=$(vm run --mount .:work)", "start a VM with the current directory at ~/work"),
+    ("vm run $vm -- ls work", "run a command in it"),
+    ("vm screenshot $vm screen.png", "look at its screen"),
+    ("vm stop $vm", "stop and delete it"),
 ];
 
 pub fn commands(defaults: &Hardware) -> Vec<Command> {
@@ -26,25 +26,25 @@ pub fn commands(defaults: &Hardware) -> Vec<Command> {
         Command {
             name: "run",
             group: "VMs",
-            usage: "varmint run [NAME] [OPTIONS] [-- COMMAND...]",
+            usage: "vm run [NAME] [OPTIONS] [-- COMMAND...]",
             summary: "Start a VM, creating it if needed, and optionally run a command",
             description: "\
 Creates a VM from the base image and boots it in the background, starts a
 stopped persistent VM, or attaches to one that already runs. Once the guest is
 ready, about a second later, the VM name is printed on stdout, so
-`vm=$(varmint run)` works in scripts. NAME defaults to a random
+`vm=$(vm run)` works in scripts. NAME defaults to a random
 adjective-animal pair like swift-otter.
 
-With COMMAND, varmint runs it in the VM and exits with its exit code. Like
+With COMMAND, vm runs it in the VM and exits with its exit code. Like
 ssh, a command from a terminal gets a terminal in the VM too, so shells,
 editors and other interactive programs work and follow your window size; in
 scripts and pipes it gets none, and stdin, stdout and stderr are passed
-through separately. `varmint run NAME --` opens a login shell. A VM that this
+through separately. `vm run NAME --` opens a login shell. A VM that this
 run created and that is ephemeral is stopped afterwards and deleted;
 persistent VMs and VMs that were already running stay up.
 
 Without --persist the VM is ephemeral and deleted when it stops. Running
-`varmint run NAME` for a stopped persistent VM starts it again with its disk
+`vm run NAME` for a stopped persistent VM starts it again with its disk
 intact; hardware options only apply when a VM is created. A persistent VM
 starts with the buckets it was last given with --store unless new ones are
 named. Mounts, seeds, stores, environment and --window apply when a VM
@@ -57,7 +57,7 @@ do not show them. Programs in the VM can read them.
 
 Seeds copy host files or directories into the VM at every start, for
 example an agent's skills, settings or ssh key. The contents of the
-~/.varmint/seeds directory go into the guest home of every VM; symlinks in it
+~/.vm/seeds directory go into the guest home of every VM; symlinks in it
 are followed. A directory in a git work tree leaves out what .gitignore
 ignores. Changes in the VM never reach the host.
 
@@ -79,7 +79,7 @@ into the guest clipboard, so programs like Claude Code can paste it."
                 ),
                 (
                     "--store BUCKET[:ro]",
-                    "Let the VM use BUCKET of the shared store, see `varmint store`;\n\
+                    "Let the VM use BUCKET of the shared store, see `vm store`;\n\
                      :ro makes it read-only. Repeatable"
                         .into(),
                 ),
@@ -96,7 +96,7 @@ into the guest clipboard, so programs like Claude Code can paste it."
                 ),
                 (
                     "--base IMAGE",
-                    "Create the VM from an image made with `varmint save` instead of\n\
+                    "Create the VM from an image made with `vm save` instead of\n\
                      the stock Debian image"
                         .into(),
                 ),
@@ -109,63 +109,63 @@ into the guest clipboard, so programs like Claude Code can paste it."
                 ),
             ],
             examples: &[
-                ("vm=$(varmint run)", "ephemeral VM without a window"),
-                ("varmint run sandbox --persist", "persistent VM named sandbox"),
-                ("varmint run sandbox", "start sandbox again after it stopped"),
-                ("varmint run sandbox -- htop", "interactive program in sandbox"),
-                ("varmint run sandbox --", "interactive shell in sandbox"),
-                ("varmint run --mount .:work --wait-network", "current directory at ~/work, network ready"),
-                ("varmint run --window --size 1920x1080", "VM with a window"),
-                ("varmint run --env GITHUB_TOKEN", "pass a variable from your shell"),
-                ("varmint run --mount .:work -- make -C work test", "one-off VM for a single command"),
+                ("vm=$(vm run)", "ephemeral VM without a window"),
+                ("vm run sandbox --persist", "persistent VM named sandbox"),
+                ("vm run sandbox", "start sandbox again after it stopped"),
+                ("vm run sandbox -- htop", "interactive program in sandbox"),
+                ("vm run sandbox --", "interactive shell in sandbox"),
+                ("vm run --mount .:work --wait-network", "current directory at ~/work, network ready"),
+                ("vm run --window --size 1920x1080", "VM with a window"),
+                ("vm run --env GITHUB_TOKEN", "pass a variable from your shell"),
+                ("vm run --mount .:work -- make -C work test", "one-off VM for a single command"),
                 (
-                    "echo hello | varmint run $vm -- cat",
+                    "echo hello | vm run $vm -- cat",
                     "stdin is forwarded",
                 ),
-                ("varmint run --seed ~/.gitconfig:.gitconfig", "copy a config file into the VM"),
+                ("vm run --seed ~/.gitconfig:.gitconfig", "copy a config file into the VM"),
             ],
         },
         Command {
             name: "ls",
             group: "VMs",
-            usage: "varmint ls",
+            usage: "vm ls",
             summary: "List VMs",
             description: "\
 Lists all VMs with their state, whether they persist, and their hardware.
 In a pipe it prints only the names, one per line."
                 .into(),
             options: vec![],
-            examples: &[("varmint ls", ""), ("varmint ls | varmint stop --delete", "delete all VMs")],
+            examples: &[("vm ls", ""), ("vm ls | vm stop --delete", "delete all VMs")],
         },
         Command {
             name: "stop",
             group: "VMs",
-            usage: "varmint stop NAME... [--delete]",
+            usage: "vm stop NAME... [--delete]",
             summary: "Stop VMs; ephemeral VMs are deleted",
             description: "\
 Stops running VMs; stopped ones are left alone. With --delete, deletes the
 VMs and their disks, stopping them first if they run. Persistent VMs flush
-their disk before stopping and can be started again with `varmint run NAME`;
+their disk before stopping and can be started again with `vm run NAME`;
 ephemeral VMs are deleted when they stop either way. The host log of a
-deleted VM is kept in ~/.varmint/logs (the newest 20). Without NAME the names
+deleted VM is kept in ~/.vm/logs (the newest 20). Without NAME the names
 are read from stdin, one per line."
                 .into(),
             options: vec![("--delete", "Delete the VMs and their disks after stopping them".into())],
             examples: &[
-                ("varmint stop $vm", ""),
-                ("varmint stop sandbox --delete", "stop sandbox and delete its disk"),
-                ("varmint ls | varmint stop", "stop all VMs"),
-                ("varmint ls | varmint stop --delete", "delete all VMs"),
+                ("vm stop $vm", ""),
+                ("vm stop sandbox --delete", "stop sandbox and delete its disk"),
+                ("vm ls | vm stop", "stop all VMs"),
+                ("vm ls | vm stop --delete", "delete all VMs"),
             ],
         },
         Command {
             name: "save",
             group: "VMs",
-            usage: "varmint save NAME IMAGE",
+            usage: "vm save NAME IMAGE",
             summary: "Save a persistent VM as an image to create VMs from",
             description: "\
 Stops the running persistent VM NAME and saves its disk, with everything
-installed in it, as IMAGE in ~/.varmint/images. `varmint run --base IMAGE`
+installed in it, as IMAGE in ~/.vm/images. `vm run --base IMAGE`
 creates VMs from it like from the stock image.
 
 The VM's machine id and SSH host keys are cleared first, so VMs from the
@@ -174,37 +174,37 @@ Delete an image by removing its directory."
                 .into(),
             options: vec![],
             examples: &[
-                ("varmint run sandbox --persist", "make a VM to customize"),
-                ("varmint run sandbox -- sudo apt-get install -y ripgrep", "install what you need"),
-                ("varmint save sandbox tools", "save it as the image tools"),
-                ("vm=$(varmint run --base tools)", "start a VM from it"),
+                ("vm run sandbox --persist", "make a VM to customize"),
+                ("vm run sandbox -- sudo apt-get install -y ripgrep", "install what you need"),
+                ("vm save sandbox tools", "save it as the image tools"),
+                ("vm=$(vm run --base tools)", "start a VM from it"),
             ],
         },
         Command {
             name: "ssh",
             group: "Access",
-            usage: "varmint ssh NAME [SSH ARGS...]",
+            usage: "vm ssh NAME [SSH ARGS...]",
             summary: "Connect with ssh, tunneled through the guest agent",
             description: "\
-Runs your ssh client as varmint@NAME through `varmint proxy`, so it needs no
-network setup. Your ~/.ssh/*.pub keys and a key in ~/.varmint/ssh are
+Runs your ssh client as varmint@NAME through `vm proxy`, so it needs no
+network setup. Your ~/.ssh/*.pub keys and a key in ~/.vm/ssh are
 authorized in every VM. Remaining arguments are passed to ssh."
                 .into(),
             options: vec![],
             examples: &[
-                ("varmint ssh $vm", "interactive session"),
-                ("varmint ssh $vm uptime", "run a command"),
-                ("varmint ssh $vm -L 8080:localhost:8080", "forward a port"),
+                ("vm ssh $vm", "interactive session"),
+                ("vm ssh $vm uptime", "run a command"),
+                ("vm ssh $vm -L 8080:localhost:8080", "forward a port"),
             ],
         },
         Command {
             name: "store",
             group: "Access",
-            usage: "varmint store ls|get|put|rm|log|gc [ARGS]",
+            usage: "vm store ls|get|put|rm|log|gc [ARGS]",
             summary: "Read, write and audit the object store shared by VMs",
             description: "\
-The store keeps buckets of versioned objects in ~/.varmint/store. A VM may
-use only the buckets it was started with (`varmint run --store BUCKET[:ro]`),
+The store keeps buckets of versioned objects in ~/.vm/store. A VM may
+use only the buckets it was started with (`vm run --store BUCKET[:ro]`),
 through an S3-like HTTP API on http://127.0.0.1:5101 in the guest:
 
   GET    /                               buckets this VM may use
@@ -228,17 +228,17 @@ may use every bucket and are logged as host:
                 .into(),
             options: vec![],
             examples: &[
-                ("varmint run --store shared --store specs:ro", "a VM with two buckets"),
+                ("vm run --store shared --store specs:ro", "a VM with two buckets"),
                 ("curl -T notes.md localhost:5101/shared/notes.md", "in the VM: store a file"),
                 ("curl localhost:5101/shared/notes.md", "in the VM: read it"),
-                ("varmint store get shared notes.md --version 3", "an earlier version on the host"),
-                ("varmint store log shared", "who did what"),
+                ("vm store get shared notes.md --version 3", "an earlier version on the host"),
+                ("vm store log shared", "who did what"),
             ],
         },
         Command {
             name: "proxy",
             group: "Access",
-            usage: "varmint proxy NAME PORT",
+            usage: "vm proxy NAME PORT",
             summary: "Connect stdin and stdout to a TCP port in a VM",
             description: "\
 Pipes stdin and stdout to PORT on the guest's localhost, for use as an ssh
@@ -248,11 +248,11 @@ gets up to 30 seconds to accept the connection."
             options: vec![],
             examples: &[
                 (
-                    "scp -o ProxyCommand=\"varmint proxy $vm 22\" file varmint@$vm:",
+                    "scp -o ProxyCommand=\"vm proxy $vm 22\" file varmint@$vm:",
                     "copy a file with scp",
                 ),
                 (
-                    "printf 'GET / HTTP/1.0\\r\\n\\r\\n' | varmint proxy $vm 8080",
+                    "printf 'GET / HTTP/1.0\\r\\n\\r\\n' | vm proxy $vm 8080",
                     "talk to a guest web server",
                 ),
             ],
@@ -260,7 +260,7 @@ gets up to 30 seconds to accept the connection."
         Command {
             name: "screenshot",
             group: "Screen and input",
-            usage: "varmint screenshot NAME [FILE]",
+            usage: "vm screenshot NAME [FILE]",
             summary: "Save the screen as a PNG",
             description: "\
 Writes the VM's screen to FILE, NAME.png by default, or to stdout when FILE
@@ -268,14 +268,14 @@ is -. Pixel positions in the image are the coordinates move and click take."
                 .into(),
             options: vec![],
             examples: &[
-                ("varmint screenshot $vm", "writes $vm.png"),
-                ("varmint screenshot $vm - > screen.png", "PNG on stdout"),
+                ("vm screenshot $vm", "writes $vm.png"),
+                ("vm screenshot $vm - > screen.png", "PNG on stdout"),
             ],
         },
         Command {
             name: "screen",
             group: "Screen and input",
-            usage: "varmint screen [NAME] [--fps N]",
+            usage: "vm screen [NAME] [--fps N]",
             summary: "Use the screen live in the terminal, with mouse and keyboard",
             description: "\
 Shows the VM's screen in the terminal and updates it as the screen changes.
@@ -283,22 +283,22 @@ The VM's display takes the terminal's aspect ratio and follows it when the
 window is resized, keeping at most the VM's configured pixel count. The mouse
 and keyboard control the VM: every key, including Ctrl and the other
 modifiers, goes to the VM. Press Ctrl+] to quit. Without NAME, the name is
-read from stdin, so `varmint run | varmint screen` works.
+read from stdin, so `vm run | vm screen` works.
 
 Needs a terminal with the Kitty graphics and keyboard protocols and pixel
 mouse reporting, such as Ghostty, Kitty or WezTerm."
                 .into(),
             options: vec![("--fps N", "Most frames per second (default 30, at most 60)".into())],
             examples: &[
-                ("varmint screen $vm", ""),
-                ("varmint screen $vm --fps 60", "smoother, more CPU"),
-                ("varmint run | varmint screen", "new VM straight onto the screen"),
+                ("vm screen $vm", ""),
+                ("vm screen $vm --fps 60", "smoother, more CPU"),
+                ("vm run | vm screen", "new VM straight onto the screen"),
             ],
         },
         Command {
             name: "stream",
             group: "Screen and input",
-            usage: "varmint stream NAME [--fps N] [--no-audio]",
+            usage: "vm stream NAME [--fps N] [--no-audio]",
             summary: "Write the screen as H.264 and the sound as Opus to stdout",
             description: "\
 Streams the screen, and the sound unless --no-audio, until the VM stops or
@@ -317,14 +317,14 @@ only when the screen changes, so a still screen sends nothing."
                 ("--no-audio", "Leave out the sound".into()),
             ],
             examples: &[
-                ("varmint stream $vm > screen.bin", ""),
-                ("varmint stream $vm --no-audio | my-viewer", ""),
+                ("vm stream $vm > screen.bin", ""),
+                ("vm stream $vm --no-audio | my-viewer", ""),
             ],
         },
         Command {
             name: "input",
             group: "Screen and input",
-            usage: "varmint input NAME",
+            usage: "vm input NAME",
             summary: "Send mouse and keyboard events from stdin",
             description: "\
 Reads one JSON event per line from stdin and sends each to the VM as it
@@ -340,23 +340,23 @@ A line that is not one of these stops it with an error."
                 .into(),
             options: vec![],
             examples: &[(
-                "echo '{\"move\": {\"x\": 640, \"y\": 400}}' | varmint input $vm",
+                "echo '{\"move\": {\"x\": 640, \"y\": 400}}' | vm input $vm",
                 "",
             )],
         },
         Command {
             name: "move",
             group: "Screen and input",
-            usage: "varmint move NAME X Y",
+            usage: "vm move NAME X Y",
             summary: "Move the mouse pointer",
             description: "Moves the pointer to screenshot pixel X Y.".into(),
             options: vec![],
-            examples: &[("varmint move $vm 640 400", "")],
+            examples: &[("vm move $vm 640 400", "")],
         },
         Command {
             name: "click",
             group: "Screen and input",
-            usage: "varmint click NAME [X Y] [--right | --middle] [--double]",
+            usage: "vm click NAME [X Y] [--right | --middle] [--double]",
             summary: "Click a mouse button",
             description: "Clicks at screenshot pixel X Y, or where the pointer is without X Y.".into(),
             options: vec![
@@ -365,30 +365,30 @@ A line that is not one of these stops it with an error."
                 ("--double", "Double-click".into()),
             ],
             examples: &[
-                ("varmint click $vm 568 775", "left click"),
-                ("varmint click $vm 300 200 --right", "open a context menu"),
-                ("varmint click $vm 60 80 --double", "select a word"),
+                ("vm click $vm 568 775", "left click"),
+                ("vm click $vm 300 200 --right", "open a context menu"),
+                ("vm click $vm 60 80 --double", "select a word"),
             ],
         },
         Command {
             name: "type",
             group: "Screen and input",
-            usage: "varmint type NAME TEXT",
+            usage: "vm type NAME TEXT",
             summary: "Type text",
             description: "\
 Types TEXT with a US keyboard layout. Printable ASCII, newlines and tabs are
-supported; use `varmint key` for other keys and shortcuts."
+supported; use `vm key` for other keys and shortcuts."
                 .into(),
             options: vec![],
             examples: &[
-                ("varmint type $vm 'hello world'", ""),
-                ("varmint type $vm $'ls -la\\n'", "type a command and press enter"),
+                ("vm type $vm 'hello world'", ""),
+                ("vm type $vm $'ls -la\\n'", "type a command and press enter"),
             ],
         },
         Command {
             name: "key",
             group: "Screen and input",
-            usage: "varmint key NAME COMBO...",
+            usage: "vm key NAME COMBO...",
             summary: "Press keys and shortcuts",
             description: "\
 Presses each COMBO in turn. A combo is one or more keys joined with +, held
@@ -398,15 +398,15 @@ right, f1 to f12, or a single character."
                 .into(),
             options: vec![],
             examples: &[
-                ("varmint key $vm enter", ""),
-                ("varmint key $vm ctrl+alt+t", "shortcut"),
-                ("varmint key $vm ctrl+a ctrl+c", "several combos in a row"),
+                ("vm key $vm enter", ""),
+                ("vm key $vm ctrl+alt+t", "shortcut"),
+                ("vm key $vm ctrl+a ctrl+c", "several combos in a row"),
             ],
         },
         Command {
             name: "scroll",
             group: "Screen and input",
-            usage: "varmint scroll NAME AMOUNT [--horizontal]",
+            usage: "vm scroll NAME AMOUNT [--horizontal]",
             summary: "Scroll the mouse wheel",
             description: "\
 Scrolls AMOUNT wheel steps at the pointer. Positive scrolls up, negative
@@ -414,19 +414,19 @@ scrolls down."
                 .into(),
             options: vec![("--horizontal", "Scroll sideways; positive scrolls right".into())],
             examples: &[
-                ("varmint scroll $vm -5", "scroll down"),
-                ("varmint scroll $vm 3 --horizontal", "scroll right"),
+                ("vm scroll $vm -5", "scroll down"),
+                ("vm scroll $vm 3 --horizontal", "scroll right"),
             ],
         },
         Command {
             name: "serve",
             group: "Remote",
-            usage: "varmint serve [ADDRESS] [--ui] [--cert FILE --key FILE]",
+            usage: "vm serve [ADDRESS] [--ui] [--cert FILE --key FILE]",
             summary: "Provision VMs over the network",
             description: "\
 Listens on ADDRESS (default 127.0.0.1:7420) for provisioning requests. Each
 connection sends one JSON line and gets one JSON line back, then closes.
-Every request carries the token from ~/.varmint/serve-token, which is
+Every request carries the token from ~/.vm/serve-token, which is
 created on first use:
 
   {\"token\": \"...\", \"op\": \"run\", \"persist\": false, \"cpus\": 4, \"memory_mib\": 6144,
@@ -448,7 +448,7 @@ created on first use:
                                                -> {} and then the VM's stream
 
 A failed request answers {\"error\": \"...\"}. All fields of run are
-optional, plus name and base as in `varmint run`, and env, an object of
+optional, plus name and base as in `vm run`, and env, an object of
 guest variables. CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY come from
 the server's environment when set, unless env names them. stores is a
 list of buckets the VM may use, as in --store, like [\"shared\", \"specs:ro\"].
@@ -465,7 +465,7 @@ events, or open for a shell. Only VMs with a window play their sound on
 the host.
 
 stderr is an event log of CloudEvents 1.0 as JSON lines, with the types
-dev.varmint.serve.request (with only the names of env), .exec (args,
+dev.vm.serve.request (with only the names of env), .exec (args,
 exit_code, duration_ms), .reply and .error (a client that left before
 the reply, or a failed accept). The extension attributes peer and requestid name the client and
 tie the events of one request together. Tokens are never logged.
@@ -486,11 +486,11 @@ or a private network and reach it through a relay or tunnel."
                 ("--key FILE", "The PEM private key of --cert".into()),
             ],
             examples: &[
-                ("varmint serve", "listen on 127.0.0.1:7420"),
-                ("varmint serve 0.0.0.0:7420", "listen on all interfaces"),
-                ("varmint serve --ui", "with the web UI at http://127.0.0.1:7420"),
+                ("vm serve", "listen on 127.0.0.1:7420"),
+                ("vm serve 0.0.0.0:7420", "listen on all interfaces"),
+                ("vm serve --ui", "with the web UI at http://127.0.0.1:7420"),
                 (
-                    "varmint serve --ui 0.0.0.0:7420 --cert mac.pem --key mac-key.pem",
+                    "vm serve --ui 0.0.0.0:7420 --cert mac.pem --key mac-key.pem",
                     "with the web UI over https for the local network",
                 ),
             ],
@@ -512,13 +512,13 @@ fn render_examples(out: &mut String, examples: &[(&str, &str)]) {
 pub fn overview(commands: &[Command], user_commands: &[(String, String)]) -> String {
     let mut out = String::from(
         "\
-varmint - quick, disposable Linux VMs on macOS and Linux
+vm - quick, disposable Linux VMs on macOS and Linux
 
 Every VM is a copy-on-write clone of a Debian desktop image and starts in
 about a second. VMs are ephemeral unless created with --persist. State and
-usage telemetry live in ~/.varmint (set VARMINT_HOME to move it).
+usage telemetry live in ~/.vm (set VM_HOME to move it).
 
-Usage: varmint COMMAND [ARGS]
+Usage: vm COMMAND [ARGS]
 ",
     );
     let width = commands
@@ -534,16 +534,16 @@ Usage: varmint COMMAND [ARGS]
         }
     }
     if !user_commands.is_empty() {
-        out.push_str("\nYour commands (~/.varmint/commands):\n");
+        out.push_str("\nYour commands (~/.vm/commands):\n");
         for (name, summary) in user_commands {
             out.push_str(format!("  {name:<width$}  {summary}").trim_end());
             out.push('\n');
         }
     }
     out.push_str(
-        "\nRun `varmint help COMMAND` or `varmint COMMAND --help` for options and examples.\n\
-         Add your own commands as executables in ~/.varmint/commands; `varmint NAME`\n\
-         runs ~/.varmint/commands/NAME with the remaining arguments. A comment on\n\
+        "\nRun `vm help COMMAND` or `vm COMMAND --help` for options and examples.\n\
+         Add your own commands as executables in ~/.vm/commands; `vm NAME`\n\
+         runs ~/.vm/commands/NAME with the remaining arguments. A comment on\n\
          the line after the shebang is its summary here.\n\nExamples:\n",
     );
     render_examples(&mut out, OVERVIEW_EXAMPLES);
@@ -569,7 +569,7 @@ pub fn command(command: &Command) -> String {
 /// Short message for wrong arguments to a command.
 pub fn usage_error(command: &Command) -> String {
     format!(
-        "usage: {}\nRun `varmint {} --help` for options and examples.",
+        "usage: {}\nRun `vm {} --help` for options and examples.",
         command.usage, command.name
     )
 }

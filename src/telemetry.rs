@@ -1,4 +1,4 @@
-//! Usage telemetry in `~/.varmint/telemetry.sqlite`, for finding programs that
+//! Usage telemetry in `~/.vm/telemetry.sqlite`, for finding programs that
 //! run too often or get installed repeatedly and are worth preinstalling.
 //!
 //! Every VM process appends to the same database (WAL mode). A dedicated
@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS processes (
     exit_code INTEGER NOT NULL,
     uid INTEGER NOT NULL
 );
--- Command lines: typed in interactive guest shells, or run with varmint run.
+-- Command lines: typed in interactive guest shells, or run with vm run.
 CREATE TABLE IF NOT EXISTS commands (
     vm_id INTEGER NOT NULL REFERENCES vms(id),
     source TEXT NOT NULL,
@@ -101,7 +101,7 @@ pub enum Event {
         boot_ms: u64,
     },
     Guest(GuestReport),
-    /// A command run from the host with `varmint run`.
+    /// A command run from the host with `vm run`.
     HostCommand {
         source: &'static str,
         started_at: f64,

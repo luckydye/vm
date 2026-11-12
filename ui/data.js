@@ -3,12 +3,12 @@
 
 import * as layout from "./layout.js";
 
-const TOKEN_KEY = "varmint-token";
-const VOLUME_KEY = "varmint-volume";
-const MUTED_KEY = "varmint-muted";
-const LAYOUTS_KEY = "varmint-layouts";
+const TOKEN_KEY = "vm-token";
+const VOLUME_KEY = "vm-volume";
+const MUTED_KEY = "vm-muted";
+const LAYOUTS_KEY = "vm-layouts";
 
-// The token from the URL `varmint serve --ui` prints, kept for later visits
+// The token from the URL `vm serve --ui` prints, kept for later visits
 // and taken out of the address bar.
 function initialToken() {
   const fromUrl = new URLSearchParams(location.hash.slice(1)).get("token");

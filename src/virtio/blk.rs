@@ -380,7 +380,7 @@ fn lock_disk(file: &File, path: &Path) -> io::Result<()> {
     if error.kind() == io::ErrorKind::WouldBlock {
         return Err(io::Error::new(
             error.kind(),
-            format!("disk {} is already in use by another Varmint process", path.display()),
+            format!("disk {} is already in use by another vm process", path.display()),
         ));
     }
 

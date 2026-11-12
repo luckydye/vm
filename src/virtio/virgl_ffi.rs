@@ -206,7 +206,7 @@ const VIRGL_RENDERER_RENDER_SERVER: c_int = 1 << 9;
 const VIRGL_RENDERER_NATIVE_SHARE_TEXTURE: c_int = 1 << 12;
 const VIRGL_RENDERER_ASYNC_FENCE_CB: c_int = 1 << 8;
 
-/// ANGLE on Metal renders GLES, in contexts varmint creates, and shares
+/// ANGLE on Metal renders GLES, in contexts vm creates, and shares
 /// scanouts as Metal textures.
 #[cfg(target_os = "macos")]
 const BASE_INIT_FLAGS: c_int = VIRGL_RENDERER_THREAD_SYNC

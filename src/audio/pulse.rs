@@ -78,7 +78,7 @@ impl Output {
         let stream = unsafe {
             pa_simple_new(
                 ptr::null(),
-                c"varmint".as_ptr(),
+                c"vm".as_ptr(),
                 STREAM_PLAYBACK,
                 ptr::null(),
                 c"guest audio".as_ptr(),

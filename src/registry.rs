@@ -1,6 +1,6 @@
 //! Pulls from private container registries without credentials in the guest.
 //!
-//! The guest agent mirrors each registry listed in `~/.varmint/registries`,
+//! The guest agent mirrors each registry listed in `~/.vm/registries`,
 //! one host per line, on its loopback. For every repository it pulls, it asks
 //! the host for a bearer token. The host requests one with the credentials
 //! `docker login` saved in `~/.docker/config.json`, scoped to pulling that
@@ -58,7 +58,7 @@ pub fn token(allowed: &[String], request: &RegistryTokenRequest) -> RegistryToke
 
 fn pull_token(allowed: &[String], registry: &str, repository: &str) -> Result<(String, u64), String> {
     if !allowed.iter().any(|host| host == registry) {
-        return Err(format!("{registry} is not in ~/.varmint/registries"));
+        return Err(format!("{registry} is not in ~/.vm/registries"));
     }
     let valid_repository = !repository.is_empty()
         && repository

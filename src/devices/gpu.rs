@@ -112,7 +112,7 @@ impl Worker {
 fn build_virglrenderer(gpu_tx: Sender<Request>) -> virtio::virgl_ffi::VirglResult<VirglRenderer> {
     let poll_tx = gpu_tx.clone();
 
-    let fence_poll_interval = std::env::var("VARMINT_FENCE_POLL_US")
+    let fence_poll_interval = std::env::var("VM_FENCE_POLL_US")
         .unwrap_or("1000".into())
         .parse::<u64>()
         .ok()

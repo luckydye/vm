@@ -129,16 +129,16 @@ build_moltenvk() {
   (
     cd "$source"
     # The external dependencies hardcode macOS 11.0, which current SDKs reject.
-    printf 'MACOSX_DEPLOYMENT_TARGET = %s\n' "$MINIMUM_MACOS" > "$source/varmint-deployment.xcconfig"
+    printf 'MACOSX_DEPLOYMENT_TARGET = %s\n' "$MINIMUM_MACOS" > "$source/vm-deployment.xcconfig"
     # Fetch without building, patch SPIRV-Cross and pin MoltenVK to the patched
     # commit; fetchDependencies force-checks-out pinned revisions when building.
     clean_env ./fetchDependencies --none -v
     patch_spirv_cross "$source"
-    clean_env XCODE_XCCONFIG_FILE="$source/varmint-deployment.xcconfig" ./fetchDependencies --macos -v
+    clean_env XCODE_XCCONFIG_FILE="$source/vm-deployment.xcconfig" ./fetchDependencies --macos -v
     rm -rf "Package/$CONFIGURATION"
     # Metal's private API provides features Vulkan guests rely on, such as
     # VK_EXT_provoking_vertex, without which ANGLE (Chromium's WebGL) is
-    # limited to ES 2.0 on Venus. varmint is not distributed via the App Store.
+    # limited to ES 2.0 on Venus. vm is not distributed via the App Store.
     clean_env xcodebuild build \
       -project MoltenVKPackaging.xcodeproj \
       -scheme 'MoltenVK Package (macOS only)' \
@@ -170,8 +170,8 @@ patch_spirv_cross() {
   for patch in "${SPIRV_CROSS_PATCHES[@]}"; do
     git -C "$spirv_cross" apply "$patch"
   done
-  git -C "$spirv_cross" -c user.name=varmint -c user.email=build@varmint.invalid -c commit.gpgsign=false \
-    commit -q -a -m "varmint SPIRV-Cross patches"
+  git -C "$spirv_cross" -c user.name=vm -c user.email=build@vm.invalid -c commit.gpgsign=false \
+    commit -q -a -m "vm SPIRV-Cross patches"
   git -C "$spirv_cross" rev-parse HEAD > "$source/ExternalRevisions/SPIRV-Cross_repo_revision"
 }
 
@@ -262,7 +262,7 @@ dependency_recipe_hash() {
 }
 
 build_dependencies() {
-  local stamp="$PREFIX/.varmint-dependencies"
+  local stamp="$PREFIX/.vm-dependencies"
   local expected_stamp patch
 
   for patch in \

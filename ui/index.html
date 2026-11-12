@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>varmint</title>
+<title>vm</title>
 <link rel="icon" href="/logo.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -17,7 +17,7 @@
 </head>
 <body>
 <header class="top">
-  <button class="brand" id="home">varmint</button>
+  <button class="brand" id="home">vm</button>
   <nav class="crumbs" id="crumbs"></nav>
   <aside class="summary" id="summary">
     <div class="metric">
@@ -58,7 +58,7 @@
         <h2>No machines</h2>
         <p>Each machine is a disposable Debian desktop that starts in about a second.</p>
         <button class="btn primary" id="blank-new">New machine</button>
-        <code>or run <span>varmint run</span> in a terminal</code>
+        <code>or run <span>vm run</span> in a terminal</code>
       </div>
     </div>
   </section>
@@ -110,8 +110,8 @@
 <dialog class="sheet" id="login">
   <form id="login-form" method="dialog">
     <div class="sheet-body">
-      <h2>Connect to varmint</h2>
-      <p class="sheet-note">Open the link <code>varmint serve --ui</code> prints, or paste the token from <code>~/.varmint/serve-token</code> on the Mac that serves.</p>
+      <h2>Connect to vm</h2>
+      <p class="sheet-note">Open the link <code>vm serve --ui</code> prints, or paste the token from <code>~/.vm/serve-token</code> on the Mac that serves.</p>
       <label class="field">
         <span>Token</span>
         <input name="token" required autocomplete="off" spellcheck="false">

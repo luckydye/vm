@@ -100,8 +100,8 @@ jobs:
       - name: Upload CLI
         uses: actions/upload-artifact@v4
         with:
-          name: varmint
-          path: dist/varmint.pkg
+          name: vm
+          path: dist/vm.pkg
           compression-level: 0
           retention-days: 7
 
@@ -147,8 +147,8 @@ jobs:
       - name: Upload CLI
         uses: actions/upload-artifact@v4
         with:
-          name: varmint-linux-${{ matrix.arch }}
-          path: dist/varmint-linux-*.tar.gz
+          name: vm-linux-${{ matrix.arch }}
+          path: dist/vm-linux-*.tar.gz
           compression-level: 0
           retention-days: 7
 
@@ -164,10 +164,10 @@ jobs:
       - name: Download CLI
         uses: actions/download-artifact@v4
         with:
-          pattern: varmint*
+          pattern: vm*
           merge-multiple: true
 
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" varmint.pkg varmint-linux-*.tar.gz --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" vm.pkg vm-linux-*.tar.gz --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes

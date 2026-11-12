@@ -112,7 +112,7 @@ pub fn run(
     if !hardware.persist {
         EPHEMERAL_DIR.set(instance.dir.clone()).unwrap();
     }
-    // A panic on any thread ends the VM. Its directory stays for `varmint run` to
+    // A panic on any thread ends the VM. Its directory stays for `vm run` to
     // show the log; the next prune deletes it if the VM is ephemeral.
     let default_panic = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -207,7 +207,7 @@ pub fn run(
     .unwrap_or_else(|error| panic!("failed to start audio output: {error}"));
 
     // Only a VM with a window syncs the host clipboard; headless isolates only get
-    // clipboard images from interactive `varmint run` sessions.
+    // clipboard images from interactive `vm run` sessions.
     let clipboard = window.then(|| {
         let clipboard_change_tx = runtime_event_tx.clone();
         clipboard::start(move |payload| {

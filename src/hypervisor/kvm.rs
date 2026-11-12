@@ -192,7 +192,7 @@ fn run_loop(vcpu: &mut VcpuFd, mem: &GuestMemory, devices: &Devices) -> io::Resu
                 devices.handle_pio(port, true, u32::from_le_bytes(bytes));
             }
             // PSCI SYSTEM_OFF and SYSTEM_RESET, or an x86 triple fault: reboots
-            // end the VM too; `varmint run` starts a persistent VM again.
+            // end the VM too; `vm run` starts a persistent VM again.
             VcpuExit::SystemEvent(..) | VcpuExit::Shutdown => crate::vmm::shutdown("guest-poweroff"),
             VcpuExit::Intr => {}
             exit => panic!("unexpected vCPU exit: {exit:?}"),

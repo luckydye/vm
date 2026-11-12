@@ -337,7 +337,7 @@ impl<'a> AppState<'a> {
 impl<'a> ApplicationHandler<DisplayEvent> for AppState<'a> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let attrs = Window::default_attributes()
-            .with_title("Varmint")
+            .with_title("vm")
             .with_inner_size(LogicalSize::new(self.initial_size.0, self.initial_size.1))
             .with_resizable(true);
 

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Builds dist/varmint on Linux: bin/varmint with its kernel and base image in
-# share/varmint, and the same as dist/varmint-linux-ARCH.tar.gz. virglrenderer,
+# Builds dist/vm on Linux: bin/vm with its kernel and base image in
+# share/vm, and the same as dist/vm-linux-ARCH.tar.gz. virglrenderer,
 # libx264, libopus, PulseAudio and passt come from the distribution.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-DIST="$ROOT/dist/varmint"
+DIST="$ROOT/dist/vm"
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/build/cargo}"
 
 # shellcheck source=build-common.sh
@@ -33,18 +33,18 @@ for library in virglrenderer x264 opus libpulse-simple sqlite3; do
   pkg-config --exists "$library" || die "missing development files for $library"
 done
 
-log "build varmint"
+log "build vm"
 (cd "$ROOT" && CARGO_TARGET_DIR="$CARGO_TARGET_DIR" cargo build --release --locked)
 
 log "assemble $DIST"
-runtime="$DIST/share/varmint"
+runtime="$DIST/share/vm"
 rm -rf "$DIST"
 mkdir -p "$DIST/bin" "$runtime/Resources/kernel" "$runtime/Resources/runtime"
-install -m 755 "$CARGO_TARGET_DIR/release/varmint" "$DIST/bin/varmint"
+install -m 755 "$CARGO_TARGET_DIR/release/vm" "$DIST/bin/vm"
 install -m 644 "$KERNEL" "$runtime/Resources/kernel/Image"
 install -m 644 "$INITRD" "$runtime/Resources/kernel/initrd"
 install -m 644 "$BASE_IMAGE" "$runtime/Resources/runtime/base.raw.zst"
 
-tarball="$ROOT/dist/varmint-linux-$(uname -m).tar.gz"
-tar -C "$ROOT/dist" -czf "$tarball" varmint
+tarball="$ROOT/dist/vm-linux-$(uname -m).tar.gz"
+tar -C "$ROOT/dist" -czf "$tarball" vm
 log "done: $tarball"

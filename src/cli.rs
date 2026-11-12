@@ -37,7 +37,7 @@ const DEFAULT_HARDWARE: Hardware = Hardware {
 };
 
 fn fail(message: impl std::fmt::Display) -> ! {
-    eprintln!("varmint: {message}");
+    eprintln!("vm: {message}");
     std::process::exit(1)
 }
 
@@ -90,11 +90,11 @@ fn user_commands_dir() -> PathBuf {
     instance::home().join("commands")
 }
 
-/// Commands a new ~/.varmint/commands starts with; they are the user's to change or delete.
+/// Commands a new ~/.vm/commands starts with; they are the user's to change or delete.
 const DEFAULT_COMMANDS: [(&str, &str); 1] = [("pull", include_str!("../commands/pull"))];
 
-/// Creates ~/.varmint/commands with the default commands unless it exists. The
-/// directory is filled aside and renamed into place, so concurrent varmint
+/// Creates ~/.vm/commands with the default commands unless it exists. The
+/// directory is filled aside and renamed into place, so concurrent vm
 /// processes never see it half written.
 fn write_default_commands() {
     let dir = user_commands_dir();
@@ -119,7 +119,7 @@ fn write_default_commands() {
     }
 }
 
-/// Executables in ~/.varmint/commands, the user's own varmint commands.
+/// Executables in ~/.vm/commands, the user's own vm commands.
 fn user_commands() -> Vec<String> {
     let Ok(entries) = fs::read_dir(user_commands_dir()) else {
         return Vec::new();
@@ -152,7 +152,7 @@ fn user_command_summaries() -> Vec<(String, String)> {
         .collect()
 }
 
-/// Runs ~/.varmint/commands/NAME with the remaining arguments.
+/// Runs ~/.vm/commands/NAME with the remaining arguments.
 fn user_command(name: &str, args: &[String]) -> ! {
     if !user_commands().iter().any(|command| command == name) {
         unknown_command(name);
@@ -162,7 +162,7 @@ fn user_command(name: &str, args: &[String]) -> ! {
         .unwrap_or_else(|error| fail(error));
     let error = Command::new(user_commands_dir().join(name))
         .args(args)
-        .env("VARMINT", executable)
+        .env("VM", executable)
         .exec();
     fail(format!("failed to run {}: {error}", user_commands_dir().join(name).display()))
 }
@@ -175,13 +175,13 @@ fn command_help(name: &str) -> help::Command {
 }
 
 fn unknown_command(name: &str) -> ! {
-    eprintln!("varmint: unknown command {name:?}\nRun `varmint help` to list the commands.");
+    eprintln!("vm: unknown command {name:?}\nRun `vm help` to list the commands.");
     std::process::exit(2)
 }
 
 /// Wrong arguments: the command's usage and where to find more.
 fn usage_error(command: &str) -> ! {
-    eprintln!("varmint: {}", help::usage_error(&command_help(command)));
+    eprintln!("vm: {}", help::usage_error(&command_help(command)));
     std::process::exit(2)
 }
 
@@ -399,7 +399,7 @@ fn run(args: &[String]) {
 
     if !execute {
         println!("{name}");
-        // stdin, not stdout: `vm=$(varmint run)` in a shell pipes stdout but still copies.
+        // stdin, not stdout: `vm=$(vm run)` in a shell pipes stdout but still copies.
         if io::stdin().is_terminal() {
             clipboard::copy_text(name.as_bytes());
         }
@@ -521,7 +521,7 @@ fn max_files_per_process() -> libc::rlim_t {
         .expect("malformed /proc/sys/fs/nr_open")
 }
 
-/// Entry point of the detached VM process started by `varmint run`.
+/// Entry point of the detached VM process started by `vm run`.
 fn vmm_process(args: &[String]) {
     let [name, lock_fd, listen_fd, rest @ ..] = args else {
         fail("internal: __vmm NAME LOCK_FD LISTEN_FD [--window] [--mount SPEC]...");
@@ -572,7 +572,7 @@ fn vmm_process(args: &[String]) {
     vmm::run(launch, window, &mounts, &seeds, grants, environment).unwrap_or_else(|error| panic!("VM failed: {error:?}"));
 }
 
-/// `varmint store`: the shared object store from the host, through the same
+/// `vm store`: the shared object store from the host, through the same
 /// requests VMs make, but with every bucket.
 fn store_command(args: &[String]) {
     let Some((subcommand, args)) = args.split_first() else {
@@ -648,7 +648,7 @@ fn store_command(args: &[String]) {
 fn list() {
     instance::prune();
     let instances = instance::list();
-    // In pipes only the names, one per line, as in `varmint ls | varmint stop`.
+    // In pipes only the names, one per line, as in `vm ls | vm stop`.
     if !io::stdout().is_terminal() {
         for instance in instances {
             println!("{}", instance.name);
@@ -656,7 +656,7 @@ fn list() {
         return;
     }
     if instances.is_empty() {
-        println!("No VMs. Start one with: varmint run");
+        println!("No VMs. Start one with: vm run");
         return;
     }
     println!("{:<20} {:<8} {:<8} {:>4} {:>8} {:>8}", "NAME", "STATE", "PERSIST", "CPUS", "MEMORY", "DISK");
@@ -698,7 +698,7 @@ fn save(args: &[String]) {
         fail(format!("VM {name} is ephemeral and would be deleted when it stops; only persistent VMs can be saved"));
     }
     if !instance.is_running() {
-        fail(format!("VM {name} is stopped; start it with `varmint run {name}` so its identity can be cleared"));
+        fail(format!("VM {name} is stopped; start it with `vm run {name}` so its identity can be cleared"));
     }
     instance::new_image(image).unwrap_or_else(|error| fail(error));
 
@@ -719,10 +719,10 @@ fn save(args: &[String]) {
     }
     stop(&instance);
     instance::save(&instance, image).unwrap_or_else(|error| fail(error));
-    eprintln!("saved {name} as image {image}; start VMs from it with `varmint run --base {image}`");
+    eprintln!("saved {name} as image {image}; start VMs from it with `vm run --base {image}`");
 }
 
-/// The NAMEs, or without them the names on stdin, one per line, as in `varmint ls | varmint stop`.
+/// The NAMEs, or without them the names on stdin, one per line, as in `vm ls | vm stop`.
 fn names_or_stdin(command: &str, args: &[String]) -> Vec<String> {
     let names: Vec<String> = match args {
         [] if io::stdin().is_terminal() => usage_error(command),
@@ -941,7 +941,7 @@ fn pump_stdin(writer: &Mutex<UnixStream>, paste_images: bool) {
 fn clipboard_image_frame() -> Frame {
     let mut png = clipboard::read_png().unwrap_or_default();
     if png.len() > protocol::MAX_PAYLOAD {
-        eprint!("varmint: the clipboard image is too large for the VM ({} bytes)\r\n", png.len());
+        eprint!("vm: the clipboard image is too large for the VM ({} bytes)\r\n", png.len());
         png.clear();
     }
     Frame::new(0, kind::CLIPBOARD_IMAGE, png)
@@ -991,9 +991,9 @@ fn screenshot(args: &[String]) {
 
 fn screen_command(args: &[String]) {
     if !io::stdout().is_terminal() {
-        fail("varmint screen draws into a terminal; use `varmint screenshot` to save images");
+        fail("vm screen draws into a terminal; use `vm screenshot` to save images");
     }
-    // Without NAME it comes from stdin, as in `varmint run | varmint screen`.
+    // Without NAME it comes from stdin, as in `vm run | vm screen`.
     let (name, options) = match args.split_first() {
         Some((name, options)) if !name.starts_with("--") => (name.clone(), options),
         _ if io::stdin().is_terminal() => usage_error("screen"),
@@ -1072,7 +1072,7 @@ fn input(args: &[String]) {
     }
 }
 
-/// The first line of stdin, which `varmint run` writes once the VM is ready.
+/// The first line of stdin, which `vm run` writes once the VM is ready.
 fn name_from_stdin() -> String {
     let mut line = String::new();
     io::stdin().lock().read_line(&mut line).unwrap_or_else(|error| fail(error));

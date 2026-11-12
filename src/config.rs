@@ -88,11 +88,11 @@ impl Mount {
     }
 }
 
-/// The guest variables as a JSON object: from `varmint serve` to `varmint run`,
+/// The guest variables as a JSON object: from `vm serve` to `vm run`,
 /// and from `run` to the VM process. Unlike arguments, a process environment
 /// is not visible to other users in `ps`, and one variable keeps names chosen
 /// by a remote client out of the host processes' own environment.
-pub const GUEST_ENVIRONMENT_VARIABLE: &str = "VARMINT_GUEST_ENVIRONMENT";
+pub const GUEST_ENVIRONMENT_VARIABLE: &str = "VM_GUEST_ENVIRONMENT";
 
 /// Variables copied into every VM from this process's environment when they
 /// are set, without `--env`: an agent's credentials.
@@ -103,7 +103,7 @@ pub const PASSED_VARIABLES: [&str; 2] = ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_A
 /// value from this process's environment.
 /// Values never come from arguments, where `ps` and shell history show them.
 pub fn guest_environment(names: &[String]) -> Result<BTreeMap<String, String>, String> {
-    // @deprecated ~/.varmint/env is no longer read; fail instead of silently
+    // @deprecated ~/.vm/env is no longer read; fail instead of silently
     // starting VMs without the variables it holds.
     let path = instance::home().join("env");
     if path.exists() {
@@ -188,7 +188,7 @@ impl Seed {
     }
 }
 
-/// Seeds for this run: the `~/.varmint/seeds` directory, copied into the
+/// Seeds for this run: the `~/.vm/seeds` directory, copied into the
 /// guest home, then `--seed` entries.
 pub fn seeds(overrides: &[String]) -> Result<Vec<Seed>, String> {
     let path = instance::home().join("seeds");
@@ -264,11 +264,11 @@ impl Resources {
 }
 
 /// Directory holding `Helpers/`, `Frameworks/` and `Resources/`:
-/// `PREFIX/share/varmint` for `PREFIX/bin/varmint`. `None` for development
+/// `PREFIX/share/vm` for `PREFIX/bin/vm`. `None` for development
 /// builds run from the cargo target directory.
 pub fn runtime_dir() -> Option<PathBuf> {
     let executable = env::current_exe().ok()?.canonicalize().ok()?;
-    let share = executable.parent()?.parent()?.join("share/varmint");
+    let share = executable.parent()?.parent()?.join("share/vm");
     share.is_dir().then_some(share)
 }
 

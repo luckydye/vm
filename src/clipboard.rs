@@ -95,21 +95,21 @@ impl Pasteboard {
     }
 }
 
-/// The argument that makes `varmint` serve the text on its stdin as the
+/// The argument that makes `vm` serve the text on its stdin as the
 /// clipboard, since X11 and Wayland clipboards live only as long as the
 /// program offering them.
 #[cfg(target_os = "linux")]
 pub const SERVE_TEXT_COMMAND: &str = "__serve-clipboard-text";
 
 /// Puts `text` on the host clipboard from a command that exits right after:
-/// a detached `varmint` keeps offering it until another program takes over.
+/// a detached `vm` keeps offering it until another program takes over.
 #[cfg(target_os = "linux")]
 pub fn copy_text(text: &[u8]) {
     use std::{
         io::Write,
         process::{Command, Stdio},
     };
-    let mut server = Command::new(std::env::current_exe().expect("cannot find the varmint executable"))
+    let mut server = Command::new(std::env::current_exe().expect("cannot find the vm executable"))
         .arg(SERVE_TEXT_COMMAND)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
