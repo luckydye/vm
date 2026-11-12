@@ -204,7 +204,10 @@ sudo -H -u varmint sh -c 'mkdir -p ~/.claude && cat > ~/.claude/settings.json' <
   "skipDangerousModePermissionPrompt": true
 }
 EOF_CLAUDE_SETTINGS
-sudo -H -u varmint sh -c 'cat > ~/.claude/CLAUDE.md' <<'EOF_CLAUDE_MD'
+# Every coding agent reads the same environment briefing, ~/AGENTS.md. Link
+# it as each agent's global instructions file, so it applies outside the home
+# directory too; Claude Code reads CLAUDE.md, Codex and OpenCode read AGENTS.md.
+sudo -H -u varmint sh -c 'cat > ~/AGENTS.md' <<'EOF_AGENTS_MD'
 # Environment
 You run in a disposable Debian VM made by varmint on the user's computer.
 Nothing you do here can harm the host, so act without asking for permission.
@@ -235,9 +238,15 @@ Nothing you do here can harm the host, so act without asking for permission.
   `curl -T FILE localhost:5101/BUCKET/KEY`, delete with `curl -X DELETE`.
   Every write keeps the earlier versions (`?versions` lists them,
   `?versionId=N` reads one), and the host logs every request.
-EOF_CLAUDE_MD
+EOF_AGENTS_MD
+sudo -H -u varmint sh -c '
+    for file in .claude/CLAUDE.md .codex/AGENTS.md .config/opencode/AGENTS.md; do
+        mkdir -p "$HOME/$(dirname "$file")"
+        ln -sfn "$HOME/AGENTS.md" "$HOME/$file"
+    done
+'
 if [ "$arch" = arm64 ]; then
-    sudo -H -u varmint sh -c 'echo "- x86-64 binaries run through FEX (\`FEX\`, \`FEXBash\`)." >> ~/.claude/CLAUDE.md'
+    sudo -H -u varmint sh -c 'echo "- x86-64 binaries run through FEX (\`FEX\`, \`FEXBash\`)." >> ~/AGENTS.md'
 fi
 
 cat > /etc/sudoers.d/varmint <<'EOF_SUDO'

@@ -58,7 +58,7 @@ Run a single command in a fresh VM, which stops afterwards:
 vm run --mount .:work -- make -C work test
 ```
 
-The guest user is `varmint` with passwordless `sudo`, and [mise](https://mise.jdx.dev) is preinstalled for tools. State lives in `~/.vm` (override with `VM_HOME`), each VM in `~/.vm/vms/<name>` with its `vmm.log`. Shutting down or rebooting the guest stops the VM.
+The guest user is `varmint` with passwordless `sudo`, and [mise](https://mise.jdx.dev) is preinstalled for tools. The environment briefing for coding agents is in `~/AGENTS.md`, linked as the global instructions file of Claude Code, Codex and OpenCode. State lives in `~/.vm` (override with `VM_HOME`), each VM in `~/.vm/vms/<name>` with its `vmm.log`. Shutting down or rebooting the guest stops the VM.
 
 ## Shells and commands
 A guest agent on a virtio console serves shells, commands and TCP tunnels, so none of this needs the guest network:
