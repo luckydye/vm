@@ -206,7 +206,8 @@ sudo -H -u varmint sh -c 'mkdir -p ~/.claude && cat > ~/.claude/settings.json' <
 EOF_CLAUDE_SETTINGS
 # Every coding agent reads the same environment briefing, ~/AGENTS.md. Link
 # it as each agent's global instructions file, so it applies outside the home
-# directory too; Claude Code reads CLAUDE.md, Codex and OpenCode read AGENTS.md.
+# directory too. Claude Code's user-level file is ~/.claude/CLAUDE.md, Codex
+# and OpenCode read AGENTS.md from their config directories.
 sudo -H -u varmint sh -c 'cat > ~/AGENTS.md' <<'EOF_AGENTS_MD'
 # Environment
 You run in a disposable Debian VM made by varmint on the user's computer.

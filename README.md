@@ -34,6 +34,49 @@ VMs clone the base image with reflinks, so `~/.vm` must be on a filesystem that 
 
 `vm help` lists all commands and `vm COMMAND --help` explains one with its options and examples.
 
+## Getting started
+With `vm` installed, four steps take you to your project running in a VM.
+
+**1. Start a VM.** It prints its name, which the other commands take:
+
+```sh
+vm=$(vm run --wait-network)    # e.g. swift-otter
+```
+
+The first run decompresses the base image once; later runs clone it in milliseconds. `--wait-network` returns as soon as the guest has network and DNS.
+
+**2. Put your project in it.** Pick one:
+
+```sh
+vm=$(vm run --seed .:work)     # a copy of this directory at ~/work
+vm=$(vm run --mount .:work)    # the directory itself, shared at ~/work
+```
+
+A seed is a one-way copy, so whatever runs in the VM cannot touch your files; it skips what `.gitignore` ignores but keeps `.git`. A mount is the live directory: edits and git commits land on the host as you make them. Seeds suit coding agents, mounts suit working in the VM yourself.
+
+**3. Run your tools.** The guest has Debian, [mise](https://mise.jdx.dev), passwordless `sudo` and podman:
+
+```sh
+vm run $vm -- sh -c 'cd work && exec claude'   # or any command
+vm run $vm --                                   # interactive shell
+```
+
+Add `--window` when you start the VM for a desktop and a shared clipboard. Variables such as `CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_API_KEY` are copied from your shell automatically; pass others with `--env NAME`.
+
+**4. Get your work back.** With a seed, fetch the VM's branches into your repo as `$vm/BRANCH` and push them from the host with your own credentials:
+
+```sh
+vm pull $vm
+```
+
+Then stop it, which deletes an ephemeral VM and its disk:
+
+```sh
+vm stop $vm
+```
+
+For a VM that survives restarts, start it with `--persist` instead and start it again with `vm run NAME`.
+
 ## VMs
 
 ```sh
