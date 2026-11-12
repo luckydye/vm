@@ -4,7 +4,9 @@ Disposable Linux VMs on your Mac or Linux machine, made for running coding agent
 A VM starts in about a second as a copy-on-write clone of a Debian desktop, and is deleted when it stops. You drive it entirely from the CLI: shells, commands, SSH, file sharing, the screen, mouse and keyboard. No network setup, no image management.
 
 ```sh
-varmint dev                        # Claude Code on a copy of this repo, in a throwaway VM
+vm=$(varmint run --seed .:work --wait-network)    # throwaway VM with a copy of this repo at ~/work
+varmint run $vm -- sh -c 'cd work && exec claude' # Claude Code in it
+varmint pull $vm                                  # fetch its branches back as $vm/BRANCH
 ```
 
 When Claude is done, its commits come back to your repo as branches, and you review and push them from the host. Your credentials never enter the VM.
@@ -36,16 +38,16 @@ VMs clone the base image with reflinks, so `~/.varmint` must be on a filesystem 
 
 ```sh
 vm=$(varmint run)                  # ephemeral and headless; prints the VM name
-varmint run dev --persist          # kept across stops, restart with `varmint run dev`
+varmint run sandbox --persist      # kept across stops, restart with `varmint run sandbox`
 varmint run --window               # with a window and shared clipboard
 varmint run --wait-network         # return once the guest has network and DNS
 varmint run --cpus 8 --memory 8192 --disk 32 --size 1920x1080
 
 varmint ls
 varmint stop $vm                   # ephemeral VMs are deleted
-varmint rm dev                     # delete a persistent VM
+varmint stop sandbox --delete      # delete a persistent VM and its disk
 varmint ls | varmint stop          # stop all VMs
-varmint ls | varmint rm            # stop and delete all VMs
+varmint ls | varmint stop --delete # delete all VMs
 ```
 
 The first `run` decompresses the base image once; later VMs clone it in milliseconds. `run` returns as soon as the guest agent is up, and the network follows a moment later unless you pass `--wait-network`.
@@ -62,14 +64,15 @@ The guest user is `varmint` with passwordless `sudo`, and [mise](https://mise.jd
 A guest agent on a virtio console serves shells, commands and TCP tunnels, so none of this needs the guest network:
 
 ```sh
-varmint exec $vm                   # interactive shell
-varmint exec $vm -- htop           # interactive programs get a terminal
-echo hello | varmint exec $vm -- cat   # in pipes: no terminal, separate stdout and stderr
+varmint run $vm                    # start it, or just print its name if it already runs
+varmint run $vm --                 # interactive shell
+varmint run $vm -- htop            # interactive programs get a terminal
+echo hello | varmint run $vm -- cat   # in pipes: no terminal, separate stdout and stderr
 varmint ssh $vm                    # regular ssh, tunneled through the agent
 scp -o ProxyCommand="varmint proxy $vm 22" file varmint@$vm:   # any TCP port works
 ```
 
-In an interactive `exec`, Ctrl+V first copies the image on the host clipboard into the guest clipboard, so you can paste screenshots into Claude in `varmint dev`.
+In an interactive session, Ctrl+V first copies the image on the host clipboard into the guest clipboard, so you can paste screenshots into Claude Code.
 
 ## Getting files in
 **Mounts** share host directories over virtio-fs, optionally read-only. Files appear owned by the guest user, changes happen as your host user, and the guest cannot follow symlinks out of a share. Relative guest paths are under `/home/varmint`:
@@ -87,7 +90,7 @@ ln -s ~/.gitconfig ~/.varmint/seeds/.gitconfig
 ssh-keygen -t ed25519 -N "" -f ~/.varmint/seeds/.ssh/id_ed25519   # a key just for the VMs
 ```
 
-**Environment** variables are copied from your shell with `--env NAME`; `CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_API_KEY` always are when set. Values are never passed as arguments, so `ps` and shell history do not show them. They are set in `exec` and `ssh` sessions, and programs in the VM can read them:
+**Environment** variables are copied from your shell with `--env NAME`; `CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_API_KEY` always are when set. Values are never passed as arguments, so `ps` and shell history do not show them. They are set in `run` and `ssh` sessions, and programs in the VM can read them:
 
 ```sh
 export CLAUDE_CODE_OAUTH_TOKEN=...   # from `claude setup-token`
@@ -99,7 +102,7 @@ varmint run --env GITHUB_TOKEN
 ```sh
 docker login registry.example.com
 echo registry.example.com >> ~/.varmint/registries
-varmint exec "$vm" -- podman pull registry.example.com/team/app
+varmint run "$vm" -- podman pull registry.example.com/team/app
 ```
 
 ## Shared store
@@ -108,9 +111,9 @@ VMs share data through an object store on the host, in `~/.varmint/store`. A VM 
 ```sh
 a=$(varmint run --store shared)
 b=$(varmint run --store shared:ro)
-varmint exec "$a" -- curl -sT notes.md localhost:5101/shared/notes.md   # a new version
-varmint exec "$b" -- curl -s localhost:5101/shared/notes.md
-varmint exec "$b" -- curl -s 'localhost:5101/shared?prefix=no&versions'
+varmint run "$a" -- curl -sT notes.md localhost:5101/shared/notes.md   # a new version
+varmint run "$b" -- curl -s localhost:5101/shared/notes.md
+varmint run "$b" -- curl -s 'localhost:5101/shared?prefix=no&versions'
 varmint store get shared notes.md --version 1    # any version, from the host
 varmint store log shared                         # who did what, allowed or not
 varmint store gc --keep 5                        # keep the newest 5 versions of each key
@@ -119,14 +122,13 @@ varmint store gc --keep 5                        # keep the newest 5 versions of
 ## Your own commands
 Executables in `~/.varmint/commands` become varmint commands: `varmint NAME` runs `~/.varmint/commands/NAME` with the remaining arguments and `$VARMINT` set to the varmint binary. The comment on the line after the shebang is its summary in `varmint help`.
 
-The first varmint run creates the directory with two commands, yours to change or delete (see [`commands/`](commands)):
+The first varmint run creates the directory with a `pull` command, yours to change or delete (see [`commands/`](commands)):
 
 ```sh
-varmint dev [CLAUDE ARGS...]       # Claude Code on a copy of the current directory in a throwaway VM
 varmint pull $vm                   # fetch the VM's branches into the current repo as $vm/BRANCH
 ```
 
-`dev` seeds the current repo into a new VM and starts Claude Code there. When Claude exits, the VM keeps running and `dev` pulls its branches; `varmint stop` it when you are done. `pull` fetches through git's `ext::` transport over `varmint exec` and works any time while the VM runs, so you push from the host with your own credentials.
+`pull` fetches through git's `ext::` transport over `varmint run` and works any time while the VM runs, so you push from the host with your own credentials.
 
 ## Screen and input
 Coordinates are screenshot pixels:
@@ -183,7 +185,7 @@ Every VM records what it does in `~/.varmint/telemetry.sqlite`, so you can see w
 
 * `vms`: start, boot time, stop time and stop reason (`stopped`, `guest-poweroff`, `window-closed`, `crash`) of every run
 * `processes`: every process that exited in the guest, with wall and CPU time (kernel process accounting; names are truncated to 15 characters)
-* `commands`: command lines typed in interactive guest shells (`shell`) or run with `varmint exec` (`exec`)
+* `commands`: command lines typed in interactive guest shells (`shell`) or run with `varmint run` (`exec`)
 * `packages`: apt packages and mise tools installed in the guest
 
 ```sh

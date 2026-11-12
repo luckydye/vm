@@ -16,7 +16,7 @@ const GROUPS: &[&str] = &["VMs", "Access", "Screen and input", "Remote"];
 
 const OVERVIEW_EXAMPLES: &[(&str, &str)] = &[
     ("vm=$(varmint run --mount .:work)", "start a VM with the current directory at ~/work"),
-    ("varmint exec $vm -- ls work", "run a command in it"),
+    ("varmint run $vm -- ls work", "run a command in it"),
     ("varmint screenshot $vm screen.png", "look at its screen"),
     ("varmint stop $vm", "stop and delete it"),
 ];
@@ -27,21 +27,28 @@ pub fn commands(defaults: &Hardware) -> Vec<Command> {
             name: "run",
             group: "VMs",
             usage: "varmint run [NAME] [OPTIONS] [-- COMMAND...]",
-            summary: "Create and start a VM, or start a stopped persistent one",
+            summary: "Start a VM, creating it if needed, and optionally run a command",
             description: "\
-Creates a VM from the base image and boots it in the background. Once the
-guest is ready, about a second later, the VM name is printed on stdout, so
+Creates a VM from the base image and boots it in the background, starts a
+stopped persistent VM, or attaches to one that already runs. Once the guest is
+ready, about a second later, the VM name is printed on stdout, so
 `vm=$(varmint run)` works in scripts. NAME defaults to a random
 adjective-animal pair like swift-otter.
 
-With COMMAND, varmint runs it in the VM like `varmint exec`, then stops the
-VM and exits with the command's exit code.
+With COMMAND, varmint runs it in the VM and exits with its exit code. Like
+ssh, a command from a terminal gets a terminal in the VM too, so shells,
+editors and other interactive programs work and follow your window size; in
+scripts and pipes it gets none, and stdin, stdout and stderr are passed
+through separately. `varmint run NAME --` opens a login shell. A VM that this
+run created and that is ephemeral is stopped afterwards and deleted;
+persistent VMs and VMs that were already running stay up.
 
 Without --persist the VM is ephemeral and deleted when it stops. Running
 `varmint run NAME` for a stopped persistent VM starts it again with its disk
 intact; hardware options only apply when a VM is created. A persistent VM
 starts with the buckets it was last given with --store unless new ones are
-named.
+named. Mounts, seeds, stores, environment and --window apply when a VM
+starts, so they cannot be changed on one that is already running.
 
 CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY, and variables named with
 --env, are copied from your environment into the VM's shells, commands and
@@ -52,7 +59,10 @@ Seeds copy host files or directories into the VM at every start, for
 example an agent's skills, settings or ssh key. The contents of the
 ~/.varmint/seeds directory go into the guest home of every VM; symlinks in it
 are followed. A directory in a git work tree leaves out what .gitignore
-ignores. Changes in the VM never reach the host."
+ignores. Changes in the VM never reach the host.
+
+In an interactive session, Ctrl+V first puts the image on the host clipboard
+into the guest clipboard, so programs like Claude Code can paste it."
                 .into(),
             options: vec![
                 ("--persist", "Keep the VM and its disk after it stops".into()),
@@ -100,12 +110,18 @@ ignores. Changes in the VM never reach the host."
             ],
             examples: &[
                 ("vm=$(varmint run)", "ephemeral VM without a window"),
-                ("varmint run dev --persist", "persistent VM named dev"),
-                ("varmint run dev", "start dev again after it stopped"),
+                ("varmint run sandbox --persist", "persistent VM named sandbox"),
+                ("varmint run sandbox", "start sandbox again after it stopped"),
+                ("varmint run sandbox -- htop", "interactive program in sandbox"),
+                ("varmint run sandbox --", "interactive shell in sandbox"),
                 ("varmint run --mount .:work --wait-network", "current directory at ~/work, network ready"),
                 ("varmint run --window --size 1920x1080", "VM with a window"),
                 ("varmint run --env GITHUB_TOKEN", "pass a variable from your shell"),
                 ("varmint run --mount .:work -- make -C work test", "one-off VM for a single command"),
+                (
+                    "echo hello | varmint run $vm -- cat",
+                    "stdin is forwarded",
+                ),
                 ("varmint run --seed ~/.gitconfig:.gitconfig", "copy a config file into the VM"),
             ],
         },
@@ -119,33 +135,28 @@ Lists all VMs with their state, whether they persist, and their hardware.
 In a pipe it prints only the names, one per line."
                 .into(),
             options: vec![],
-            examples: &[("varmint ls", ""), ("varmint ls | varmint rm", "delete all VMs")],
+            examples: &[("varmint ls", ""), ("varmint ls | varmint stop --delete", "delete all VMs")],
         },
         Command {
             name: "stop",
             group: "VMs",
-            usage: "varmint stop NAME...",
+            usage: "varmint stop NAME... [--delete]",
             summary: "Stop VMs; ephemeral VMs are deleted",
             description: "\
-Stops running VMs; stopped ones are left alone. Persistent VMs flush their disk
-first and can be started again with `varmint run NAME`; ephemeral VMs are
-deleted. The host log of a deleted VM is kept in ~/.varmint/logs (the newest
-20). Without NAME the names are read from stdin, one per line."
+Stops running VMs; stopped ones are left alone. With --delete, deletes the
+VMs and their disks, stopping them first if they run. Persistent VMs flush
+their disk before stopping and can be started again with `varmint run NAME`;
+ephemeral VMs are deleted when they stop either way. The host log of a
+deleted VM is kept in ~/.varmint/logs (the newest 20). Without NAME the names
+are read from stdin, one per line."
                 .into(),
-            options: vec![],
-            examples: &[("varmint stop $vm", ""), ("varmint ls | varmint stop", "stop all VMs")],
-        },
-        Command {
-            name: "rm",
-            group: "VMs",
-            usage: "varmint rm NAME...",
-            summary: "Delete VMs, stopping them first if they run",
-            description: "\
-Deletes VMs and their disks. A running VM is stopped first. Without NAME the
-names are read from stdin, one per line."
-                .into(),
-            options: vec![],
-            examples: &[("varmint rm dev", ""), ("varmint ls | varmint rm", "delete all VMs")],
+            options: vec![("--delete", "Delete the VMs and their disks after stopping them".into())],
+            examples: &[
+                ("varmint stop $vm", ""),
+                ("varmint stop sandbox --delete", "stop sandbox and delete its disk"),
+                ("varmint ls | varmint stop", "stop all VMs"),
+                ("varmint ls | varmint stop --delete", "delete all VMs"),
+            ],
         },
         Command {
             name: "save",
@@ -163,42 +174,10 @@ Delete an image by removing its directory."
                 .into(),
             options: vec![],
             examples: &[
-                ("varmint run dev --persist", "make a VM to customize"),
-                ("varmint exec dev -- sudo apt-get install -y ripgrep", "install what you need"),
-                ("varmint save dev tools", "save it as the image tools"),
+                ("varmint run sandbox --persist", "make a VM to customize"),
+                ("varmint run sandbox -- sudo apt-get install -y ripgrep", "install what you need"),
+                ("varmint save sandbox tools", "save it as the image tools"),
                 ("vm=$(varmint run --base tools)", "start a VM from it"),
-            ],
-        },
-        Command {
-            name: "exec",
-            group: "Access",
-            usage: "varmint exec [NAME] [-- COMMAND...]",
-            summary: "Open a shell or run a command in a VM",
-            description: "\
-Runs COMMAND as the guest user varmint in /home/varmint, or a login shell
-without COMMAND, and exits with its exit code. Use sudo for root; it needs
-no password.
-
-Like ssh, it adapts to how it is called: from a terminal, it gets a terminal
-in the VM too, so shells, editors and other interactive programs work and
-follow your window size. In scripts and pipes it gets none, and stdin,
-stdout and stderr are passed through separately.
-
-Without NAME, the name is read from the first line of stdin, so
-`varmint run | varmint exec -- bash` works. In a terminal, the session then
-reads the keyboard instead of the rest of stdin.
-
-In a terminal session, Ctrl+V first puts the image on the host clipboard into
-the guest clipboard, so programs like Claude Code can paste it."
-                .into(),
-            options: vec![],
-            examples: &[
-                ("varmint exec $vm", "interactive shell"),
-                ("varmint exec $vm -- htop", "interactive program"),
-                ("varmint exec $vm -- uname -a", ""),
-                ("varmint run | varmint exec -- bash", "shell in a new VM"),
-                ("echo hello | varmint exec $vm -- cat", "stdin is forwarded"),
-                ("varmint exec $vm -- sudo apt-get install -y ripgrep", "run as root"),
             ],
         },
         Command {

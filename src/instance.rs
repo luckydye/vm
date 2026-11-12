@@ -307,14 +307,15 @@ fn populate(instance: &Instance, hardware: &Hardware, base: &Base) -> Result<(),
     Ok(())
 }
 
-/// Locks an existing, stopped VM for booting.
-pub fn restart(name: &str) -> Result<Launch, String> {
+/// Locks an existing, stopped VM for booting. Returns None if it already runs.
+pub fn start(name: &str) -> Result<Option<Launch>, String> {
     let instance = Instance::open(name)?;
-    let lock = instance
-        .try_lock()
-        .map_err(|error| format!("failed to lock {}: {error}", instance.dir.display()))?
-        .ok_or_else(|| format!("VM {name} is already running"))?;
-    instance.launch(lock)
+    let Some(lock) =
+        instance.try_lock().map_err(|error| format!("failed to lock {}: {error}", instance.dir.display()))?
+    else {
+        return Ok(None);
+    };
+    instance.launch(lock).map(Some)
 }
 
 pub fn list() -> Vec<Instance> {

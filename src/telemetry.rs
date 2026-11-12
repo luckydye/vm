@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS processes (
     exit_code INTEGER NOT NULL,
     uid INTEGER NOT NULL
 );
--- Command lines: typed in interactive guest shells, or run with varmint exec.
+-- Command lines: typed in interactive guest shells, or run with varmint run.
 CREATE TABLE IF NOT EXISTS commands (
     vm_id INTEGER NOT NULL REFERENCES vms(id),
     source TEXT NOT NULL,
@@ -101,7 +101,7 @@ pub enum Event {
         boot_ms: u64,
     },
     Guest(GuestReport),
-    /// A command run from the host with `varmint exec`.
+    /// A command run from the host with `varmint run`.
     HostCommand {
         source: &'static str,
         started_at: f64,

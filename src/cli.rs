@@ -67,9 +67,7 @@ pub fn main() {
         "run" => run(args),
         "ls" => list(),
         "stop" => stop_all(args),
-        "rm" => remove(args),
         "save" => save(args),
-        "exec" => exec(args),
         "ssh" => ssh(args),
         "proxy" => proxy(args),
         "screenshot" => screenshot(args),
@@ -93,8 +91,7 @@ fn user_commands_dir() -> PathBuf {
 }
 
 /// Commands a new ~/.varmint/commands starts with; they are the user's to change or delete.
-const DEFAULT_COMMANDS: [(&str, &str); 2] =
-    [("dev", include_str!("../commands/dev")), ("pull", include_str!("../commands/pull"))];
+const DEFAULT_COMMANDS: [(&str, &str); 1] = [("pull", include_str!("../commands/pull"))];
 
 /// Creates ~/.varmint/commands with the default commands unless it exists. The
 /// directory is filled aside and renamed into place, so concurrent varmint
@@ -228,6 +225,21 @@ fn random_name() -> String {
     format!("{adjective}-{animal}")
 }
 
+/// A VM that `run` brought up: either booting now or already running.
+enum Vm {
+    Booting(Launch),
+    Running(Instance),
+}
+
+impl Vm {
+    fn instance(&self) -> &Instance {
+        match self {
+            Vm::Booting(launch) => &launch.instance,
+            Vm::Running(instance) => instance,
+        }
+    }
+}
+
 fn run(args: &[String]) {
     let started = Instant::now();
     let mut name = None;
@@ -239,23 +251,36 @@ fn run(args: &[String]) {
     let mut grants = Vec::new();
     let mut hardware = DEFAULT_HARDWARE;
     let mut hardware_flags = false;
+    let mut start_flags = false;
     let mut image = None;
     let mut command = Vec::new();
+    let mut execute = false;
 
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         if arg == "--" {
             command = args.by_ref().cloned().collect();
+            execute = true;
             break;
         }
         match arg.as_str() {
-            "--window" => window = true,
+            "--window" => {
+                window = true;
+                start_flags = true;
+            }
             "--wait-network" => wait_network = true,
-            "--env" => environment.push(args.next().unwrap_or_else(|| usage_error("run")).clone()),
-            "--seed" => seeds.push(args.next().unwrap_or_else(|| usage_error("run")).clone()),
+            "--env" => {
+                environment.push(args.next().unwrap_or_else(|| usage_error("run")).clone());
+                start_flags = true;
+            }
+            "--seed" => {
+                seeds.push(args.next().unwrap_or_else(|| usage_error("run")).clone());
+                start_flags = true;
+            }
             "--store" => {
                 let spec = args.next().unwrap_or_else(|| fail("--store needs BUCKET[:ro]"));
                 grants.push(Grant::parse(spec).unwrap_or_else(|error| fail(error)));
+                start_flags = true;
             }
             "--mount" => {
                 let spec = args.next().unwrap_or_else(|| fail("--mount needs HOST:GUEST[:ro]"));
@@ -264,6 +289,7 @@ fn run(args: &[String]) {
                 if mounts.len() >= MAX_SHARES {
                     fail(format!("at most {} mounts are supported", MAX_SHARES - 1));
                 }
+                start_flags = true;
             }
             "--base" => {
                 image = Some(args.next().unwrap_or_else(|| usage_error("run")).clone());
@@ -300,53 +326,78 @@ fn run(args: &[String]) {
     let environment = config::guest_environment(&environment).unwrap_or_else(|error| fail(error));
     let seeds = config::seeds(&seeds).unwrap_or_else(|error| fail(error));
     instance::prune();
-    let launch = match name {
-        Some(name) if Instance::open(&name).is_ok() => {
-            if hardware_flags {
-                fail(format!("VM {name} already exists; its hardware and base cannot be changed"));
+
+    let (vm, created) = match name {
+        Some(name) => match Instance::open(&name) {
+            Ok(instance) => {
+                if hardware_flags {
+                    fail(format!("VM {name} already exists; its hardware and base cannot be changed"));
+                }
+                match instance::start(&name).unwrap_or_else(|error| fail(error)) {
+                    Some(launch) => (Vm::Booting(launch), false),
+                    None => {
+                        if start_flags {
+                            fail(format!(
+                                "VM {name} is already running; stop it before changing its mounts, seeds, stores, environment or window"
+                            ));
+                        }
+                        (Vm::Running(instance), false)
+                    }
+                }
             }
-            instance::restart(&name)
-        }
-        Some(name) => instance::create(&name, &hardware, image.as_deref()),
+            Err(_) => (
+                Vm::Booting(instance::create(&name, &hardware, image.as_deref()).unwrap_or_else(|error| fail(error))),
+                true,
+            ),
+        },
         None => {
             let name = random_name();
-            instance::create(&name, &hardware, image.as_deref())
+            let launch = instance::create(&name, &hardware, image.as_deref()).unwrap_or_else(|error| fail(error));
+            (Vm::Booting(launch), true)
         }
-    }
-    .unwrap_or_else(|error| fail(error));
+    };
 
+    let booting = matches!(&vm, Vm::Booting(_));
+    let persist = vm.instance().hardware().unwrap_or_else(|error| fail(error)).persist;
     // A persistent VM keeps the buckets it was last given.
-    let persist = launch.instance.hardware().unwrap_or_else(|error| fail(error)).persist;
-    if persist {
+    if persist && booting {
         if grants.is_empty() {
-            grants = launch.instance.stores().unwrap_or_else(|error| fail(error));
+            grants = vm.instance().stores().unwrap_or_else(|error| fail(error));
         } else {
-            launch.instance.set_stores(&grants).unwrap_or_else(|error| fail(error));
+            vm.instance().set_stores(&grants).unwrap_or_else(|error| fail(error));
         }
     }
 
-    let name = launch.instance.name.clone();
-    let log = launch.instance.log();
-    spawn_vmm(launch, window, &mounts, &seeds, &grants, &environment);
+    let name = vm.instance().name.clone();
+    if let Vm::Booting(launch) = vm {
+        spawn_vmm(launch, window, &mounts, &seeds, &grants, &environment);
+    }
 
     let instance = open(&name);
-    let (_, reply) = request(&instance, &Request::Wait).unwrap_or_else(|_| {
-        let log = fs::read_to_string(&log).unwrap_or_default();
-        let tail: Vec<&str> = log.lines().rev().take(20).collect();
-        let tail: Vec<&str> = tail.into_iter().rev().collect();
-        fail(format!("VM {name} exited during boot:\n{}", tail.join("\n")))
-    });
+    let mut boot_ms = None;
+    if booting {
+        let (_, reply) = request(&instance, &Request::Wait).unwrap_or_else(|_| {
+            let log = instance.log();
+            let log = fs::read_to_string(&log).unwrap_or_default();
+            let tail: Vec<&str> = log.lines().rev().take(20).collect();
+            let tail: Vec<&str> = tail.into_iter().rev().collect();
+            fail(format!("VM {name} exited during boot:\n{}", tail.join("\n")))
+        });
+        boot_ms = Some(reply.boot_ms.expect("wait reply without boot time") as f64 / 1000.0);
+    }
 
     if wait_network {
         wait_for_network(&instance);
     }
 
-    eprintln!(
-        "{name} ready in {:.2}s (guest boot {:.2}s)",
-        started.elapsed().as_secs_f64(),
-        reply.boot_ms.expect("wait reply without boot time") as f64 / 1000.0
-    );
-    if command.is_empty() {
+    if let Some(boot_ms) = boot_ms {
+        eprintln!(
+            "{name} ready in {:.2}s (guest boot {boot_ms:.2}s)",
+            started.elapsed().as_secs_f64()
+        );
+    }
+
+    if !execute {
         println!("{name}");
         // stdin, not stdout: `vm=$(varmint run)` in a shell pipes stdout but still copies.
         if io::stdin().is_terminal() {
@@ -355,10 +406,12 @@ fn run(args: &[String]) {
         return;
     }
 
-    // Run the command, then stop the VM; an ephemeral VM is gone afterwards.
+    // Run the command; a VM this run created and that is ephemeral is gone afterwards.
     let (session, interactive) = exec_session(command);
     let code = run_session(&instance, session, interactive, true);
-    stop(&instance);
+    if created && !persist {
+        stop(&instance);
+    }
     std::process::exit(code);
 }
 
@@ -595,7 +648,7 @@ fn store_command(args: &[String]) {
 fn list() {
     instance::prune();
     let instances = instance::list();
-    // In pipes only the names, one per line, as in `varmint ls | varmint rm`.
+    // In pipes only the names, one per line, as in `varmint ls | varmint stop`.
     if !io::stdout().is_terminal() {
         for instance in instances {
             println!("{}", instance.name);
@@ -669,7 +722,7 @@ fn save(args: &[String]) {
     eprintln!("saved {name} as image {image}; start VMs from it with `varmint run --base {image}`");
 }
 
-/// The NAMEs, or without them the names on stdin, one per line, as in `varmint ls | varmint rm`.
+/// The NAMEs, or without them the names on stdin, one per line, as in `varmint ls | varmint stop`.
 fn names_or_stdin(command: &str, args: &[String]) -> Vec<String> {
     let names: Vec<String> = match args {
         [] if io::stdin().is_terminal() => usage_error(command),
@@ -680,21 +733,21 @@ fn names_or_stdin(command: &str, args: &[String]) -> Vec<String> {
 }
 
 fn stop_all(args: &[String]) {
-    for name in names_or_stdin("stop", args) {
-        let instance = open(&name);
-        if instance.is_running() {
-            stop(&instance);
+    let mut delete = false;
+    let mut names = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "--delete" => delete = true,
+            _ if arg.starts_with('-') => usage_error("stop"),
+            _ => names.push(arg.clone()),
         }
     }
-}
-
-fn remove(args: &[String]) {
-    for name in names_or_stdin("rm", args) {
+    for name in names_or_stdin("stop", &names) {
         let instance = open(&name);
         if instance.is_running() {
             stop(&instance);
         }
-        if instance.dir.exists() {
+        if delete && instance.dir.exists() {
             instance::remove(&instance);
         }
     }
@@ -733,14 +786,6 @@ fn serve_command(args: &[String]) {
     serve::serve(listener, &token, ui, tls)
 }
 
-fn split_command(command: &str, args: &[String]) -> Vec<String> {
-    match args.iter().position(|arg| arg == "--") {
-        Some(index) => args[index + 1..].to_vec(),
-        None if args.is_empty() => Vec::new(),
-        None => usage_error(command),
-    }
-}
-
 fn pty_session(argv: Vec<String>, interactive: bool) -> Session {
     let (cols, rows) = if interactive { terminal::size().unwrap_or_else(|error| fail(error)) } else { (80, 24) };
     Session::Pty {
@@ -759,23 +804,6 @@ fn terminal_environment() -> BTreeMap<String, String> {
         .collect();
     environment.insert("TERM".into(), env::var("TERM").unwrap_or_else(|_| "xterm-256color".into()));
     environment
-}
-
-fn exec(args: &[String]) {
-    // Without NAME it comes from stdin, as in `varmint run | varmint exec -- bash`.
-    let (name, command) = match args.split_first() {
-        Some((name, command)) if name != "--" => (name.clone(), command),
-        _ if io::stdin().is_terminal() => usage_error("exec"),
-        _ => (name_from_stdin(), args),
-    };
-    // The pipe only carried the name; in a terminal the session reads the keyboard.
-    if io::stdout().is_terminal() {
-        let tty = File::open("/dev/tty").unwrap_or_else(|error| fail(format!("failed to open /dev/tty: {error}")));
-        assert!(unsafe { libc::dup2(tty.as_raw_fd(), libc::STDIN_FILENO) } != -1, "dup2 failed: {}", io::Error::last_os_error());
-    }
-    let instance = open(&name);
-    let (session, interactive) = exec_session(split_command("exec", command));
-    std::process::exit(run_session(&instance, session, interactive, true));
 }
 
 /// Like ssh: a terminal at both ends gets one in the guest, so interactive
