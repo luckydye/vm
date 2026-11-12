@@ -467,12 +467,12 @@ fn run_local(options: RunOptions, started: Instant) {
     let target = Target::Local(open(&name));
     let mut boot_ms = None;
     if booting {
-        let control = node::request(&target, &Request::Wait).unwrap_or_else(|_| {
+        let control = node::request(&target, &Request::Wait).unwrap_or_else(|error| {
             let log = open(&name).log();
             let log = fs::read_to_string(&log).unwrap_or_default();
             let tail: Vec<&str> = log.lines().rev().take(20).collect();
             let tail: Vec<&str> = tail.into_iter().rev().collect();
-            fail(format!("VM {name} exited during boot:\n{}", tail.join("\n")))
+            fail(format!("VM {name} failed to boot: {error}\n{}", tail.join("\n")))
         });
         boot_ms = Some(control.reply.boot_ms.expect("wait reply without boot time") as f64 / 1000.0);
     }

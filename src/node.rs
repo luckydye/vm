@@ -368,11 +368,7 @@ pub(crate) fn request(target: &Target, request: &ControlRequest) -> Result<Contr
                 }
                 reply
             };
-            let control = Control { reader, writer, reply };
-            control
-                .set_timeout(None)
-                .map_err(|error| format!("VM {}: {error}", instance.name))?;
-            Ok(control)
+            Ok(Control { reader, writer, reply })
         }
         Target::Remote { node, name } => {
             let mut wire = node.connect()?;
@@ -414,9 +410,20 @@ pub(crate) fn request(target: &Target, request: &ControlRequest) -> Result<Contr
                 reply
             };
             let control = Control { reader, writer, reply };
-            control
-                .set_timeout(None)
-                .map_err(|error| format!("node {}: {error}", node.name))?;
+            // Requests that keep using the connection must not time out while
+            // they stream. The others end with their reply, and clearing the
+            // timeout then fails on macOS once the peer has closed.
+            if matches!(
+                request,
+                ControlRequest::Stream { .. }
+                    | ControlRequest::InputStream
+                    | ControlRequest::Open { .. }
+                    | ControlRequest::Screenshot
+            ) {
+                control
+                    .set_timeout(None)
+                    .map_err(|error| format!("node {}: {error}", node.name))?;
+            }
             Ok(control)
         }
     }
