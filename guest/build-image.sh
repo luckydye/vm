@@ -12,8 +12,11 @@ case "${GUEST_ARCH:-$(uname -m)}" in
   *) echo "error: unsupported guest architecture: ${GUEST_ARCH:-$(uname -m)}" >&2; exit 1 ;;
 esac
 BUILDER_IMAGE="varmint-guest-builder:trixie-$GUEST_ARCH"
-DEBIAN_BASE_URL="${DEBIAN_BASE_URL:-https://cloud.debian.org/images/cloud/trixie/latest}"
-DEBIAN_IMAGE_NAME="${DEBIAN_IMAGE_NAME:-debian-13-nocloud-$GUEST_ARCH.qcow2}"
+# Debian stopped publishing the nocloud variant in releases after 20261103-2651.
+# Pin the last release that has it; the generic variant ships cloud-init.
+DEBIAN_RELEASE="${DEBIAN_RELEASE:-20261103-2651}"
+DEBIAN_BASE_URL="${DEBIAN_BASE_URL:-https://cloud.debian.org/images/cloud/trixie/$DEBIAN_RELEASE}"
+DEBIAN_IMAGE_NAME="${DEBIAN_IMAGE_NAME:-debian-13-nocloud-$GUEST_ARCH-$DEBIAN_RELEASE.qcow2}"
 SOURCE_IMAGE="$CACHE_DIR/$DEBIAN_IMAGE_NAME"
 STAMP="$OUTPUT_DIR/.build-stamp"
 
