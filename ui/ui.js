@@ -307,7 +307,7 @@ function renderMachine(state) {
     $("volume").style.setProperty("--level", `${level * 100}%`);
     for (const button of document.querySelectorAll(".modifier-keys .key")) button.ariaPressed = state.modifiers.has(Number(button.dataset.code));
   }
-  const open = layout.windows(state.layout);
+  const open = [...layout.windows(state.layout), ...Object.keys(state.floats)];
   $("window-menu").hidden = !vm?.running;
   $("open-display").hidden = open.includes(layout.DISPLAY);
   if (session?.name !== (vm?.running ? vm.name : null)) {
@@ -323,24 +323,29 @@ function renderMachine(state) {
   opening.forEach(startShell);
 }
 
-// The windows tiled as the layout says, or the zoomed one alone. Windows are
-// moved, never rebuilt, so their connections keep running; a resize only sets
-// the sizes of the splits rendered for the same structure.
+// The windows tiled as the layout says, or the zoomed one alone, above the
+// ones floating over it. Windows are moved, never rebuilt, so their
+// connections keep running; a resize only sets the sizes of the splits
+// rendered for the same structure, and a move only the floating window's box.
 
 const STATIC_WINDOWS = { [layout.DISPLAY]: $("display-window") };
 let structure = null;
 let splits = [];
+// The stacking of the floating windows, raised by pointing at them.
+let front = 0;
 
 const windowElements = () => [...Object.values(STATIC_WINDOWS), ...[...session.shells.values()].map((entry) => entry.window)];
+const windowFor = (id) => STATIC_WINDOWS[id] ?? session.shells.get(id).window;
 
 function decorate(window, id) {
   window.dataset.window = id;
   window.querySelector(".window-bar").append($("window-buttons").content.cloneNode(true));
+  window.append(element("span", "window-resize"));
 }
 for (const [id, window] of Object.entries(STATIC_WINDOWS)) decorate(window, id);
 
 function build(node, path) {
-  if (typeof node === "string") return STATIC_WINDOWS[node] ?? session.shells.get(node).window;
+  if (typeof node === "string") return windowFor(node);
   const split = element("div", `split ${node.split}`);
   split.append(build(node.first, [...path, "first"]), element("div", "divider"), build(node.second, [...path, "second"]));
   splits.push({ split, path });
@@ -348,22 +353,50 @@ function build(node, path) {
 }
 
 function renderWorkspace(state) {
+  const floating = state.floats;
   const tiling = state.zoomed ?? state.layout;
-  const next = JSON.stringify(tiling, (key, value) => (key === "ratio" ? undefined : value));
+  $("workspace").classList.toggle("zoomed", Boolean(state.zoomed));
+  const next = JSON.stringify({ tiling, floats: Object.keys(floating) }, (key, value) => (key === "ratio" ? undefined : value));
   if (next !== structure) {
     structure = next;
     splits = [];
     // A window keeps no share from the split it was in before.
     for (const window of windowElements()) window.style.flexGrow = "";
     $("parked").append(...windowElements());
-    $("workspace").replaceChildren(tiling === null ? element("p", "workspace-empty", "No windows open. Open one from the bar above.") : build(tiling, []));
+    $("tiling").replaceChildren(...(tiling === null ? [] : [build(tiling, [])]));
+    // Floats stack in the order they were made, the newest on top.
+    front = 0;
+    for (const id of Object.keys(floating)) windowFor(id).style.zIndex = String(++front);
+    $("floats").replaceChildren(...Object.keys(floating).map(windowFor));
+    if (tiling === null && !Object.keys(floating).length) {
+      $("tiling").append(element("p", "workspace-empty", "No windows open. Open one from the bar above."));
+    }
   }
   for (const { split, path } of splits) {
     const { ratio } = layout.at(tiling, path);
     split.firstElementChild.style.flexGrow = ratio;
     split.lastElementChild.style.flexGrow = 1 - ratio;
   }
-  for (const window of windowElements()) window.querySelector("[data-action=zoom]").ariaPressed = state.zoomed === window.dataset.window;
+  for (const window of windowElements()) {
+    const id = window.dataset.window;
+    const box = floating[id];
+    if (box) {
+      Object.assign(window.style, {
+        left: `${box.x * 100}%`,
+        top: `${box.y * 100}%`,
+        width: `${box.width * 100}%`,
+        height: `${box.height * 100}%`,
+      });
+    } else {
+      Object.assign(window.style, { left: "", top: "", width: "", height: "", zIndex: "" });
+    }
+    // A floating window is resized by its own corner, not filled or docked.
+    window.querySelector("[data-action=zoom]").hidden = Boolean(box);
+    window.querySelector("[data-action=zoom]").ariaPressed = state.zoomed === id;
+    const float = window.querySelector("[data-action=float]");
+    float.ariaPressed = Boolean(box);
+    float.ariaLabel = float.title = box ? "Dock the window" : "Float the window";
+  }
 }
 
 const toggleZoom = (id) => data.setZoomed(data.state.zoomed === id ? null : id);
@@ -373,17 +406,34 @@ $("workspace").addEventListener("click", (event) => {
   if (!button) return;
   const id = button.closest(".window").dataset.window;
   if (button.dataset.action === "close") data.closeWindow(id);
+  else if (button.dataset.action === "float") (data.state.floats[id] ? data.sinkWindow : data.floatWindow)(id);
   else toggleZoom(id);
 });
 $("workspace").addEventListener("dblclick", (event) => {
   const bar = event.target.closest(".window-bar");
-  if (bar && !event.target.closest("button, input")) toggleZoom(bar.closest(".window").dataset.window);
+  const id = bar?.closest(".window").dataset.window;
+  if (bar && !event.target.closest("button, input") && !data.state.floats[id]) toggleZoom(id);
 });
 $("workspace").addEventListener("pointerdown", (event) => {
+  // A floating window comes to the front of the other ones.
+  const floating = event.target.closest(".floats .window");
+  if (floating) floating.style.zIndex = String(++front);
   if (event.target.classList.contains("divider")) return resizeSplit(event);
+  const handle = event.target.closest(".window-resize");
+  if (handle) return dragFloat(event, handle, true);
   const bar = event.target.closest(".window-bar");
-  if (bar && !event.target.closest("button, input") && !data.state.zoomed) dragWindow(event, bar);
+  if (!bar || event.target.closest("button, input")) return;
+  const id = bar.closest(".window").dataset.window;
+  if (data.state.floats[id]) dragFloat(event, bar);
+  else if (!data.state.zoomed) dragWindow(event, bar);
 });
+
+// `element` follows the pointer with `move` until the pointer is released.
+function following(element, event, move) {
+  element.setPointerCapture(event.pointerId);
+  element.addEventListener("pointermove", move);
+  element.addEventListener("lostpointercapture", () => element.removeEventListener("pointermove", move), { once: true });
+}
 
 // Dragging a divider sets the share of its split under the pointer.
 function resizeSplit(event) {
@@ -391,13 +441,10 @@ function resizeSplit(event) {
   const split = divider.parentElement;
   const { path } = splits.find((entry) => entry.split === split);
   const row = split.classList.contains("row");
-  const move = (event) => {
+  following(divider, event, (event) => {
     const box = split.getBoundingClientRect();
     data.resizeSplit(path, row ? (event.clientX - box.left) / box.width : (event.clientY - box.top) / box.height);
-  };
-  divider.setPointerCapture(event.pointerId);
-  divider.addEventListener("pointermove", move);
-  divider.addEventListener("lostpointercapture", () => divider.removeEventListener("pointermove", move), { once: true });
+  });
 }
 
 // Dragging a window by its bar onto another shows where it would go: beside
@@ -410,7 +457,8 @@ function dragWindow(event, bar) {
   const move = (event) => {
     const target = document.elementFromPoint(event.clientX, event.clientY)?.closest("#workspace .window");
     window.classList.add("dragging");
-    $("drop").hidden = !target || target === window;
+    // Floating windows do not tile, so dropping onto one shows nothing.
+    $("drop").hidden = !target || target === window || Boolean(data.state.floats[target.dataset.window]);
     if ($("drop").hidden) return (drop = null);
     const box = target.getBoundingClientRect();
     drop = { target: target.dataset.window, side: layout.dropSide((event.clientX - box.left) / box.width, (event.clientY - box.top) / box.height) };
@@ -432,6 +480,19 @@ function dragWindow(event, bar) {
     window.classList.remove("dragging");
     $("drop").hidden = true;
   }, { once: true });
+}
+
+// Dragging a floating window's bar moves it, its corner resizes it.
+function dragFloat(event, element, resize) {
+  const id = element.closest(".window").dataset.window;
+  const start = data.state.floats[id];
+  const box = $("workspace").getBoundingClientRect();
+  const from = { x: event.clientX / box.width, y: event.clientY / box.height };
+  const change = resize ? layout.sized : layout.moved;
+  following(element, event, (event) => data.moveFloat(
+    id,
+    change(start, event.clientX / box.width - from.x, event.clientY / box.height - from.y),
+  ));
 }
 
 $("open-display").onclick = () => data.openWindow(layout.DISPLAY);

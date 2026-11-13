@@ -58,9 +58,34 @@ export function dropSide(x, y) {
 }
 
 // A shell id no window has; ids name the shell's tmux session.
-export function newShell(node) {
-  const taken = new Set(windows(node));
+export function newShell(ids) {
+  const taken = new Set(ids);
   let number = 2;
   while (taken.has(`shell-${number}`)) number++;
   return `shell-${number}`;
 }
+
+// A floating window's box as fractions of the workspace. A new one steps down
+// and right from the ones before it, so they cascade instead of stacking.
+export function floatBox(count) {
+  const offset = Math.min(count * 0.03, 0.18);
+  return { x: 0.1 + offset, y: 0.1 + offset, width: 0.55, height: 0.62 };
+}
+
+const MIN_WIDTH = 0.25;
+const MIN_HEIGHT = 0.2;
+const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+
+// `box` moved by `dx` and `dy`, kept where its bar stays reachable.
+export const moved = (box, dx, dy) => ({
+  ...box,
+  x: clamp(box.x + dx, 0, 1 - box.width),
+  y: clamp(box.y + dy, 0, 1 - box.height),
+});
+
+// `box` resized by `dx` and `dy`, no smaller than its controls need.
+export const sized = (box, dx, dy) => ({
+  ...box,
+  width: clamp(box.width + dx, MIN_WIDTH, Math.max(MIN_WIDTH, 1 - box.x)),
+  height: clamp(box.height + dy, MIN_HEIGHT, Math.max(MIN_HEIGHT, 1 - box.y)),
+});

@@ -64,7 +64,10 @@
   </section>
 
   <section class="machine" id="machine">
-    <div class="workspace" id="workspace"></div>
+    <div class="workspace" id="workspace">
+      <div class="tiling" id="tiling"></div>
+      <div class="floats" id="floats"></div>
+    </div>
     <div class="stopped" id="stopped">
       <p>This machine is stopped. Its disk is kept until you delete it.</p>
       <button class="btn primary" id="machine-start">Start</button>
@@ -176,6 +179,9 @@
 
 <template id="window-buttons">
   <span class="window-buttons">
+    <button class="mute" data-action="float" aria-label="Float the window" title="Float the window">
+      <svg viewBox="0 0 24 24"><rect x="3" y="3" width="12" height="12" rx="2"/><path d="M9 21h12V9"/></svg>
+    </button>
     <button class="mute" data-action="zoom" aria-label="Fill the page" title="Fill the page">
       <svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
     </button>

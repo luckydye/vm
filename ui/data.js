@@ -7,6 +7,7 @@ const TOKEN_KEY = "vm-token";
 const VOLUME_KEY = "vm-volume";
 const MUTED_KEY = "vm-muted";
 const LAYOUTS_KEY = "vm-layouts";
+const FLOATS_KEY = "vm-floats";
 
 // The token from the URL `vm serve --ui` prints, kept for later visits
 // and taken out of the address bar.
@@ -39,7 +40,13 @@ export const state = {
   // kept for later visits; see layout.js. A machine starts with the initial one.
   layouts: JSON.parse(localStorage.getItem(LAYOUTS_KEY) ?? "{}"),
   get layout() {
-    return this.layouts[this.selected] ?? layout.INITIAL;
+    return this.selected in this.layouts ? this.layouts[this.selected] : layout.INITIAL;
+  },
+  // The windows floating above each machine's tiling, by machine name and
+  // window id, as boxes in fractions of the workspace; see layout.js.
+  floatLayouts: JSON.parse(localStorage.getItem(FLOATS_KEY) ?? "{}"),
+  get floats() {
+    return this.floatLayouts[this.selected] ?? {};
   },
   // The window filling the machine page on its own, if any.
   zoomed: null,
@@ -95,10 +102,12 @@ async function refresh() {
   const { vms, host } = await call("ls");
   state.vms = vms;
   // Layouts of machines that are gone go with them.
-  const kept = Object.fromEntries(Object.entries(state.layouts).filter(([name]) => vms.some((vm) => vm.name === name)));
-  if (Object.keys(kept).length !== Object.keys(state.layouts).length) {
-    state.layouts = kept;
-    saveLayouts();
+  for (const key of ["layouts", "floatLayouts"]) {
+    const kept = Object.fromEntries(Object.entries(state[key]).filter(([name]) => vms.some((vm) => vm.name === name)));
+    if (Object.keys(kept).length !== Object.keys(state[key]).length) {
+      state[key] = kept;
+      saveLayouts();
+    }
   }
   const machines = Object.fromEntries(vms.filter((vm) => vm.running).map((vm) => [vm.name, { memory_bytes: vm.memory_bytes, cpu_ms: vm.cpu_ms }]));
   state.usage = [...state.usage.slice(1 - USAGE_SAMPLES), { host, machines }];
@@ -199,12 +208,15 @@ export function select(name) {
   navigate();
 }
 
-const saveLayouts = () => localStorage.setItem(LAYOUTS_KEY, JSON.stringify(state.layouts));
+function saveLayouts() {
+  localStorage.setItem(LAYOUTS_KEY, JSON.stringify(state.layouts));
+  localStorage.setItem(FLOATS_KEY, JSON.stringify(state.floatLayouts));
+}
 
 function setLayout(next) {
   state.layouts[state.selected] = next;
   saveLayouts();
-  if (!layout.windows(next).includes(state.zoomed)) state.zoomed = null;
+  if (![...layout.windows(next), ...Object.keys(state.floats)].includes(state.zoomed)) state.zoomed = null;
   changed();
 }
 
@@ -214,9 +226,37 @@ export function openWindow(id) {
   state.zoomed = null;
   setLayout(layout.added(state.layout, id));
 }
-export const openShell = () => openWindow(layout.newShell(state.layout));
+export const openShell = () => openWindow(layout.newShell([...layout.windows(state.layout), ...Object.keys(state.floats)]));
 
-export const removeWindow = (id) => setLayout(layout.without(state.layout, id));
+// Takes the window out of the tiling and floats it over the workspace.
+export function floatWindow(id) {
+  state.floatLayouts[state.selected] = { ...state.floats, [id]: layout.floatBox(Object.keys(state.floats).length) };
+  if (state.zoomed === id) state.zoomed = null;
+  setLayout(layout.without(state.layout, id));
+}
+
+// Puts a floating window back into the tiling.
+export function sinkWindow(id) {
+  const floats = { ...state.floats };
+  delete floats[id];
+  state.floatLayouts[state.selected] = floats;
+  setLayout(layout.added(state.layout, id));
+}
+
+export function moveFloat(id, box) {
+  state.floatLayouts[state.selected] = { ...state.floats, [id]: box };
+  saveLayouts();
+  changed();
+}
+
+export function removeWindow(id) {
+  if (state.floats[id]) {
+    const floats = { ...state.floats };
+    delete floats[id];
+    state.floatLayouts[state.selected] = floats;
+  }
+  setLayout(layout.without(state.layout, id));
+}
 
 // Closing a shell's window ends its tmux session.
 export function closeWindow(id) {
@@ -228,6 +268,7 @@ export function closeWindow(id) {
 }
 
 export function setZoomed(id) {
+  if (state.floats[id]) return;
   state.zoomed = id;
   changed();
 }

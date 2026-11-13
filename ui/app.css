@@ -90,12 +90,14 @@ h1, h2 { margin: 0; font-weight: 600; letter-spacing: -0.02em; }
   z-index: 5;
   display: flex;
   align-items: center;
-  gap: 12px;
-  height: 56px;
-  padding: 0 24px;
+  gap: 10px;
+  height: 40px;
+  padding: 0 16px;
   background: var(--background);
   border-bottom: 1px solid var(--gray-400);
 }
+.top .btn { height: 26px; padding: 0 9px; font-size: 13px; }
+.top .btn.icon { width: 26px; }
 .brand {
   display: flex;
   align-items: center;
@@ -107,8 +109,8 @@ h1, h2 { margin: 0; font-weight: 600; letter-spacing: -0.02em; }
   letter-spacing: -0.01em;
   cursor: pointer;
 }
-.crumbs { display: flex; align-items: center; gap: 12px; font: 500 13.5px var(--mono); }
-.crumbs::before { content: ""; width: 1px; height: 18px; background: var(--gray-500); transform: rotate(20deg); }
+.crumbs { display: flex; align-items: center; gap: 12px; font: 500 13px var(--mono); }
+.crumbs::before { content: ""; width: 1px; height: 14px; background: var(--gray-500); transform: rotate(20deg); }
 .crumbs:empty { display: none; }
 .host { flex: none; font-size: 13px; color: var(--gray-900); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .host::before { content: ""; display: inline-block; width: 6px; height: 6px; margin: 0 6px 1px 0; border-radius: 50%; background: var(--green); }
@@ -123,19 +125,19 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: 
 
 /* Host usage as compact sparklines in the header, each with its figures beside it. */
 /* Metrics that don't fit wrap onto a second line, which is clipped away. */
-.summary { display: flex; flex-wrap: wrap; column-gap: 24px; min-width: 0; height: 36px; overflow: hidden; }
-.metric { display: flex; align-items: center; gap: 12px; height: 36px; }
-.metric h3 { display: flex; align-items: baseline; gap: 8px; margin: 0; font-size: 12.5px; font-weight: 600; }
-.metric h3 small { font-size: 12px; font-weight: 400; color: var(--gray-700); }
+.summary { display: flex; flex-wrap: wrap; column-gap: 20px; min-width: 0; height: 26px; overflow: hidden; }
+.metric { display: flex; align-items: center; gap: 10px; height: 26px; }
+.metric h3 { display: flex; align-items: baseline; gap: 6px; margin: 0; font-size: 11.5px; line-height: 13px; font-weight: 600; }
+.metric h3 small { font-size: 11px; font-weight: 400; color: var(--gray-700); }
 
 /* Machines share one hue; the hairline between their layers tells them apart. */
-.usage-chart { flex: none; width: 120px; height: 28px; border-bottom: 1px solid var(--gray-400); }
+.usage-chart { flex: none; width: 88px; height: 22px; border-bottom: 1px solid var(--gray-400); }
 .usage-chart path { stroke: var(--background); stroke-width: 1px; vector-effect: non-scaling-stroke; }
 .machine-layer { fill: var(--chart-machine); background: var(--chart-machine); fill-opacity: 0.55; }
 .host-layer { fill: var(--gray-500); background: var(--gray-500); }
 .usage-chart .hovered { fill-opacity: 1; }
 .usage-chart .crosshair { stroke: var(--gray-900); stroke-width: 1px; vector-effect: non-scaling-stroke; }
-.usage-legend { display: flex; gap: 10px; margin: 2px 0 0; font-size: 11.5px; color: var(--gray-900); }
+.usage-legend { display: flex; gap: 8px; margin: 0; font-size: 10.5px; line-height: 13px; color: var(--gray-900); }
 .usage-legend .entry { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
 .usage-legend .swatch { flex: none; width: 7px; height: 7px; border-radius: 2px; }
 .usage-legend .value { font-family: var(--mono); color: var(--gray-1000); }
@@ -233,7 +235,13 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: 
 /* The machine's windows tile the page like a tiling window manager: each
    split shares its space between two nodes, a divider between them. */
 .machine { flex: 1; min-height: 0; display: flex; padding: 12px; }
-.workspace { flex: 1; min-width: 0; min-height: 0; display: flex; }
+.workspace { position: relative; flex: 1; min-width: 0; min-height: 0; display: flex; }
+.tiling { position: relative; flex: 1; min-width: 0; min-height: 0; display: flex; }
+/* Floating windows sit above the tiling, except a fill that is in front of everything. */
+.floats { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
+.workspace.zoomed .tiling { z-index: 2; }
+/* Filling the page takes the padding around the machine too. */
+.machine:has(> .workspace.zoomed:not([hidden])) { padding: 0; }
 .split { flex: 1 1 0; min-width: 0; min-height: 0; display: flex; }
 .split.column { flex-direction: column; }
 .split > * { flex-basis: 0; }
@@ -256,13 +264,35 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: 
   overflow: hidden;
 }
 .window.dragging { opacity: 0.5; }
+.floats .window { position: absolute; pointer-events: auto; box-shadow: var(--shadow-lg); }
+.window-resize { display: none; }
+.floats .window-resize {
+  display: block;
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 18px;
+  height: 18px;
+  cursor: nwse-resize;
+  touch-action: none;
+}
+.floats .window-resize::after {
+  content: "";
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  width: 7px;
+  height: 7px;
+  border-right: 2px solid var(--gray-500);
+  border-bottom: 2px solid var(--gray-500);
+}
 .window-bar {
   flex: none;
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 36px;
-  padding: 0 6px 0 12px;
+  height: 28px;
+  padding: 0 4px 0 10px;
   border-bottom: 1px solid var(--gray-400);
   font-size: 13px;
   font-weight: 500;
