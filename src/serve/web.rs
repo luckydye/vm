@@ -24,6 +24,9 @@ const FILES: &[(&str, &str, &[u8])] = &[
     ("/data.js", "text/javascript", include_bytes!("../../ui/data.js")),
     ("/layout.js", "text/javascript", include_bytes!("../../ui/layout.js")),
     ("/logo.png", "image/png", include_bytes!("../../assets/logo.png")),
+    ("/manifest.webmanifest", "application/manifest+json", include_bytes!("../../ui/manifest.webmanifest")),
+    ("/icon-192.png", "image/png", include_bytes!("../../assets/icon-192.png")),
+    ("/icon-512.png", "image/png", include_bytes!("../../assets/icon-512.png")),
 ];
 
 /// WebSocket messages carry stream data; a frame is never this big.
