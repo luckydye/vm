@@ -644,6 +644,11 @@ pub(crate) fn usage(instance: &instance::Instance) -> Result<Option<protocol::Re
         Ok(protocol::Reply { error: Some(error), .. }) => {
             Err(format!("VM {} did not report its usage: {error}", instance.name))
         }
+        // A VM started by an older vm binary leaves out fields added since.
+        Ok(reply) if reply.memory_bytes.is_none() || reply.cpu_ms.is_none() || reply.suspended.is_none() => Err(format!(
+            "VM {} runs an older vm version that does not report its full usage, restart it with `vm stop {}`",
+            instance.name, instance.name
+        )),
         Ok(reply) => Ok(Some(reply)),
         // The VM stopped after the check.
         Err(_) if !instance.is_running() => Ok(None),
