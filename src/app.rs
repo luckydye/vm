@@ -1,6 +1,7 @@
 #[cfg(target_os = "macos")]
 use crate::macos_ui;
 use crate::{
+    clipboard,
     devices::{RuntimeEvent, RuntimeInputEvent},
     display::{DisplayBuffer, DisplayEvent, PresentMode, Presenter},
     virtio::input::keys::*,
@@ -136,6 +137,9 @@ fn winit_to_linux_key(key: winit::keyboard::KeyCode) -> Option<u16> {
 struct AppState<'a> {
     display: &'a Mutex<DisplayBuffer>,
     host_tx: Sender<RuntimeEvent>,
+    clipboard: &'a clipboard::Guest,
+    /// Whether Ctrl is held, which makes V paste the host clipboard.
+    ctrl: bool,
 
     presenter: Option<Presenter>,
 
@@ -163,10 +167,17 @@ struct AppState<'a> {
 }
 
 impl<'a> AppState<'a> {
-    fn new(display: &'a Mutex<DisplayBuffer>, host_tx: Sender<RuntimeEvent>, initial_size: (u32, u32)) -> Self {
+    fn new(
+        display: &'a Mutex<DisplayBuffer>,
+        host_tx: Sender<RuntimeEvent>,
+        clipboard: &'a clipboard::Guest,
+        initial_size: (u32, u32),
+    ) -> Self {
         Self {
             display,
             host_tx,
+            clipboard,
+            ctrl: false,
             initial_size,
             presenter: None,
             surface_w: 0,
@@ -419,9 +430,19 @@ impl<'a> ApplicationHandler<DisplayEvent> for AppState<'a> {
                 self.set_mouse_capture(false);
             }
 
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.ctrl = modifiers.state().control_key();
+            }
+
             WindowEvent::KeyboardInput { event, .. } => {
                 let pressed = event.state == ElementState::Pressed;
                 if let PhysicalKey::Code(code) = event.physical_key {
+                    // Ctrl+V first puts the host clipboard into the guest clipboard, so it pastes that.
+                    if code == KeyCode::KeyV && pressed && self.ctrl && !event.repeat {
+                        if let Err(error) = self.clipboard.paste(clipboard::read()) {
+                            eprintln!("clipboard: {error}");
+                        }
+                    }
                     if code == KeyCode::F12 {
                         if pressed {
                             self.set_mouse_capture(!self.mouse_captured);
@@ -572,8 +593,9 @@ pub fn run(
     event_loop: EventLoop<DisplayEvent>,
     display: &Mutex<DisplayBuffer>,
     host_tx: Sender<RuntimeEvent>,
+    clipboard: &clipboard::Guest,
     initial_size: (u32, u32),
 ) {
-    let mut app = AppState::new(display, host_tx, initial_size);
+    let mut app = AppState::new(display, host_tx, clipboard, initial_size);
     event_loop.run_app(&mut app).unwrap();
 }

@@ -45,7 +45,7 @@ pub mod kind {
     pub const CLOSE: u8 = 9;
     pub const SETUP_DONE: u8 = 10;
     pub const TELEMETRY: u8 = 11;
-    /// The host clipboard image as PNG for the guest clipboard, empty to clear it.
+    /// A PNG for the guest clipboard from a client's Ctrl+V, empty to clear it.
     pub const CLIPBOARD_IMAGE: u8 = 12;
     /// A [`RegistryTokenRequest`] from the guest, answered with a [`RegistryToken`].
     pub const REGISTRY_TOKEN: u8 = 13;
@@ -54,6 +54,12 @@ pub mod kind {
     pub const STORE: u8 = 14;
     /// A piece of a store request's or reply's body; an empty one ends it.
     pub const STORE_DATA: u8 = 15;
+    /// Text for the guest clipboard from a client's Ctrl+V, or text the
+    /// control socket tells clients was copied in the guest.
+    pub const CLIPBOARD_TEXT: u8 = 16;
+    /// Answers a paste on a [`super::Request::Clipboard`] connection once the
+    /// guest clipboard holds it, with why it does not when the payload is not empty.
+    pub const CLIPBOARD_PASTED: u8 = 17;
 }
 
 /// The kinds of messages in an H.264 [`Request::Stream`].
@@ -164,6 +170,10 @@ pub enum Request {
     /// scaled down to at most the VM's configured pixel count.
     Resize { width: u32, height: u32 },
     Open { session: Session },
+    /// Frames until the client disconnects: [`kind::CLIPBOARD_TEXT`] whenever
+    /// text is copied in the guest, and an answer to each paste the client
+    /// sends, see [`kind::CLIPBOARD_PASTED`].
+    Clipboard,
     /// What the VM process takes from the host, in [`Reply::memory_bytes`]
     /// and [`Reply::cpu_ms`].
     Usage,

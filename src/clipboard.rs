@@ -1,3 +1,12 @@
+//! The host clipboard, and the guest clipboard that varmint-clipboard-agent
+//! serves on the `clipboard` console port. Text copied in the guest goes to the
+//! window and to `vm run` and `vm screen` clients, which put it on their host
+//! clipboard. The host clipboard goes into the guest only when Ctrl+V pastes it.
+
+use crate::{
+    devices::RuntimeEvent,
+    protocol::{Frame, MAX_PAYLOAD, kind},
+};
 #[cfg(target_os = "macos")]
 use objc2_app_kit::{
     NSBitmapImageFileType, NSBitmapImageRep, NSPasteboard, NSPasteboardTypePNG, NSPasteboardTypeString,
@@ -6,50 +15,57 @@ use objc2_app_kit::{
 #[cfg(target_os = "macos")]
 use objc2_foundation::{NSDictionary, NSString};
 use std::{
-    collections::hash_map::DefaultHasher,
-    hash::{Hash, Hasher},
-    sync::mpsc::{Receiver, Sender, TryRecvError},
-    thread,
+    sync::{
+        Condvar, Mutex,
+        atomic::{AtomicU64, Ordering},
+        mpsc::{Receiver, Sender, channel},
+    },
     time::Duration,
 };
 
-pub struct Sink {
-    tx: Sender<Vec<u8>>,
+/// What a paste puts into the guest clipboard; empty clears it.
+pub enum Content {
+    Text(Vec<u8>),
+    Png(Vec<u8>),
 }
 
-impl Sink {
-    pub fn push(&self, bytes: Vec<u8>) {
-        let _ = self.tx.send(bytes);
+impl Content {
+    /// A paste a client sent in a [`kind::CLIPBOARD_TEXT`] or [`kind::CLIPBOARD_IMAGE`] frame.
+    pub fn from_frame(frame: Frame) -> Option<Content> {
+        match frame.kind {
+            kind::CLIPBOARD_TEXT => Some(Content::Text(frame.payload)),
+            kind::CLIPBOARD_IMAGE => Some(Content::Png(frame.payload)),
+            _ => None,
+        }
+    }
+
+    pub fn into_frame(self, stream: u32) -> Frame {
+        match self {
+            Content::Text(text) => Frame::new(stream, kind::CLIPBOARD_TEXT, text),
+            Content::Png(png) => Frame::new(stream, kind::CLIPBOARD_IMAGE, png),
+        }
     }
 }
 
-pub fn start(on_host_change: impl FnMut(Vec<u8>) + Send + 'static) -> Sink {
-    let (tx, rx) = std::sync::mpsc::channel();
-    thread::Builder::new()
-        .name("varmint-clipboard".into())
-        .spawn(move || run(rx, on_host_change))
-        .unwrap_or_else(|error| panic!("failed to spawn clipboard thread: {error}"));
-    Sink { tx }
-}
-
-const POLL_INTERVAL: Duration = Duration::from_millis(250);
-
-fn hash_bytes(bytes: &[u8]) -> u64 {
-    let mut h = DefaultHasher::new();
-    bytes.hash(&mut h);
-    h.finish()
+/// The host clipboard for a paste: its image, otherwise its text.
+pub fn read() -> Content {
+    let read = || {
+        let pasteboard = Pasteboard::general();
+        match pasteboard.read_png() {
+            Some(png) => Content::Png(png),
+            None => Content::Text(pasteboard.read_text().unwrap_or_default()),
+        }
+    };
+    #[cfg(target_os = "macos")]
+    return objc2::rc::autoreleasepool(|_| read());
+    #[cfg(target_os = "linux")]
+    read()
 }
 
 /// Puts `text` on the host clipboard from a command that exits right after.
 #[cfg(target_os = "macos")]
 pub fn copy_text(text: &[u8]) {
     objc2::rc::autoreleasepool(|_| Pasteboard::general().write_text(text));
-}
-
-/// The host clipboard image as PNG.
-#[cfg(target_os = "macos")]
-pub fn read_png() -> Option<Vec<u8>> {
-    objc2::rc::autoreleasepool(|_| Pasteboard::general().read_png())
 }
 
 #[cfg(target_os = "macos")]
@@ -62,10 +78,6 @@ impl Pasteboard {
     pub fn general() -> Pasteboard {
         let inner = NSPasteboard::generalPasteboard();
         Pasteboard { inner }
-    }
-
-    fn change_count(&self) -> isize {
-        self.inner.changeCount()
     }
 
     fn read_text(&self) -> Option<Vec<u8>> {
@@ -139,12 +151,6 @@ pub fn serve_text() {
         .expect("failed to serve the clipboard");
 }
 
-/// The host clipboard image as PNG.
-#[cfg(target_os = "linux")]
-pub fn read_png() -> Option<Vec<u8>> {
-    Pasteboard::general().read_png()
-}
-
 #[cfg(target_os = "linux")]
 pub struct Pasteboard {
     inner: std::cell::RefCell<arboard::Clipboard>,
@@ -155,11 +161,6 @@ impl Pasteboard {
     pub fn general() -> Pasteboard {
         let inner = arboard::Clipboard::new().unwrap_or_else(|error| panic!("cannot open the clipboard: {error}"));
         Pasteboard { inner: inner.into() }
-    }
-
-    /// Changes with the clipboard text, which X11 and Wayland do not count.
-    fn change_count(&self) -> isize {
-        self.read_text().map_or(0, |text| hash_bytes(&text) as isize)
     }
 
     fn read_text(&self) -> Option<Vec<u8>> {
@@ -187,84 +188,118 @@ impl Pasteboard {
     }
 }
 
-struct Deframer {
-    buf: Vec<u8>,
+/// How long a paste waits for varmint-clipboard-agent, which runs on the guest desktop.
+const PASTE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Frames on the clipboard port are `[u32 len][u8 type][u32 paste][payload]`,
+/// little endian, where `len` counts the payload.
+const HEADER_LEN: usize = 9;
+
+/// The frame types on the clipboard port.
+mod port {
+    /// Text copied in the guest, or pasted into it.
+    pub const TEXT: u8 = 0;
+    /// A PNG pasted into the guest.
+    pub const PNG: u8 = 1;
+    /// The guest clipboard holds paste number `paste`.
+    pub const PASTED: u8 = 2;
 }
 
-impl Deframer {
-    fn new() -> Deframer {
-        Deframer { buf: Vec::new() }
-    }
-
-    fn push(&mut self, bytes: &[u8], mut on_frame: impl FnMut(Vec<u8>)) {
-        self.buf.extend_from_slice(bytes);
-
-        loop {
-            if self.buf.len() < FRAME_LEN_PREFIX {
-                return;
-            }
-            let len = u32::from_le_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]) as usize;
-
-            if len > MAX_FRAME {
-                self.buf.remove(0);
-                continue;
-            }
-
-            let total = FRAME_LEN_PREFIX + len;
-            if self.buf.len() < total {
-                return;
-            }
-
-            let payload = self.buf[FRAME_LEN_PREFIX..total].to_vec();
-            self.buf.drain(..total);
-            on_frame(payload);
-        }
-    }
+/// The guest clipboard, served by varmint-clipboard-agent on the `clipboard` console port.
+pub struct Guest {
+    to_guest: Sender<RuntimeEvent>,
+    /// Bytes from the port that do not form a whole frame yet.
+    received: Mutex<Vec<u8>>,
+    /// Who gets the text copied in the guest, by subscription number.
+    subscribers: Mutex<Vec<(u64, Sender<Vec<u8>>)>>,
+    next_subscriber: AtomicU64,
+    /// The number of the last paste; held while that paste waits, so pastes take turns.
+    sent: Mutex<u32>,
+    /// The number of the last paste the guest clipboard took.
+    pasted: Mutex<u32>,
+    pasted_changed: Condvar,
 }
 
-const FRAME_LEN_PREFIX: usize = 4;
+impl Guest {
+    pub fn new(to_guest: Sender<RuntimeEvent>) -> Guest {
+        Guest {
+            to_guest,
+            received: Mutex::new(Vec::new()),
+            subscribers: Mutex::new(Vec::new()),
+            next_subscriber: AtomicU64::new(0),
+            sent: Mutex::new(0),
+            pasted: Mutex::new(0),
+            pasted_changed: Condvar::new(),
+        }
+    }
 
-const MAX_FRAME: usize = 16 * 1024 * 1024;
+    /// The text copied in the guest from now on, until [`Guest::unsubscribe`].
+    pub fn subscribe(&self) -> (u64, Receiver<Vec<u8>>) {
+        let id = self.next_subscriber.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = channel();
+        self.subscribers.lock().unwrap().push((id, tx));
+        (id, rx)
+    }
 
-fn run(out_rx: Receiver<Vec<u8>>, mut on_input: impl FnMut(Vec<u8>)) {
-    let pb = Pasteboard::general();
+    /// Ends subscription `id`, which ends its receiver.
+    pub fn unsubscribe(&self, id: u64) {
+        self.subscribers.lock().unwrap().retain(|(subscriber, _)| *subscriber != id);
+    }
 
-    let mut last_change = pb.change_count();
-    let mut last_hash = pb.read_text().map(|b| hash_bytes(&b));
-    let mut deframer = Deframer::new();
+    /// Puts `content` into the guest clipboard and returns once it is there,
+    /// so a Ctrl+V sent afterwards pastes it.
+    pub fn paste(&self, content: Content) -> Result<(), String> {
+        let mut sent = self.sent.lock().unwrap();
+        *sent = sent.wrapping_add(1);
+        let (kind, payload) = match content {
+            Content::Text(text) => (port::TEXT, text),
+            Content::Png(png) => (port::PNG, png),
+        };
+        let mut frame = Vec::with_capacity(HEADER_LEN + payload.len());
+        frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        frame.push(kind);
+        frame.extend_from_slice(&sent.to_le_bytes());
+        frame.extend_from_slice(&payload);
+        self.to_guest
+            .send(RuntimeEvent::Clipboard(frame))
+            .expect("runtime event pump exited");
 
-    loop {
-        loop {
-            match out_rx.try_recv() {
-                Ok(bytes) => {
-                    let mut to_write: Option<Vec<u8>> = None;
-                    deframer.push(&bytes, |frame| to_write = Some(frame));
-                    if let Some(frame) = to_write {
-                        let h = hash_bytes(&frame);
-                        if Some(h) != last_hash {
-                            pb.write_text(&frame);
-                            last_hash = Some(h);
-                            last_change = pb.change_count();
-                        }
-                    }
+        let pasted = self.pasted.lock().unwrap();
+        let (_pasted, wait) = self
+            .pasted_changed
+            .wait_timeout_while(pasted, PASTE_TIMEOUT, |pasted| *pasted != *sent)
+            .unwrap();
+        if wait.timed_out() {
+            return Err("the guest clipboard did not take the paste; it needs the guest desktop".into());
+        }
+        Ok(())
+    }
+
+    /// Takes bytes the guest wrote to the clipboard port.
+    pub fn receive(&self, bytes: &[u8]) {
+        let mut received = self.received.lock().unwrap();
+        received.extend_from_slice(bytes);
+        while received.len() >= HEADER_LEN {
+            let len = u32::from_le_bytes(received[0..4].try_into().unwrap()) as usize;
+            assert!(len <= MAX_PAYLOAD, "clipboard frame of {len} bytes exceeds the protocol limit");
+            if received.len() < HEADER_LEN + len {
+                return;
+            }
+            let kind = received[4];
+            let paste = u32::from_le_bytes(received[5..9].try_into().unwrap());
+            let payload: Vec<u8> = received.drain(..HEADER_LEN + len).skip(HEADER_LEN).collect();
+            match kind {
+                port::TEXT => self
+                    .subscribers
+                    .lock()
+                    .unwrap()
+                    .retain(|(_, subscriber)| subscriber.send(payload.clone()).is_ok()),
+                port::PASTED => {
+                    *self.pasted.lock().unwrap() = paste;
+                    self.pasted_changed.notify_all();
                 }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => return,
+                other => panic!("the guest clipboard agent sent frame type {other}"),
             }
         }
-
-        let change = pb.change_count();
-        if change != last_change {
-            last_change = change;
-            if let Some(bytes) = pb.read_text() {
-                let h = hash_bytes(&bytes);
-                if Some(h) != last_hash {
-                    last_hash = Some(h);
-                    on_input(bytes);
-                }
-            }
-        }
-
-        std::thread::sleep(POLL_INTERVAL);
     }
 }

@@ -3,6 +3,7 @@
 use crate::{
     agent::Agent,
     audio,
+    clipboard::{self, Content},
     devices::{RuntimeEvent, RuntimeInputEvent},
     display::{DisplayBuffer, H264Encoder},
     protocol::{self, Codec, Frame, InputEvent, Reply, Request, Session, kind, stream_kind},
@@ -20,7 +21,7 @@ use std::{
     sync::{
         Mutex,
         atomic::{AtomicBool, Ordering},
-        mpsc::{RecvTimeoutError, Sender},
+        mpsc::{Receiver, RecvTimeoutError, Sender},
     },
     thread,
     time::{Duration, Instant},
@@ -41,6 +42,7 @@ pub struct Context<'a> {
     pub suspend: &'a Suspend,
     pub display: &'a Mutex<DisplayBuffer>,
     pub agent: &'a Agent,
+    pub clipboard: &'a clipboard::Guest,
     pub audio: &'a audio::Listeners,
     pub runtime_tx: Sender<RuntimeEvent>,
     /// The configured display size, which bounds the pixel count of resizes.
@@ -152,7 +154,11 @@ fn handle(connection: UnixStream, context: &Context<'_>) -> io::Result<()> {
                 .expect("runtime event pump exited");
             protocol::write_json(&mut writer, &Reply::default())
         }
-        Request::Open { session } => relay(reader, writer, &session, context.agent),
+        Request::Open { session } => relay(reader, writer, &session, context),
+        Request::Clipboard => {
+            protocol::write_json(&mut writer, &Reply::default())?;
+            serve_clipboard(reader, writer, context.clipboard)
+        }
         Request::Usage => protocol::write_json(
             &mut writer,
             &Reply {
@@ -245,32 +251,48 @@ fn inject(event: InputEvent, context: &Context<'_>) {
         .expect("runtime event pump exited");
 }
 
-/// Bridges a client connection to one guest agent stream until either side ends.
-fn relay(mut reader: BufReader<UnixStream>, writer: UnixStream, session: &Session, agent: &Agent) -> io::Result<()> {
+/// Bridges a client connection to one guest agent stream until either side
+/// ends. Pty clients also get the text copied in the guest, and paste into the
+/// guest clipboard in band, so their Ctrl+V that follows pastes it.
+fn relay(mut reader: BufReader<UnixStream>, writer: UnixStream, session: &Session, context: &Context<'_>) -> io::Result<()> {
     let started_at = telemetry::now();
+    let agent = context.agent;
+    let pty = matches!(session, Session::Pty { .. });
     let (stream, from_guest) = agent.open(session);
+    let writer = Mutex::new(writer);
+    let subscription = pty.then(|| context.clipboard.subscribe());
 
     thread::scope(|scope| {
+        let writer = &writer;
         scope.spawn(move || {
-            let mut writer = writer;
             for frame in from_guest {
                 if frame.kind == kind::EXIT {
                     record_command(session, started_at, &frame.payload);
                 }
-                if protocol::write_frame(&mut writer, &frame).is_err() || frame.kind == kind::EXIT {
+                if protocol::write_frame(&mut *writer.lock().unwrap(), &frame).is_err() || frame.kind == kind::EXIT {
                     break;
                 }
             }
-            let _ = writer.shutdown(Shutdown::Both);
+            let _ = writer.lock().unwrap().shutdown(Shutdown::Both);
+        });
+        let id = subscription.map(|(id, copies)| {
+            scope.spawn(move || forward_copies(writer, stream, copies));
+            id
         });
 
         let result = loop {
             match protocol::read_frame(&mut reader) {
-                Ok(Some(frame))
-                    if matches!(frame.kind, kind::DATA | kind::EOF | kind::RESIZE)
-                        || (frame.kind == kind::CLIPBOARD_IMAGE && matches!(session, Session::Pty { .. })) =>
-                {
+                Ok(Some(frame)) if matches!(frame.kind, kind::DATA | kind::EOF | kind::RESIZE) => {
                     agent.send(&Frame::new(stream, frame.kind, frame.payload))
+                }
+                Ok(Some(frame)) if pty && matches!(frame.kind, kind::CLIPBOARD_TEXT | kind::CLIPBOARD_IMAGE) => {
+                    let content = Content::from_frame(frame).expect("a clipboard frame is a paste");
+                    if let Err(error) = context.clipboard.paste(content) {
+                        let message = Frame::new(stream, kind::STDERR, format!("vm: {error}\r\n").into_bytes());
+                        if let Err(error) = protocol::write_frame(&mut *writer.lock().unwrap(), &message) {
+                            break Err(error);
+                        }
+                    }
                 }
                 Ok(Some(frame)) => {
                     break Err(io::Error::new(
@@ -283,8 +305,47 @@ fn relay(mut reader: BufReader<UnixStream>, writer: UnixStream, session: &Sessio
             }
         };
         agent.close(stream);
+        if let Some(id) = id {
+            context.clipboard.unsubscribe(id);
+        }
         result
     })
+}
+
+/// Pastes what the client sends into the guest clipboard, answering each
+/// paste, and sends the client the text copied in the guest.
+fn serve_clipboard(mut reader: BufReader<UnixStream>, writer: UnixStream, clipboard: &clipboard::Guest) -> io::Result<()> {
+    let writer = Mutex::new(writer);
+    let (id, copies) = clipboard.subscribe();
+    thread::scope(|scope| {
+        let writer = &writer;
+        scope.spawn(move || forward_copies(writer, 0, copies));
+        let result = loop {
+            let frame = match protocol::read_frame(&mut reader) {
+                Ok(Some(frame)) => frame,
+                Ok(None) => break Ok(()),
+                Err(error) => break Err(error),
+            };
+            let Some(content) = Content::from_frame(frame) else {
+                break Err(io::Error::new(io::ErrorKind::InvalidData, "clipboard clients may only paste"));
+            };
+            let answer = clipboard.paste(content).err().unwrap_or_default().into_bytes();
+            if let Err(error) = protocol::write_frame(&mut *writer.lock().unwrap(), &Frame::new(0, kind::CLIPBOARD_PASTED, answer)) {
+                break Err(error);
+            }
+        };
+        clipboard.unsubscribe(id);
+        result
+    })
+}
+
+/// Sends the client each text copied in the guest, until the subscription or the client ends.
+fn forward_copies(writer: &Mutex<UnixStream>, stream: u32, copies: Receiver<Vec<u8>>) {
+    for text in copies {
+        if protocol::write_frame(&mut *writer.lock().unwrap(), &Frame::new(stream, kind::CLIPBOARD_TEXT, text)).is_err() {
+            return;
+        }
+    }
 }
 
 /// Records commands run from the host; interactive guest shells report their own.

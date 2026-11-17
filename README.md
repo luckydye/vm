@@ -61,7 +61,7 @@ vm run $vm -- sh -c 'cd work && exec claude'   # or any command
 vm run $vm --                                   # interactive shell
 ```
 
-Add `--window` when you start the VM for a desktop and a shared clipboard. Variables such as `CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_API_KEY` are copied from your shell automatically; pass others with `--env NAME`.
+Add `--window` when you start the VM for a desktop in a window. Variables such as `CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_API_KEY` are copied from your shell automatically; pass others with `--env NAME`.
 
 **4. Get your work back.** With a seed, fetch the VM's branches into your repo as `$vm/BRANCH` and push them from the host with your own credentials:
 
@@ -82,7 +82,7 @@ For a VM that survives restarts, start it with `--persist` instead and start it 
 ```sh
 vm=$(vm run)                  # ephemeral and headless; prints the VM name
 vm run sandbox --persist      # kept across stops, restart with `vm run sandbox`
-vm run --window               # with a window and shared clipboard
+vm run --window               # with a window
 vm run --wait-network         # return once the guest has network and DNS
 vm run --idle-suspend 0       # never suspend when idle (default: after 15 minutes)
 vm run --cpus 8 --memory 8192 --disk 32 --size 1920x1080
@@ -118,7 +118,7 @@ vm ssh $vm                    # regular ssh, tunneled through the agent
 scp -o ProxyCommand="vm proxy $vm 22" file varmint@$vm:   # any TCP port works
 ```
 
-In an interactive session, Ctrl+V first copies the image on the host clipboard into the guest clipboard, so you can paste screenshots into Claude Code.
+Text copied in the guest goes to the host clipboard while an interactive session, `vm screen` or a window is open. Ctrl+V in any of them first puts the host clipboard into the guest clipboard, its image if it has one and its text otherwise, so you can paste screenshots into Claude Code. The host clipboard reaches the guest only this way.
 
 ## Getting files in
 **Mounts** share host directories over virtio-fs, optionally read-only. Files appear owned by the guest user, changes happen as your host user, and the guest cannot follow symlinks out of a share. Relative guest paths are under `/home/varmint`:

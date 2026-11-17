@@ -417,6 +417,7 @@ pub(crate) fn request(target: &Target, request: &ControlRequest) -> Result<Contr
                 request,
                 ControlRequest::Stream { .. }
                     | ControlRequest::InputStream
+                    | ControlRequest::Clipboard
                     | ControlRequest::Open { .. }
                     | ControlRequest::Screenshot
             ) {

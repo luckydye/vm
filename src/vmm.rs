@@ -109,11 +109,7 @@ pub fn run(
         listener,
     } = launch;
     let hardware = instance.hardware().unwrap_or_else(|error| panic!("{error}"));
-    let mut config = VmConfig::new(&instance, &hardware);
-    if window {
-        // Tells the guest to sync the clipboard; headless VMs skip it.
-        config.kernel_args.push_str(" varmint.window=1");
-    }
+    let config = VmConfig::new(&instance, &hardware);
     telemetry::start(&instance.name, &hardware, mounts.len(), window);
 
     if !hardware.persist {
@@ -213,14 +209,11 @@ pub fn run(
     })
     .unwrap_or_else(|error| panic!("failed to start audio output: {error}"));
 
-    // Only a VM with a window syncs the host clipboard; headless isolates only get
-    // clipboard images from interactive `vm run` sessions.
-    let clipboard = window.then(|| {
-        let clipboard_change_tx = runtime_event_tx.clone();
-        clipboard::start(move |payload| {
-            let _ = clipboard_change_tx.send(RuntimeEvent::Clipboard(payload));
-        })
-    });
+    let clipboard = Arc::new(clipboard::Guest::new(runtime_event_tx.clone()));
+    if window {
+        let (_, copies) = clipboard.subscribe();
+        thread::spawn(move || copies.into_iter().for_each(|text| clipboard::copy_text(&text)));
+    }
 
     let serial_rx_tx = runtime_event_tx.clone();
     let serial = stdio::start(move |byte| {
@@ -231,7 +224,7 @@ pub fn run(
         disk,
         net: network,
         audio: period_sink,
-        clipboard,
+        clipboard: clipboard.clone(),
         agent: agent_sink,
         serial,
         shares,
@@ -243,6 +236,7 @@ pub fn run(
         suspend: &suspend,
         display: &display,
         agent: &agent,
+        clipboard: &clipboard,
         audio: &audio_listeners,
         runtime_tx: runtime_event_tx.clone(),
         display_size: (config.width, config.height),
@@ -282,7 +276,7 @@ pub fn run(
             Some(event_loop) => {
                 let control_context = &control_context;
                 scope.spawn(move || control::serve(listener, control_context));
-                app::run(event_loop, display, runtime_event_tx, (config.width, config.height));
+                app::run(event_loop, display, runtime_event_tx, &clipboard, (config.width, config.height));
                 shutdown("window-closed")
             }
             None => {

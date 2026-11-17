@@ -68,8 +68,10 @@ example an agent's skills, settings or ssh key. The contents of the
 are followed. A directory in a git work tree leaves out what .gitignore
 ignores. Changes in the VM never reach the host.
 
-In an interactive session, Ctrl+V first puts the image on the host clipboard
-into the guest clipboard, so programs like Claude Code can paste it.
+Text copied in the guest goes to the host clipboard while an interactive
+session, `vm screen` or a window is open. Ctrl+V in any of them first puts the
+host clipboard into the guest clipboard, its image if it has one and its text
+otherwise, so programs like Claude Code can paste screenshots.
 
 A VM suspends when no client has been attached to it for the idle timeout:
 no command, shell, ssh session, tunnel, screen or stream. Its vCPUs stop, so
@@ -80,7 +82,7 @@ suspends. `vm ls` shows suspended VMs."
                 .into(),
             options: vec![
                 ("--persist", "Keep the VM and its disk after it stops".into()),
-                ("--window", "Show the screen in a window and share the clipboard".into()),
+                ("--window", "Show the screen in a window".into()),
                 (
                     "--idle-suspend MIN",
                     format!(

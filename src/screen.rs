@@ -58,11 +58,13 @@ enum Event {
 }
 
 /// Shows frames from `frames` until the user quits with Ctrl+] or the VM
-/// stops; keyboard and mouse input goes to `input` as JSON lines, and
-/// `resize` asks for a display of the given size whenever the terminal changes.
+/// stops; keyboard and mouse input goes to `input` as JSON lines, Ctrl+V
+/// first calls `paste`, and `resize` asks for a display of the given size
+/// whenever the terminal changes.
 pub fn run(
     mut frames: impl Read + Send + 'static,
     mut input: impl Write + Send + 'static,
+    mut paste: impl FnMut() -> io::Result<()> + Send + 'static,
     resize: impl FnMut(u32, u32) -> io::Result<()>,
 ) -> io::Result<()> {
     enter()?;
@@ -86,7 +88,7 @@ pub fn run(
 
     let input_geometry = geometry.clone();
     thread::spawn(move || {
-        forward_input(&mut input, &input_geometry);
+        forward_input(&mut input, &mut paste, &input_geometry);
         leave();
         std::process::exit(0);
     });
@@ -287,7 +289,7 @@ fn parse(buffer: &mut Vec<u8>) -> Vec<Sequence> {
 /// Reads keyboard and mouse input until Ctrl+], then releases held keys.
 /// Held keys are also released when the terminal loses focus, since their
 /// releases then go elsewhere and would leave them stuck in the guest.
-fn forward_input(input: &mut impl Write, geometry: &Mutex<Option<Geometry>>) {
+fn forward_input(input: &mut impl Write, paste: &mut impl FnMut() -> io::Result<()>, geometry: &Mutex<Option<Geometry>>) {
     let mut held = BTreeSet::new();
     let mut buffer = Vec::new();
     let mut bytes = [0u8; 4096];
@@ -310,6 +312,12 @@ fn forward_input(input: &mut impl Write, geometry: &Mutex<Option<Geometry>>) {
                 None => match key_event(&sequence, &mut held) {
                     KeyAction::Quit => break 'reading,
                     KeyAction::Send(event) => vec![event],
+                    KeyAction::Paste(event) => {
+                        if paste().is_err() {
+                            break 'reading;
+                        }
+                        vec![event]
+                    }
                     KeyAction::Ignore => Vec::new(),
                 },
             };
@@ -335,6 +343,8 @@ fn release(held: &mut BTreeSet<u16>) -> Vec<InputEvent> {
 
 enum KeyAction {
     Send(InputEvent),
+    /// Ctrl+V, which pastes the host clipboard before the key goes to the guest.
+    Paste(InputEvent),
     Quit,
     Ignore,
 }
@@ -368,7 +378,11 @@ fn key_event(sequence: &Sequence, held: &mut BTreeSet<u16>) -> KeyAction {
     } else {
         held.remove(&code);
     }
-    KeyAction::Send(InputEvent::Key { code, down })
+    let key = InputEvent::Key { code, down };
+    match sequence.final_byte == b'u' && number == u32::from(b'v') && ctrl && down {
+        true => KeyAction::Paste(key),
+        false => KeyAction::Send(key),
+    }
 }
 
 /// `CSI < button ; x ; y M|m` with x and y in terminal pixels.

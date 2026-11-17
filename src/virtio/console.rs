@@ -7,7 +7,7 @@ use crate::{
         device::{Device, DeviceContext, ExternalEventHandler},
     },
 };
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::Arc};
 use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes};
 
 const DEVICE_ID: u32 = 3;
@@ -66,12 +66,11 @@ mod ctrl_event {
     pub const PORT_NAME: u16 = 7;
 }
 
-const FRAME_LEN_PREFIX: usize = 4;
 const RX_CHUNK: usize = 4096;
 
 pub struct Console {
     config: ConsoleConfig,
-    clipboard: Option<clipboard::Sink>,
+    clipboard: Arc<clipboard::Guest>,
     agent: agent::Sink,
     clip_to_guest: VecDeque<Vec<u8>>,
     agent_to_guest: VecDeque<Vec<u8>>,
@@ -80,8 +79,7 @@ pub struct Console {
 }
 
 impl Console {
-    /// Without a clipboard sink the clipboard port exists but stays unsynchronized.
-    pub fn new(clipboard: Option<clipboard::Sink>, agent: agent::Sink) -> Console {
+    pub fn new(clipboard: Arc<clipboard::Guest>, agent: agent::Sink) -> Console {
         Console {
             config: ConsoleConfig::new(),
             clipboard,
@@ -150,11 +148,8 @@ impl Console {
         Some(buf)
     }
 
-    fn enqueue_clip_rx(&mut self, payload: &[u8]) {
-        let mut framed = Vec::with_capacity(FRAME_LEN_PREFIX + payload.len());
-        framed.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-        framed.extend_from_slice(payload);
-        for chunk in framed.chunks(RX_CHUNK) {
+    fn enqueue_clip_rx(&mut self, bytes: &[u8]) {
+        for chunk in bytes.chunks(RX_CHUNK) {
             self.clip_to_guest.push_back(chunk.to_vec());
         }
     }
@@ -228,8 +223,8 @@ impl Device for Console {
             Q_CLIP_RX => Self::pump_rx(&mut self.clip_to_guest, Q_CLIP_RX, ctx),
             Q_CLIP_TX => {
                 while let Some(chain) = ctx.pop_chain(queue_idx) {
-                    if let (Some(bytes), Some(clipboard)) = (Self::read_tx(&chain.data, ctx.mem()), &self.clipboard) {
-                        clipboard.push(bytes);
+                    if let Some(bytes) = Self::read_tx(&chain.data, ctx.mem()) {
+                        self.clipboard.receive(&bytes);
                     }
                     ctx.complete(chain.token, 0);
                 }
@@ -256,7 +251,8 @@ impl Device for Console {
 }
 
 pub enum ExternalEvent<'a> {
-    HostClipboard(&'a [u8]),
+    /// Bytes for the clipboard port, see [`clipboard::Guest`].
+    Clipboard(&'a [u8]),
     Agent(&'a [u8]),
 }
 
@@ -265,9 +261,9 @@ impl ExternalEventHandler for Console {
 
     fn on_event(&mut self, event: ExternalEvent<'_>, ctx: &mut DeviceContext<'_>) {
         match event {
-            ExternalEvent::HostClipboard(payload) => {
+            ExternalEvent::Clipboard(bytes) => {
                 if self.clip_open {
-                    self.enqueue_clip_rx(payload);
+                    self.enqueue_clip_rx(bytes);
                 }
                 Self::pump_rx(&mut self.clip_to_guest, Q_CLIP_RX, ctx);
             }

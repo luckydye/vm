@@ -41,6 +41,7 @@ pub enum RuntimeEvent {
         logical_height: u32,
         refresh_millihertz: u32,
     },
+    /// Bytes for the clipboard port, see [`crate::clipboard::Guest`].
     Clipboard(Vec<u8>),
     AgentRx(Vec<u8>),
 }
@@ -100,7 +101,7 @@ impl<'a> RuntimeEventPump<'a> {
                     .console
                     .lock()
                     .unwrap()
-                    .handle_external_event(virtio::console::ExternalEvent::HostClipboard(&payload), self.mem);
+                    .handle_external_event(virtio::console::ExternalEvent::Clipboard(&payload), self.mem);
             }
             RuntimeEvent::AgentRx(bytes) => {
                 self.devices

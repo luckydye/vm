@@ -12,7 +12,7 @@ use crate::{
 pub use events::{RuntimeEvent, RuntimeInputEvent};
 use std::{
     io,
-    sync::{Mutex, mpsc::Receiver},
+    sync::{Arc, Mutex, mpsc::Receiver},
     thread,
 };
 
@@ -20,7 +20,7 @@ pub struct HostBackends {
     pub disk: virtio::Blk,
     pub net: net::Backend,
     pub audio: audio::PeriodSink,
-    pub clipboard: Option<clipboard::Sink>,
+    pub clipboard: Arc<clipboard::Guest>,
     pub agent: agent::Sink,
     pub serial: stdio::Sink,
     pub shares: Vec<(virtio::Fs, virtio::FsWorker)>,

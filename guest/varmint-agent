@@ -32,7 +32,8 @@ USER = "varmint"
 ENVIRONMENT_FILE = "/run/varmint/environment"
 HOST_ENVIRONMENT = {}
 HEADER = struct.Struct("<IBI")
-(OPEN, DATA, STDERR, EOF, EXIT, RESIZE, HELLO, SETUP, CLOSE, SETUP_DONE, TELEMETRY, CLIPBOARD_IMAGE, REGISTRY_TOKEN,
+# Kind 12 was the clipboard image, which now goes through varmint-clipboard-agent.
+(OPEN, DATA, STDERR, EOF, EXIT, RESIZE, HELLO, SETUP, CLOSE, SETUP_DONE, TELEMETRY, _, REGISTRY_TOKEN,
  STORE, STORE_DATA) = range(1, 16)
 REGISTRY_PORT = 5100
 STORE_PORT = 5101
@@ -205,24 +206,6 @@ class PtyStream(Stream):
     def resize(self, payload):
         cols, rows = struct.unpack("<HH", payload)
         fcntl.ioctl(self.input, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
-
-    def clipboard_image(self, png):
-        """Sets the guest clipboard to the host's image, or clears it when the host has none."""
-        account = pwd.getpwnam(USER)
-        argv = ["wl-copy", "--type", "image/png"] if png else ["wl-copy", "--clear"]
-        # wl-copy forks and keeps serving the selection, so none of its output may be a pipe.
-        result = subprocess.run(
-            argv,
-            input=png,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            env=user_environment(account),
-            user=account.pw_uid,
-            group=account.pw_gid,
-            check=False,
-        )
-        if result.returncode != 0:
-            self.link.send(self.id, STDERR, f"varmint-agent: wl-copy failed with exit code {result.returncode}\r\n".encode())
 
     def on_exit(self):
         # Background jobs may keep the pty open; once the shell is gone, send what
@@ -841,8 +824,6 @@ def main():
                     streams[stream_id].eof()
                 elif kind == RESIZE:
                     streams[stream_id].resize(payload)
-                elif kind == CLIPBOARD_IMAGE:
-                    streams[stream_id].clipboard_image(payload)
                 elif kind == CLOSE:
                     streams.pop(stream_id).kill()
 

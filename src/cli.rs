@@ -24,7 +24,7 @@ use std::{
     },
     path::PathBuf,
     process::{Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -1365,6 +1365,12 @@ fn run_session(target: &Target, session: Session, raw: bool, forward_stdin: bool
                 restore();
                 return i32::from_le_bytes(frame.payload.try_into().expect("malformed exit frame"));
             }
+            // Text copied in the guest goes to the host clipboard of interactive sessions.
+            kind::CLIPBOARD_TEXT => {
+                if raw {
+                    clipboard::copy_text(&frame.payload);
+                }
+            }
             other => {
                 restore();
                 fail(format!("unexpected frame kind {other} from the VM"))
@@ -1376,9 +1382,9 @@ fn run_session(target: &Target, session: Session, raw: bool, forward_stdin: bool
 /// Ctrl+V as a control byte, a CSI u key and an xterm modifyOtherKeys key.
 const PASTE_KEYS: [&[u8]; 3] = [b"\x16", b"\x1b[118;5u", b"\x1b[27;5;118~"];
 
-/// With `paste_images`, Ctrl+V first puts the host clipboard image into the guest
-/// clipboard, so programs like Claude Code can paste it. Text is pasted by the terminal.
-fn pump_stdin(writer: &Mutex<Wire>, paste_images: bool) {
+/// With `paste`, Ctrl+V first puts the host clipboard into the guest clipboard,
+/// so programs like Claude Code can paste images. The terminal pastes text itself.
+fn pump_stdin(writer: &Mutex<Wire>, paste: bool) {
     let mut stdin = io::stdin();
     let mut buffer = vec![0; 64 * 1024];
     loop {
@@ -1388,9 +1394,9 @@ fn pump_stdin(writer: &Mutex<Wire>, paste_images: bool) {
         };
         let eof = frame.kind == kind::EOF;
         let mut writer = writer.lock().unwrap();
-        if paste_images
+        if paste
             && PASTE_KEYS.iter().any(|key| frame.payload.windows(key.len()).any(|window| window == *key))
-            && protocol::write_frame(&mut *writer, &clipboard_image_frame()).is_err()
+            && protocol::write_frame(&mut *writer, &paste_frame()).is_err()
         {
             return;
         }
@@ -1400,14 +1406,42 @@ fn pump_stdin(writer: &Mutex<Wire>, paste_images: bool) {
     }
 }
 
-/// The host clipboard image, or an empty frame that clears the guest clipboard.
-fn clipboard_image_frame() -> Frame {
-    let mut png = clipboard::read_png().unwrap_or_default();
-    if png.len() > protocol::MAX_PAYLOAD {
-        eprint!("vm: the clipboard image is too large for the VM ({} bytes)\r\n", png.len());
-        png.clear();
+/// The host clipboard for the guest clipboard; empty, which clears it, when it is too large.
+fn paste_frame() -> Frame {
+    let mut frame = clipboard::read().into_frame(0);
+    if frame.payload.len() > protocol::MAX_PAYLOAD {
+        eprint!("vm: the clipboard is too large for the VM ({} bytes)\r\n", frame.payload.len());
+        frame.payload.clear();
     }
-    Frame::new(0, kind::CLIPBOARD_IMAGE, png)
+    frame
+}
+
+/// Puts the text copied in the guest on the host clipboard, and returns a paste
+/// that puts the host clipboard into the guest clipboard and returns once it is there.
+fn clipboard_link(target: &Target) -> impl FnMut() -> io::Result<()> + Send + 'static {
+    let control = node::request(target, &Request::Clipboard).unwrap_or_else(|error| fail(error));
+    let mut reader = control.reader;
+    let mut writer = control.writer;
+    let (answers, answered) = mpsc::channel();
+    thread::spawn(move || {
+        while let Ok(Some(frame)) = protocol::read_frame(&mut reader) {
+            match frame.kind {
+                kind::CLIPBOARD_TEXT => clipboard::copy_text(&frame.payload),
+                kind::CLIPBOARD_PASTED => answers.send(frame.payload).expect("the paste stopped waiting"),
+                other => panic!("unexpected frame kind {other} on the clipboard connection"),
+            }
+        }
+    });
+    move || {
+        protocol::write_frame(&mut writer, &paste_frame())?;
+        let error = answered
+            .recv()
+            .map_err(|_| io::Error::other("the clipboard connection to the VM closed"))?;
+        if !error.is_empty() {
+            eprint!("vm: {}\r\n", String::from_utf8_lossy(&error));
+        }
+        Ok(())
+    }
 }
 
 /// Sends the terminal size to the guest pty whenever the window changes.
@@ -1477,7 +1511,7 @@ fn screen_command(args: &[String]) {
             .map(drop)
             .map_err(io::Error::other)
     };
-    let error = screen::run(frames.reader, input.writer, resize).unwrap_err();
+    let error = screen::run(frames.reader, input.writer, clipboard_link(&target), resize).unwrap_err();
     fail(format!("VM {}: {error}", target.qualified_name()))
 }
 
