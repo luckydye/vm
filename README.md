@@ -104,7 +104,7 @@ Run a single command in a fresh VM, which stops afterwards:
 vm run --mount .:work -- make -C work test
 ```
 
-The guest user is `varmint` with passwordless `sudo`, and [mise](https://mise.jdx.dev) is preinstalled for tools. The environment briefing for coding agents is in `~/AGENTS.md`, linked as the global instructions file of Claude Code, Codex and OpenCode. State lives in `~/.vm` (override with `VM_HOME`), each VM in `~/.vm/vms/<name>` with its `vmm.log`. Shutting down or rebooting the guest stops the VM.
+The guest user is `varmint` with passwordless `sudo`, and [mise](https://mise.jdx.dev) is preinstalled for tools. The environment briefing for coding agents is in `~/AGENTS.md`, linked as the global instructions file of Claude Code, Codex and OpenCode. State lives in `~/.vm` (override with `VM_HOME`), each VM in `~/.vm/vms/<name>` with its `vmm.log`; the logs of the newest 20 deleted VMs are kept in `~/.vm/logs`. Shutting down or rebooting the guest stops the VM.
 
 ## Shells and commands
 A guest agent on a virtio console serves shells, commands and TCP tunnels, so none of this needs the guest network:
@@ -235,11 +235,12 @@ echo '{"token":"'$token'","op":"run","wait_network":true}' | nc 127.0.0.1 7420  
 echo '{"token":"'$token'","op":"ls"}' | nc 127.0.0.1 7420
 echo '{"token":"'$token'","op":"stop","name":"swift-otter"}' | nc 127.0.0.1 7420
 echo '{"token":"'$token'","op":"save","name":"swift-otter","image":"tools"}' | nc 127.0.0.1 7420
+echo '{"token":"'$token'","op":"forward","name":"swift-otter","port":3000}' | nc 127.0.0.1 7420   # {"local_port":3000}
 ```
 
-`run` takes `name`, `base`, `persist`, `cpus`, `memory_mib`, `disk_gib`, `size` (`[width, height]`), `wait_network`, `stores`, the buckets as in `--store` (`["shared", "specs:ro"]`), and `env`, the guest variables. `CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_API_KEY` come from the server's environment when set, so its VMs share the host's credentials; a client's `env` replaces them, as in `"env": {"CLAUDE_CODE_OAUTH_TOKEN": "..."}`. Mounts and seeds are not available remotely, since they name host files. Without `--cert` and `--key` the connection is not encrypted, so keep it on the loopback or a private network. With them every connection is TLS, which browsers on other machines need for the web UI's video; [mkcert](https://github.com/FiloSottile/mkcert) makes a certificate they trust (`mkcert -cert-file mac.pem -key-file mac-key.pem your-mac.local 192.168.1.20`, then install its root CA on the other machine).
+`run` takes `name`, `base`, `persist`, `cpus`, `memory_mib`, `disk_gib`, `size` (`[width, height]`), `wait_network`, `idle_suspend` (`--idle-suspend` in minutes), `stores`, the buckets as in `--store` (`["shared", "specs:ro"]`), and `env`, the guest variables. `CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_API_KEY` come from the server's environment when set, so its VMs share the host's credentials; a client's `env` replaces them, as in `"env": {"CLAUDE_CODE_OAUTH_TOKEN": "..."}`. Mounts and seeds are not available remotely, since they name host files. `rm` deletes a VM and its disk. `network` asks the guest for its addresses and listening ports. `forward` relays a guest port to a listener on the host's `127.0.0.1`, on the same port if it is free, so browsers treat it as `localhost`; `unforward` with the same `name` and `port` removes it. While it serves, the Mac does not sleep when idle, also with the screen locked or off; closing the lid still sleeps it. Without `--cert` and `--key` the connection is not encrypted, so keep it on the loopback or a private network. With them every connection is TLS, which browsers on other machines need for the web UI's video; [mkcert](https://github.com/FiloSottile/mkcert) makes a certificate they trust (`mkcert -cert-file mac.pem -key-file mac-key.pem your-mac.local 192.168.1.20`, then install its root CA on the other machine).
 
-`attach` takes `name` and `request`, a request to the VM's control socket, and after its reply hands the connection to that socket, which answers in its own protocol: `{"op":"stream","fps":30,"codec":"h264"}` for the screen as hardware-encoded H.264 (`"rgb"` sends raw pixels), `{"op":"inputstream"}` for mouse and keyboard events, and `{"op":"open","session":{"type":"pty",...}}` for a shell. The web UI of `--ui` is built on it: a wall of every VM's live screen, and for each VM its shell beside its display.
+`attach` takes `name` and `request`, a request to the VM's control socket, and after its reply hands the connection to that socket, which answers in its own protocol: `{"op":"stream","fps":30,"codec":"h264","audio":true}` for the screen as hardware-encoded H.264 with the sound as Opus (`"rgb"` sends raw pixels), `{"op":"inputstream"}` for mouse and keyboard events, and `{"op":"open","session":{"type":"pty",...}}` for a shell. The web UI of `--ui` is built on it: a wall of every VM's live screen, and for each VM its shell beside its display. The link `--ui` prints carries the token, which the browser keeps, so open it once; the browser can also install the UI as an app.
 
 stderr is an event log for programs to act on: one [CloudEvent](https://cloudevents.io) per line, of type `dev.vm.serve.request` (the request without its token and with only the names of `env`), `.exec` (`args`, `exit_code`, `duration_ms`), `.reply` (the reply as sent) or `.error`. The extension attributes `peer` and `requestid` name the client and tie the events of one request together:
 
@@ -251,7 +252,7 @@ tail -f ~/.vm/serve.jsonl | jq -c 'select(.type == "dev.vm.serve.reply" and .dat
 ## Telemetry
 Every VM records what it does in `~/.vm/telemetry.sqlite`, so you can see which programs run too often or get installed repeatedly and are worth preinstalling:
 
-* `vms`: start, boot time, stop time and stop reason (`stopped`, `guest-poweroff`, `window-closed`, `crash`) of every run
+* `vms`: start, boot time, stop time and stop reason (`stopped`, `guest-poweroff`, `window-closed`, `exited`, `crash`) of every run
 * `processes`: every process that exited in the guest, with wall and CPU time (kernel process accounting; names are truncated to 15 characters)
 * `commands`: command lines typed in interactive guest shells (`shell`) or run with `vm run` (`exec`)
 * `packages`: apt packages and mise tools installed in the guest

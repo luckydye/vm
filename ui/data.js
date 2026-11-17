@@ -562,7 +562,7 @@ export function inputStream(name) {
   };
 }
 
-const FRAME = { DATA: 2, STDERR: 3, EXIT: 5, RESIZE: 6, CLIPBOARD_IMAGE: 12 };
+const FRAME = { DATA: 2, STDERR: 3, EXIT: 5, RESIZE: 6, CLIPBOARD_IMAGE: 15 };
 // The largest frame payload the VM takes, protocol::MAX_PAYLOAD.
 const MAX_PAYLOAD = 16 * 1024 * 1024;
 

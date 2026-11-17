@@ -45,15 +45,15 @@ pub mod kind {
     pub const CLOSE: u8 = 9;
     pub const SETUP_DONE: u8 = 10;
     pub const TELEMETRY: u8 = 11;
-    /// A PNG for the guest clipboard from a client's Ctrl+V, empty to clear it.
-    pub const CLIPBOARD_IMAGE: u8 = 12;
     /// A [`RegistryTokenRequest`] from the guest, answered with a [`RegistryToken`].
-    pub const REGISTRY_TOKEN: u8 = 13;
+    pub const REGISTRY_TOKEN: u8 = 12;
     /// A [`crate::store::Request`] from the guest on the stream it chose,
     /// answered with a [`crate::store::Head`] on the same stream.
-    pub const STORE: u8 = 14;
+    pub const STORE: u8 = 13;
     /// A piece of a store request's or reply's body; an empty one ends it.
-    pub const STORE_DATA: u8 = 15;
+    pub const STORE_DATA: u8 = 14;
+    /// A PNG for the guest clipboard from a client's Ctrl+V, empty to clear it.
+    pub const CLIPBOARD_IMAGE: u8 = 15;
     /// Text for the guest clipboard from a client's Ctrl+V, or text the
     /// control socket tells clients was copied in the guest.
     pub const CLIPBOARD_TEXT: u8 = 16;
