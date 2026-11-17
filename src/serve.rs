@@ -78,6 +78,7 @@ pub(crate) enum Request {
         env: BTreeMap<String, String>,
         #[serde(default)]
         stores: Vec<String>,
+        idle_suspend: Option<u64>,
     },
     Ls,
     Stop {
@@ -158,6 +159,8 @@ pub(crate) struct Vm {
     pub(crate) memory_bytes: Option<u64>,
     /// CPU time the VM process used since it started, while it runs.
     pub(crate) cpu_ms: Option<u64>,
+    /// Whether the VM is suspended for being idle, while it runs.
+    pub(crate) suspended: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -441,6 +444,7 @@ fn execute(client: &Client, request: Request) -> Result<Reply, String> {
             wait_network,
             env,
             stores,
+            idle_suspend,
         } => {
             let mut args = vec!["run".to_owned()];
             let created = match &name {
@@ -478,6 +482,9 @@ fn execute(client: &Client, request: Request) -> Result<Reply, String> {
             for spec in stores {
                 store::Grant::parse(&spec)?;
                 args.extend(["--store".to_owned(), spec]);
+            }
+            if let Some(minutes) = idle_suspend {
+                args.extend(["--idle-suspend".to_owned(), minutes.to_string()]);
             }
             let name = vm(client, &args, &env)?;
             Ok(Reply {
@@ -543,7 +550,8 @@ pub(crate) fn local_vms() -> Result<(Vec<Vm>, Host), String> {
                 running: usage.is_some(),
                 hardware: instance.hardware()?,
                 memory_bytes: usage.as_ref().map(|usage| usage.memory_bytes.expect("a usage reply has memory_bytes")),
-                cpu_ms: usage.map(|usage| usage.cpu_ms.expect("a usage reply has cpu_ms")),
+                cpu_ms: usage.as_ref().map(|usage| usage.cpu_ms.expect("a usage reply has cpu_ms")),
+                suspended: usage.map(|usage| usage.suspended.expect("a usage reply has suspended")),
                 name: instance.name,
             })
         })

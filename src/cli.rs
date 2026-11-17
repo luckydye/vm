@@ -7,6 +7,7 @@ use crate::{
     node::{Status, Target, Wire},
     protocol::{self, Codec, Frame, InputEvent, Request, Session, kind},
     store::{self, Grant},
+    suspend,
     virtio::input::keys::{BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, KEY_LEFTSHIFT},
     vmm,
 };
@@ -249,6 +250,8 @@ impl Vm {
 struct RunOptions {
     name: Option<String>,
     window: bool,
+    /// Minutes without clients before the VM suspends, 0 for never.
+    idle_suspend: Option<u64>,
     wait_network: bool,
     mounts: Vec<String>,
     environment: Vec<String>,
@@ -274,6 +277,7 @@ fn run(args: &[String]) {
     let mut options = RunOptions {
         name: None,
         window: false,
+        idle_suspend: None,
         wait_network: false,
         mounts: Vec::new(),
         environment: Vec::new(),
@@ -302,6 +306,10 @@ fn run(args: &[String]) {
                 options.start_flags = true;
             }
             "--wait-network" => options.wait_network = true,
+            "--idle-suspend" => {
+                options.idle_suspend = Some(parse(args.next(), "--idle-suspend"));
+                options.start_flags = true;
+            }
             "--env" => {
                 options
                     .environment
@@ -425,7 +433,7 @@ fn run_local(options: RunOptions, started: Instant) {
                         if options.start_flags {
                             fail(format!(
                                 "VM {name} is already running; stop it before changing its mounts, seeds, \
-                                 stores, environment or window"
+                                 stores, environment, window or idle suspend"
                             ));
                         }
                         (Vm::Running(instance), false)
@@ -461,7 +469,8 @@ fn run_local(options: RunOptions, started: Instant) {
 
     let name = vm.instance().name.clone();
     if let Vm::Booting(launch) = vm {
-        spawn_vmm(launch, options.window, &mounts, &seeds, &grants, &environment);
+        let idle_suspend = options.idle_suspend.unwrap_or(suspend::DEFAULT_IDLE_MINUTES);
+        spawn_vmm(launch, options.window, idle_suspend, &mounts, &seeds, &grants, &environment);
     }
 
     let target = Target::Local(open(&name));
@@ -544,6 +553,7 @@ fn run_remote(node: node::Node, options: RunOptions) {
         wait_network: options.wait_network,
         env: environment,
         stores: options.grants.iter().map(Grant::spec).collect(),
+        idle_suspend: options.idle_suspend,
     };
     let reply = node::rpc(&node, &request).unwrap_or_else(|error| fail(error));
     let name = reply.name.unwrap_or_else(|| fail("the node did not return a VM name"));
@@ -705,6 +715,7 @@ fn wait_for_network(target: &Target) {
 fn spawn_vmm(
     launch: Launch,
     window: bool,
+    idle_suspend: u64,
     mounts: &[Mount],
     seeds: &[Seed],
     grants: &[Grant],
@@ -726,6 +737,8 @@ fn spawn_vmm(
         .arg(&launch.instance.name)
         .arg(lock_fd.to_string())
         .arg(listen_fd.to_string())
+        .arg("--idle-suspend")
+        .arg(idle_suspend.to_string())
         .env(GUEST_ENVIRONMENT_VARIABLE, serde_json::to_string(environment).unwrap())
         .stdin(Stdio::null())
         .stdout(log.try_clone().unwrap_or_else(|error| fail(error)))
@@ -793,10 +806,11 @@ fn max_files_per_process() -> libc::rlim_t {
 /// Entry point of the detached VM process started by `vm run`.
 fn vmm_process(args: &[String]) {
     let [name, lock_fd, listen_fd, rest @ ..] = args else {
-        fail("internal: __vmm NAME LOCK_FD LISTEN_FD [--window] [--mount SPEC]...");
+        fail("internal: __vmm NAME LOCK_FD LISTEN_FD --idle-suspend MIN [--window] [--mount SPEC]...");
     };
     raise_open_file_limit();
     let mut window = false;
+    let mut idle_suspend = None;
     let mut mounts = Vec::new();
     let mut seeds = Vec::new();
     let mut grants = Vec::new();
@@ -804,6 +818,7 @@ fn vmm_process(args: &[String]) {
     while let Some(arg) = rest.next() {
         match arg.as_str() {
             "--window" => window = true,
+            "--idle-suspend" => idle_suspend = Some(parse::<u64>(rest.next(), "--idle-suspend")),
             "--mount" => {
                 let spec = rest.next().unwrap_or_else(|| fail("internal: --mount needs a spec"));
                 mounts.push(Mount::parse(spec).unwrap_or_else(|error| fail(error)));
@@ -819,6 +834,8 @@ fn vmm_process(args: &[String]) {
             _ => fail(format!("internal: unexpected argument {arg}")),
         }
     }
+    let idle_suspend = idle_suspend.unwrap_or_else(|| fail("internal: missing --idle-suspend"));
+    let idle_suspend = (idle_suspend > 0).then(|| Duration::from_secs(idle_suspend * 60));
     let lock_fd: RawFd = parse(Some(lock_fd), "lock fd");
     let listen_fd: RawFd = parse(Some(listen_fd), "listen fd");
 
@@ -838,7 +855,7 @@ fn vmm_process(args: &[String]) {
     // Helpers started by the VM must not see the guest's secrets.
     unsafe { env::remove_var(GUEST_ENVIRONMENT_VARIABLE) };
 
-    vmm::run(launch, window, &mounts, &seeds, grants, environment).unwrap_or_else(|error| panic!("VM failed: {error:?}"));
+    vmm::run(launch, window, idle_suspend, &mounts, &seeds, grants, environment).unwrap_or_else(|error| panic!("VM failed: {error:?}"));
 }
 
 /// `vm store`: the shared object store from the host, through the same
@@ -963,12 +980,16 @@ fn list(args: &[String]) {
         println!("No VMs. Start one with: vm run");
         return;
     }
-    println!("{:<30} {:<8} {:<8} {:>4} {:>8} {:>8}", "NAME", "STATE", "PERSIST", "CPUS", "MEMORY", "DISK");
+    println!("{:<30} {:<9} {:<8} {:>4} {:>8} {:>8}", "NAME", "STATE", "PERSIST", "CPUS", "MEMORY", "DISK");
     for (name, vm) in entries {
         println!(
-            "{:<30} {:<8} {:<8} {:>4} {:>6}Mi {:>6}Gi",
+            "{:<30} {:<9} {:<8} {:>4} {:>6}Mi {:>6}Gi",
             name,
-            if vm.running { "running" } else { "stopped" },
+            match vm.suspended {
+                Some(true) => "suspended",
+                Some(false) => "running",
+                None => "stopped",
+            },
             if vm.hardware.persist { "yes" } else { "no" },
             vm.hardware.cpus,
             vm.hardware.memory_mib,

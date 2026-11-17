@@ -7,6 +7,7 @@ use crate::{
     devices::Devices,
     machine::{Boot, GICD_START, GICR_START},
     memory::GuestMemory,
+    suspend::Suspend,
 };
 use applevisor::{error::HypervisorError, prelude::*};
 use applevisor_sys::{HV_MEMORY_EXEC, HV_MEMORY_READ, HV_MEMORY_WRITE, hv_vm_map, hv_vm_protect, hv_vm_unmap};
@@ -107,9 +108,9 @@ impl Vm {
     }
 
     /// Runs the vCPUs until the boot CPU stops.
-    pub fn run(&self, boot: Boot, vcpus: usize, mem: &GuestMemory, devices: &Devices) -> io::Result<()> {
-        CpuRuntime::new(&self.0, boot.entry, boot.arg, vcpus)
-            .and_then(|cpus| cpus.run(&self.0, mem, devices))
+    pub fn run(&self, boot: Boot, vcpus: usize, mem: &GuestMemory, devices: &Devices, suspend: &Suspend) -> io::Result<()> {
+        CpuRuntime::new(&self.0, boot.entry, boot.arg, vcpus, suspend)
+            .and_then(|cpus| cpus.run(&self.0, mem, devices, suspend))
             .map_err(io_error)
     }
 }
@@ -164,9 +165,15 @@ struct SecondaryWorker {
 }
 
 impl CpuRuntime {
-    fn new(vm: &VirtualMachineInstance<GicEnabled>, entry_point: u64, x0: u64, vcpus: usize) -> Result<Self> {
+    fn new(
+        vm: &VirtualMachineInstance<GicEnabled>,
+        entry_point: u64,
+        x0: u64,
+        vcpus: usize,
+        suspend: &Suspend,
+    ) -> Result<Self> {
         let boot_vcpu = vm.vcpu_create()?;
-        configure_vcpu(&boot_vcpu, BOOT_VCPU_ID)?;
+        configure_vcpu(vm, &boot_vcpu, BOOT_VCPU_ID, suspend)?;
         set_entry_state(&boot_vcpu, entry_point, x0)?;
 
         let (secondaries, secondary_workers) = SecondaryCpus::new(vcpus);
@@ -178,7 +185,13 @@ impl CpuRuntime {
         })
     }
 
-    fn run(self, vm: &VirtualMachineInstance<GicEnabled>, mem: &GuestMemory, devices: &Devices) -> Result<()> {
+    fn run(
+        self,
+        vm: &VirtualMachineInstance<GicEnabled>,
+        mem: &GuestMemory,
+        devices: &Devices,
+        suspend: &Suspend,
+    ) -> Result<()> {
         let Self {
             boot_vcpu,
             secondaries,
@@ -188,10 +201,10 @@ impl CpuRuntime {
         thread::scope(|scope| -> Result<()> {
             for worker in secondary_workers {
                 let secondaries = &secondaries;
-                scope.spawn(move || worker.run(vm, mem, devices, secondaries).unwrap());
+                scope.spawn(move || worker.run(vm, mem, devices, secondaries, suspend).unwrap());
             }
 
-            run_loop(&boot_vcpu, BOOT_VCPU_ID, mem, devices, &secondaries)
+            run_loop(&boot_vcpu, BOOT_VCPU_ID, mem, devices, &secondaries, suspend)
         })
     }
 }
@@ -264,21 +277,28 @@ impl SecondaryWorker {
         mem: &GuestMemory,
         devices: &Devices,
         secondaries: &SecondaryCpus,
+        suspend: &Suspend,
     ) -> Result<()> {
         let vcpu = vm.vcpu_create()?;
-        configure_vcpu(&vcpu, self.vcpu_id)?;
+        configure_vcpu(vm, &vcpu, self.vcpu_id, suspend)?;
         while let Ok(start) = self.boot_rx.recv() {
             set_entry_state(&vcpu, start.entry_point, start.context_id)?;
-            run_loop(&vcpu, self.vcpu_id, mem, devices, secondaries)?;
+            run_loop(&vcpu, self.vcpu_id, mem, devices, secondaries, suspend)?;
         }
 
         Ok(())
     }
 }
 
-fn configure_vcpu(vcpu: &Vcpu, vcpu_id: usize) -> Result<()> {
+fn configure_vcpu(vm: &VirtualMachineInstance<GicEnabled>, vcpu: &Vcpu, vcpu_id: usize, suspend: &Suspend) -> Result<()> {
     vcpu.set_sys_reg(SysReg::ACTLR_EL1, 1 << 1)?; // enable TSO
     vcpu.set_sys_reg(SysReg::MPIDR_EL1, mpidr(vcpu_id))?;
+    // An exit requested outside `hv_vcpu_run` makes the next run return at once.
+    let (vm, handle) = (vm.clone(), vcpu.get_handle());
+    suspend.add_vcpu(Box::new(move || {
+        vm.vcpus_exit(std::slice::from_ref(&handle))
+            .unwrap_or_else(|error| panic!("hv_vcpus_exit failed: {error:?}"))
+    }));
     Ok(())
 }
 
@@ -355,8 +375,10 @@ fn run_loop(
     mem: &GuestMemory,
     devices: &Devices,
     secondaries: &SecondaryCpus,
+    suspend: &Suspend,
 ) -> Result<()> {
     loop {
+        suspend.wait_awake();
         vcpu.run()?;
         let exit = vcpu.get_exit_info();
 

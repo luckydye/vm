@@ -6,6 +6,7 @@ use crate::{
     devices::{RuntimeEvent, RuntimeInputEvent},
     display::{DisplayBuffer, H264Encoder},
     protocol::{self, Codec, Frame, InputEvent, Reply, Request, Session, kind, stream_kind},
+    suspend::Suspend,
     telemetry, vmm,
 };
 use std::{
@@ -37,6 +38,7 @@ const INPUT_EVENT_INTERVAL: Duration = Duration::from_millis(2);
 const AUDIO_STOP_INTERVAL: Duration = Duration::from_millis(500);
 
 pub struct Context<'a> {
+    pub suspend: &'a Suspend,
     pub display: &'a Mutex<DisplayBuffer>,
     pub agent: &'a Agent,
     pub audio: &'a audio::Listeners,
@@ -70,6 +72,8 @@ fn handle(connection: UnixStream, context: &Context<'_>) -> io::Result<()> {
             return Err(error);
         }
     };
+    // Asking for usage, as `vm ls` and node load balancing do, is not activity.
+    let _client = (!matches!(request, Request::Usage)).then(|| context.suspend.client());
     match request {
         Request::Wait => match context.agent.wait_booted() {
             Ok(boot_time) => protocol::write_json(
@@ -154,6 +158,7 @@ fn handle(connection: UnixStream, context: &Context<'_>) -> io::Result<()> {
             &Reply {
                 memory_bytes: Some(footprint()),
                 cpu_ms: Some(cpu_ms()),
+                suspended: Some(context.suspend.is_suspended()),
                 ..Reply::default()
             },
         ),

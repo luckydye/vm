@@ -69,11 +69,26 @@ are followed. A directory in a git work tree leaves out what .gitignore
 ignores. Changes in the VM never reach the host.
 
 In an interactive session, Ctrl+V first puts the image on the host clipboard
-into the guest clipboard, so programs like Claude Code can paste it."
+into the guest clipboard, so programs like Claude Code can paste it.
+
+A VM suspends when no client has been attached to it for the idle timeout:
+no command, shell, ssh session, tunnel, screen or stream. Its vCPUs stop, so
+it takes no CPU but keeps its memory, and the next command resumes it at
+once; the guest clock jumps ahead by the time it slept. Work in the guest
+that no client is attached to pauses with it. A VM with a window never
+suspends. `vm ls` shows suspended VMs."
                 .into(),
             options: vec![
                 ("--persist", "Keep the VM and its disk after it stops".into()),
                 ("--window", "Show the screen in a window and share the clipboard".into()),
+                (
+                    "--idle-suspend MIN",
+                    format!(
+                        "Suspend after MIN minutes without clients, 0 for never\n\
+                         (default {})",
+                        crate::suspend::DEFAULT_IDLE_MINUTES
+                    ),
+                ),
                 ("--node NAME", "Run on a node from ~/.vm/nodes".into()),
                 ("--any", "Pick the least loaded node with room".into()),
                 (
@@ -125,6 +140,7 @@ into the guest clipboard, so programs like Claude Code can paste it."
                 ("vm run sandbox --", "interactive shell in sandbox"),
                 ("vm run --mount .:work --wait-network", "current directory at ~/work, network ready"),
                 ("vm run --window --size 1920x1080", "VM with a window"),
+                ("vm run sandbox --idle-suspend 0", "keep sandbox running when idle"),
                 ("vm run --env GITHUB_TOKEN", "pass a variable from your shell"),
                 ("vm run --mount .:work -- make -C work test", "one-off VM for a single command"),
                 (
@@ -480,7 +496,7 @@ created on first use:
   {\"token\": \"...\", \"op\": \"run\", \"persist\": false, \"cpus\": 4, \"memory_mib\": 6144,
    \"disk_gib\": 64, \"size\": [1920, 1080], \"wait_network\": true}
                                                -> {\"name\": \"swift-otter\", \"created\": true}
-  {\"token\": \"...\", \"op\": \"ls\"}           -> {\"vms\": [{\"name\", \"running\", \"hardware\", \"memory_bytes\", \"cpu_ms\"}],
+  {\"token\": \"...\", \"op\": \"ls\"}           -> {\"vms\": [{\"name\", \"running\", \"hardware\", \"memory_bytes\", \"cpu_ms\", \"suspended\"}],
                                                    \"host\": {\"memory_bytes\", \"used_bytes\", \"cpu_busy_ms\", \"cpu_total_ms\", \"cpus\"}}
   {\"token\": \"...\", \"op\": \"stop\", \"name\": \"swift-otter\"} -> {}
   {\"token\": \"...\", \"op\": \"rm\", \"name\": \"swift-otter\"}   -> {}
@@ -501,6 +517,7 @@ optional, plus name and base as in `vm run`, and env, an object of
 guest variables. CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY come from
 the server's environment when set, unless env names them. stores is a
 list of buckets the VM may use, as in --store, like [\"shared\", \"specs:ro\"].
+idle_suspend is --idle-suspend in minutes.
 Mounts and seeds are not available remotely, since they name host files.
 
 While it serves, the Mac does not sleep when idle, also with the screen

@@ -7,7 +7,7 @@ use crate::{
     hypervisor::Vm,
     machine::*,
     memory::GuestMemory,
-    net, stdio, uart, virtio,
+    net, stdio, suspend::Suspend, uart, virtio,
 };
 pub use events::{RuntimeEvent, RuntimeInputEvent};
 use std::{
@@ -215,6 +215,7 @@ impl<'a> Runtime<'a> {
         runtime_event_rx: Receiver<RuntimeEvent>,
         audio_event_rx: Receiver<audio::BackendEvent>,
         display_notifier: &DisplayNotifier,
+        suspend: &Suspend,
     ) -> io::Result<()> {
         thread::scope(|scope| {
             scope.spawn(|| self.gpu_worker.run(mem, display, display_notifier));
@@ -233,7 +234,7 @@ impl<'a> Runtime<'a> {
                 audio_events.run();
             });
 
-            self.vm.run(self.boot, self.vcpus, mem, &self.devices)
+            self.vm.run(self.boot, self.vcpus, mem, &self.devices, suspend)
         })
     }
 }

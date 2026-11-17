@@ -25,6 +25,7 @@ mod seed;
 mod serve;
 mod stdio;
 mod store;
+mod suspend;
 mod telemetry;
 mod uart;
 mod virtio;

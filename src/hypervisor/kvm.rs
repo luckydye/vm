@@ -9,18 +9,24 @@ use aarch64 as arch;
 pub use aarch64::{gic_sizes, mpidr};
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
-use crate::{devices::Devices, machine::Boot, memory::GuestMemory};
+use crate::{devices::Devices, machine::Boot, memory::GuestMemory, suspend::Suspend};
 use kvm_bindings::kvm_userspace_memory_region;
 use kvm_ioctls::{Kvm, VcpuExit, VcpuFd, VmFd};
 use std::{
     io,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU8, Ordering},
+    },
     thread,
 };
 #[cfg(target_arch = "x86_64")]
 use x86_64 as arch;
 
 pub const KERNEL_ARGS: &str = "";
+
+/// Interrupts `KVM_RUN` of a vCPU thread so it notices a suspend.
+const KICK_SIGNAL: libc::c_int = libc::SIGUSR1;
 
 type Result<T> = std::result::Result<T, kvm_ioctls::Error>;
 
@@ -125,9 +131,10 @@ impl Vm {
     }
 
     /// Runs every vCPU on its own thread until the guest powers off.
-    pub fn run(&self, boot: Boot, vcpus: usize, mem: &GuestMemory, devices: &Devices) -> io::Result<()> {
+    pub fn run(&self, boot: Boot, vcpus: usize, mem: &GuestMemory, devices: &Devices, suspend: &Suspend) -> io::Result<()> {
         let fds = std::mem::take(&mut *self.0.vcpus.lock().unwrap());
         assert_eq!(fds.len(), vcpus, "the vCPUs already ran");
+        install_kick_handler();
         thread::scope(|scope| {
             let threads: Vec<_> = fds
                 .into_iter()
@@ -138,7 +145,7 @@ impl Vm {
                         .name(format!("vcpu{id}"))
                         .spawn_scoped(scope, move || -> io::Result<()> {
                             arch::configure(&vcpu, id, boot, mem).map_err(io_error)?;
-                            run_loop(&mut vcpu, mem, devices)
+                            run_loop(&mut vcpu, mem, devices, suspend)
                         })
                         .expect("failed to spawn vCPU thread")
                 })
@@ -161,11 +168,34 @@ impl IrqLine {
     }
 }
 
-fn run_loop(vcpu: &mut VcpuFd, mem: &GuestMemory, devices: &Devices) -> io::Result<()> {
+/// The kick signal only has to end `KVM_RUN` with `EINTR`, so it must not restart it.
+fn install_kick_handler() {
+    extern "C" fn interrupt(_: libc::c_int) {}
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    action.sa_sigaction = interrupt as libc::sighandler_t;
+    let result = unsafe { libc::sigaction(KICK_SIGNAL, &action, std::ptr::null_mut()) };
+    assert_eq!(result, 0, "sigaction failed: {}", io::Error::last_os_error());
+}
+
+fn run_loop(vcpu: &mut VcpuFd, mem: &GuestMemory, devices: &Devices, suspend: &Suspend) -> io::Result<()> {
+    // `immediate_exit` makes KVM_RUN return at once, so a kick between
+    // `wait_awake` and KVM_RUN is not lost; the signal ends a running KVM_RUN.
+    // The kvm_run page stays mapped while the vCPU exists, which is until the VM exits.
+    let immediate_exit = unsafe { AtomicU8::from_ptr(&raw mut vcpu.get_kvm_run().immediate_exit) };
+    let address = immediate_exit.as_ptr() as usize;
+    let thread = unsafe { libc::pthread_self() };
+    suspend.add_vcpu(Box::new(move || unsafe {
+        AtomicU8::from_ptr(address as *mut u8).store(1, Ordering::SeqCst);
+        libc::pthread_kill(thread, KICK_SIGNAL);
+    }));
     loop {
+        suspend.wait_awake();
         let exit = match vcpu.run() {
             Ok(exit) => exit,
-            Err(error) if error.errno() == libc::EINTR || error.errno() == libc::EAGAIN => continue,
+            Err(error) if error.errno() == libc::EINTR || error.errno() == libc::EAGAIN => {
+                immediate_exit.store(0, Ordering::SeqCst);
+                continue;
+            }
             Err(error) => return Err(io_error(error)),
         };
         match exit {

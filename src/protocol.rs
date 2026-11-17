@@ -283,6 +283,9 @@ pub struct Reply {
     /// The CPU time the VM process used since it started.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu_ms: Option<u64>,
+    /// Whether the VM is suspended because no client was connected for a while.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suspended: Option<bool>,
 }
 
 pub fn write_json(writer: &mut impl Write, value: &impl Serialize) -> io::Result<()> {

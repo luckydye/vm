@@ -13,6 +13,7 @@ use crate::{
     registry, seed,
     stdio,
     store::Grant,
+    suspend::Suspend,
     telemetry, virtio,
 };
 use std::{
@@ -21,6 +22,7 @@ use std::{
     path::PathBuf,
     sync::{Arc, Mutex, OnceLock, mpsc::Receiver},
     thread,
+    time::Duration,
 };
 
 struct BootPayload {
@@ -65,6 +67,7 @@ fn vmm_thread(
     config: &VmConfig,
     boot: BootPayload,
     backends: HostBackends,
+    suspend: &Suspend,
 ) -> io::Result<()> {
     let mem = memory::GuestMemory::new(vm, machine::ram_regions(config.memory_size));
     let entry = machine::load(
@@ -85,12 +88,16 @@ fn vmm_thread(
         runtime_event_rx,
         audio_event_rx,
         &display_notifier,
+        suspend,
     )
 }
 
+/// `idle_suspend` is how long the VM waits without control clients before it
+/// suspends, `None` to never suspend. A VM with a window never suspends.
 pub fn run(
     launch: Launch,
     window: bool,
+    idle_suspend: Option<Duration>,
     mounts: &[Mount],
     seeds: &[Seed],
     grants: Vec<Grant>,
@@ -230,7 +237,10 @@ pub fn run(
         shares,
     };
 
+    let suspend = Suspend::new();
+
     let control_context = control::Context {
+        suspend: &suspend,
         display: &display,
         agent: &agent,
         audio: &audio_listeners,
@@ -248,6 +258,10 @@ pub fn run(
         let vm = &vm;
         let display = &display;
         let config = &config;
+        let suspend = &suspend;
+        if let Some(timeout) = idle_suspend.filter(|_| !window) {
+            scope.spawn(move || suspend.watch(timeout));
+        }
         scope.spawn(move || {
             vmm_thread(
                 vm,
@@ -258,6 +272,7 @@ pub fn run(
                 config,
                 boot,
                 backends,
+                suspend,
             )
             .unwrap_or_else(|error| panic!("VM failed: {error:?}"));
             shutdown("exited")
