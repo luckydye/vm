@@ -1,0 +1,5 @@
+#!/bin/sh
+# varmint exec and ssh sessions do not descend from Hyprland, so they lack its
+# HYPRLAND_INSTANCE_SIGNATURE. The guest runs one Hyprland, which hyprctl finds
+# as instance 0 on every call, also after it restarted.
+exec /usr/bin/hyprctl --instance 0 "$@"
