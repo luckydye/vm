@@ -75,6 +75,7 @@ apt-get install -y --no-install-recommends \
     libxrender1 \
     libxxhash0 \
     mesa-utils \
+    nftables \
     openssh-server \
     passt \
     pkg-config \
