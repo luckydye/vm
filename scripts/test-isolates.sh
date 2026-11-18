@@ -7,6 +7,9 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VM="${1:-$ROOT/dist/vm/bin/vm}"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/vm-test.XXXXXX")"
 export VM_HOME="$WORK/home"
+# VMs add themselves to ~/.ssh/config; keep the real one out of the test.
+export HOME="$WORK/user"
+mkdir -p "$HOME"
 vm=""
 serve_pid=""
 
@@ -35,6 +38,11 @@ script -q /dev/null "$VM" exec "$vm" -- tty < /dev/null | grep -q "/dev/pts/" ||
 set +e; "$VM" exec "$vm" -- sh -c 'exit 7'; code=$?; set -e
 [ "$code" -eq 7 ] || fail "exit code: got $code"
 [ "$("$VM" ssh "$vm" -- echo ssh-ok)" = ssh-ok ] || fail "ssh"
+grep -qx "Include \"$VM_HOME/ssh_config\"" "$HOME/.ssh/config" || fail "ssh config includes the VM hosts"
+[ "$(ssh -F "$HOME/.ssh/config" "vm-$vm" echo ssh-host-ok)" = ssh-host-ok ] || fail "plain ssh to host vm-$vm"
+hidden=$("$VM" run --no-ssh-config)
+! grep -q "^Host vm-$hidden$" "$VM_HOME/ssh_config" || fail "--no-ssh-config VM listed as ssh host"
+"$VM" stop "$hidden"
 script -q /dev/null "$VM" ls | grep -q "^$vm .*running" || fail "ls"
 "$VM" ls | grep -qx "$vm" || fail "ls in a pipe prints names"
 online=$("$VM" run --wait-network)
@@ -64,6 +72,7 @@ console.log("WEBGL " + gl.getParameter(gl.getExtension("WEBGL_debug_renderer_inf
 
 "$VM" stop "$vm"
 [ ! -d "$VM_HOME/vms/$vm" ] || fail "ephemeral VM was not deleted"
+! grep -q "^Host vm-$vm$" "$VM_HOME/ssh_config" || fail "stopped VM still an ssh host"
 vm=""
 
 # Host directories shared over virtio-fs.

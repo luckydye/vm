@@ -6,6 +6,7 @@
 
 use crate::{
     config::{GIB, Hardware, Resources},
+    ssh_config,
     store::Grant,
 };
 use std::{
@@ -331,7 +332,8 @@ pub fn list() -> Vec<Instance> {
     instances
 }
 
-/// Deletes ephemeral VMs whose process died without cleaning up.
+/// Deletes ephemeral VMs whose process died without cleaning up, and the ssh
+/// hosts of VMs that stopped that way.
 pub fn prune() {
     let _registry = registry_lock();
     for instance in list() {
@@ -340,6 +342,7 @@ pub fn prune() {
             remove(&instance);
         }
     }
+    ssh_config::prune(&list()).unwrap_or_else(|error| panic!("failed to update {}: {error}", ssh_config::config_path().display()));
 }
 
 pub fn remove(instance: &Instance) {

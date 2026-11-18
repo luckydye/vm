@@ -94,6 +94,10 @@ suspends. `vm ls` shows suspended VMs."
                 ("--node NAME", "Run on a node from ~/.vm/nodes".into()),
                 ("--any", "Pick the least loaded node with room".into()),
                 (
+                    "--no-ssh-config",
+                    "Leave the VM out of ~/.vm/ssh_config, see `vm help ssh`".into(),
+                ),
+                (
                     "--wait-network",
                     "Return only once the guest has network and DNS (about a second more)".into(),
                 ),
@@ -230,11 +234,19 @@ directory."
 Runs your ssh client as varmint@NAME through `vm proxy`, so it needs no
 network setup. Your ~/.ssh/*.pub keys and a key in ~/.vm/ssh are
 authorized in every VM; for a remote VM they are installed through the
-guest agent first. Remaining arguments are passed to ssh."
+guest agent first. Remaining arguments are passed to ssh.
+
+While a local VM runs, it is also host vm-NAME in ~/.vm/ssh_config, which
+~/.ssh/config includes, so plain ssh, scp, rsync and editors or agent apps
+that list your ssh hosts, such as OpenCode Desktop and VS Code Remote-SSH,
+reach it without `vm`. The first VM adds the Include at the top of
+~/.ssh/config; a VM leaves the file when it stops. `vm run --no-ssh-config`
+keeps a VM out of it."
                 .into(),
             options: vec![],
             examples: &[
                 ("vm ssh $vm", "interactive session"),
+                ("ssh vm-$vm", "the same with plain ssh"),
                 ("vm ssh $vm uptime", "run a command"),
                 ("vm ssh $vm -L 8080:localhost:8080", "forward a port"),
             ],

@@ -118,6 +118,19 @@ vm ssh $vm                    # regular ssh, tunneled through the agent
 scp -o ProxyCommand="vm proxy $vm 22" file varmint@$vm:   # any TCP port works
 ```
 
+Every local VM is also an ssh host named `vm-NAME` while it runs, so plain `ssh`, `scp`, `rsync` and apps that list the hosts of `~/.ssh/config` reach it without `vm`. Hosts are kept in `~/.vm/ssh_config`, which the first VM includes at the top of `~/.ssh/config`; a VM leaves the file when it stops. `vm run --no-ssh-config` keeps a VM out of it:
+
+```sh
+ssh vm-$vm                    # same as `vm ssh $vm`
+rsync -a dist/ vm-$vm:dist/
+```
+
+[OpenCode Desktop](https://opencode.ai) lists these hosts as SSH servers: pick `vm-NAME`, and it installs and starts OpenCode in the VM itself. Agents keep running there when you close Desktop, as long as the VM does not suspend, so start such VMs with `--idle-suspend 0`:
+
+```sh
+vm run --mount .:work --idle-suspend 0   # then open vm-NAME in OpenCode Desktop
+```
+
 Text copied in the guest goes to the host clipboard while an interactive session, `vm screen` or a window is open. Ctrl+V in any of them first puts the host clipboard into the guest clipboard, its image if it has one and its text otherwise, so you can paste screenshots into Claude Code. The host clipboard reaches the guest only this way.
 
 ## Getting files in

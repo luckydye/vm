@@ -23,6 +23,7 @@ mod registry;
 mod screen;
 mod seed;
 mod serve;
+mod ssh_config;
 mod stdio;
 mod store;
 mod suspend;

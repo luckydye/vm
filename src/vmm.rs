@@ -11,7 +11,7 @@ use crate::{
     memory, net,
     protocol::{GuestMount, GuestSeeds},
     registry, seed,
-    stdio,
+    ssh_config, stdio,
     store::Grant,
     suspend::Suspend,
     telemetry, virtio,
@@ -46,9 +46,21 @@ const SEED_MOUNT: &str = "/run/varmint/seed";
 /// Directory deleted when an ephemeral VM exits.
 static EPHEMERAL_DIR: OnceLock<PathBuf> = OnceLock::new();
 
+/// Directory of the VM, whose ssh host is removed when it exits.
+static SSH_HOST_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+fn unregister_ssh_host() {
+    if let Some(dir) = SSH_HOST_DIR.get() {
+        if let Err(error) = ssh_config::unregister(dir) {
+            eprintln!("failed to remove the ssh host of the VM: {error}");
+        }
+    }
+}
+
 /// Ends the VM process, deleting the VM if it is ephemeral.
 pub fn shutdown(reason: &'static str) -> ! {
     telemetry::stop(reason);
+    unregister_ssh_host();
     if let Some(dir) = EPHEMERAL_DIR.get() {
         if let Err(error) = instance::archive_log(dir) {
             eprintln!("failed to keep the VM log: {error}");
@@ -94,10 +106,12 @@ fn vmm_thread(
 
 /// `idle_suspend` is how long the VM waits without control clients before it
 /// suspends, `None` to never suspend. A VM with a window never suspends.
+/// `ssh_host` lists the VM as host `vm-NAME` in the ssh config while it runs.
 pub fn run(
     launch: Launch,
     window: bool,
     idle_suspend: Option<Duration>,
+    ssh_host: bool,
     mounts: &[Mount],
     seeds: &[Seed],
     grants: Vec<Grant>,
@@ -121,6 +135,7 @@ pub fn run(
     std::panic::set_hook(Box::new(move |info| {
         default_panic(info);
         telemetry::stop("crash");
+        unregister_ssh_host();
         std::process::exit(101);
     }));
 
@@ -134,6 +149,15 @@ pub fn run(
             }
         }
     }
+
+    // Also removes the host a killed run of a persistent VM left behind.
+    let ssh_result = match ssh_host {
+        true => ssh_config::register(&instance.dir).map(|()| SSH_HOST_DIR.set(instance.dir.clone()).unwrap()),
+        false => ssh_config::unregister(&instance.dir),
+    };
+    ssh_result.unwrap_or_else(|error| {
+        panic!("failed to update {} (start with --no-ssh-config to skip it): {error}", ssh_config::config_path().display())
+    });
 
     let boot = BootPayload::load(&config);
 
