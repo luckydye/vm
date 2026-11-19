@@ -1,3 +1,4 @@
 # Tools preinstalled for the guest user, as mise's system-wide config.
 [tools]
 claude = "latest"
+opencode = "latest"
