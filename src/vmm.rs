@@ -106,12 +106,10 @@ fn vmm_thread(
 
 /// `idle_suspend` is how long the VM waits without control clients before it
 /// suspends, `None` to never suspend. A VM with a window never suspends.
-/// `ssh_host` lists the VM as host `vm-NAME` in the ssh config while it runs.
 pub fn run(
     launch: Launch,
     window: bool,
     idle_suspend: Option<Duration>,
-    ssh_host: bool,
     mounts: &[Mount],
     seeds: &[Seed],
     grants: Vec<Grant>,
@@ -150,14 +148,11 @@ pub fn run(
         }
     }
 
-    // Also removes the host a killed run of a persistent VM left behind.
-    let ssh_result = match ssh_host {
-        true => ssh_config::register(&instance.dir).map(|()| SSH_HOST_DIR.set(instance.dir.clone()).unwrap()),
-        false => ssh_config::unregister(&instance.dir),
-    };
-    ssh_result.unwrap_or_else(|error| {
-        panic!("failed to update {} (start with --no-ssh-config to skip it): {error}", ssh_config::config_path().display())
-    });
+    // Registering also removes the host a killed run of this VM left behind.
+    SSH_HOST_DIR.set(instance.dir.clone()).unwrap();
+    if let Err(error) = ssh_config::register(&instance.dir) {
+        panic!("failed to update {}: {error}", ssh_config::config_path().display());
+    }
 
     let boot = BootPayload::load(&config);
 

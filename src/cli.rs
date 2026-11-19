@@ -252,7 +252,6 @@ struct RunOptions {
     window: bool,
     /// Minutes without clients before the VM suspends, 0 for never.
     idle_suspend: Option<u64>,
-    ssh_host: bool,
     wait_network: bool,
     mounts: Vec<String>,
     environment: Vec<String>,
@@ -279,7 +278,6 @@ fn run(args: &[String]) {
         name: None,
         window: false,
         idle_suspend: None,
-        ssh_host: true,
         wait_network: false,
         mounts: Vec::new(),
         environment: Vec::new(),
@@ -308,10 +306,6 @@ fn run(args: &[String]) {
                 options.start_flags = true;
             }
             "--wait-network" => options.wait_network = true,
-            "--no-ssh-config" => {
-                options.ssh_host = false;
-                options.start_flags = true;
-            }
             "--idle-suspend" => {
                 options.idle_suspend = Some(parse(args.next(), "--idle-suspend"));
                 options.start_flags = true;
@@ -439,7 +433,7 @@ fn run_local(options: RunOptions, started: Instant) {
                         if options.start_flags {
                             fail(format!(
                                 "VM {name} is already running; stop it before changing its mounts, seeds, \
-                                 stores, environment, window, idle suspend or ssh config"
+                                 stores, environment, window or idle suspend"
                             ));
                         }
                         (Vm::Running(instance), false)
@@ -476,7 +470,7 @@ fn run_local(options: RunOptions, started: Instant) {
     let name = vm.instance().name.clone();
     if let Vm::Booting(launch) = vm {
         let idle_suspend = options.idle_suspend.unwrap_or(suspend::DEFAULT_IDLE_MINUTES);
-        spawn_vmm(launch, options.window, idle_suspend, options.ssh_host, &mounts, &seeds, &grants, &environment);
+        spawn_vmm(launch, options.window, idle_suspend, &mounts, &seeds, &grants, &environment);
     }
 
     let target = Target::Local(open(&name));
@@ -524,9 +518,6 @@ fn run_local(options: RunOptions, started: Instant) {
 fn run_remote(node: node::Node, options: RunOptions) {
     if options.window {
         fail("--window needs the local desktop; use `vm screen` or `vm stream` for a remote VM");
-    }
-    if !options.ssh_host {
-        fail("--no-ssh-config applies to local VMs; remote VMs are not in this machine's ssh config");
     }
     if !options.mounts.is_empty() {
         fail(
@@ -725,7 +716,6 @@ fn spawn_vmm(
     launch: Launch,
     window: bool,
     idle_suspend: u64,
-    ssh_host: bool,
     mounts: &[Mount],
     seeds: &[Seed],
     grants: &[Grant],
@@ -756,9 +746,6 @@ fn spawn_vmm(
         .process_group(0);
     if window {
         command.arg("--window");
-    }
-    if !ssh_host {
-        command.arg("--no-ssh-config");
     }
     for mount in mounts {
         command.arg("--mount").arg(mount.spec());
@@ -819,11 +806,10 @@ fn max_files_per_process() -> libc::rlim_t {
 /// Entry point of the detached VM process started by `vm run`.
 fn vmm_process(args: &[String]) {
     let [name, lock_fd, listen_fd, rest @ ..] = args else {
-        fail("internal: __vmm NAME LOCK_FD LISTEN_FD --idle-suspend MIN [--window] [--no-ssh-config] [--mount SPEC]...");
+        fail("internal: __vmm NAME LOCK_FD LISTEN_FD --idle-suspend MIN [--window] [--mount SPEC]...");
     };
     raise_open_file_limit();
     let mut window = false;
-    let mut ssh_host = true;
     let mut idle_suspend = None;
     let mut mounts = Vec::new();
     let mut seeds = Vec::new();
@@ -832,7 +818,6 @@ fn vmm_process(args: &[String]) {
     while let Some(arg) = rest.next() {
         match arg.as_str() {
             "--window" => window = true,
-            "--no-ssh-config" => ssh_host = false,
             "--idle-suspend" => idle_suspend = Some(parse::<u64>(rest.next(), "--idle-suspend")),
             "--mount" => {
                 let spec = rest.next().unwrap_or_else(|| fail("internal: --mount needs a spec"));
@@ -870,7 +855,7 @@ fn vmm_process(args: &[String]) {
     // Helpers started by the VM must not see the guest's secrets.
     unsafe { env::remove_var(GUEST_ENVIRONMENT_VARIABLE) };
 
-    vmm::run(launch, window, idle_suspend, ssh_host, &mounts, &seeds, grants, environment).unwrap_or_else(|error| panic!("VM failed: {error:?}"));
+    vmm::run(launch, window, idle_suspend, &mounts, &seeds, grants, environment).unwrap_or_else(|error| panic!("VM failed: {error:?}"));
 }
 
 /// `vm store`: the shared object store from the host, through the same
@@ -1533,12 +1518,10 @@ fn screen_command(args: &[String]) {
 fn stream(args: &[String]) {
     let name = name_arg("stream", args);
     let mut fps = 30;
-    let mut audio = true;
     let mut options = args[1..].iter();
     while let Some(option) = options.next() {
         match option.as_str() {
             "--fps" => fps = parse(options.next(), "--fps"),
-            "--no-audio" => audio = false,
             _ => usage_error("stream"),
         }
     }
@@ -1549,7 +1532,7 @@ fn stream(args: &[String]) {
         &Request::Stream {
             fps,
             codec: Codec::H264,
-            audio,
+            audio: true,
         },
     )
     .unwrap_or_else(|error| fail(error));

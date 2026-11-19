@@ -40,9 +40,6 @@ set +e; "$VM" exec "$vm" -- sh -c 'exit 7'; code=$?; set -e
 [ "$("$VM" ssh "$vm" -- echo ssh-ok)" = ssh-ok ] || fail "ssh"
 grep -qx "Include \"$VM_HOME/ssh_config\"" "$HOME/.ssh/config" || fail "ssh config includes the VM hosts"
 [ "$(ssh -F "$HOME/.ssh/config" "vm-$vm" echo ssh-host-ok)" = ssh-host-ok ] || fail "plain ssh to host vm-$vm"
-hidden=$("$VM" run --no-ssh-config)
-! grep -q "^Host vm-$hidden$" "$VM_HOME/ssh_config" || fail "--no-ssh-config VM listed as ssh host"
-"$VM" stop "$hidden"
 script -q /dev/null "$VM" ls | grep -q "^$vm .*running" || fail "ls"
 "$VM" ls | grep -qx "$vm" || fail "ls in a pipe prints names"
 online=$("$VM" run --wait-network)

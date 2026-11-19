@@ -118,7 +118,7 @@ vm ssh $vm                    # regular ssh, tunneled through the agent
 scp -o ProxyCommand="vm proxy $vm 22" file varmint@$vm:   # any TCP port works
 ```
 
-Every local VM is also an ssh host named `vm-NAME` while it runs, so plain `ssh`, `scp`, `rsync` and apps that list the hosts of `~/.ssh/config` reach it without `vm`. Hosts are kept in `~/.vm/ssh_config`, which the first VM includes at the top of `~/.ssh/config`; a VM leaves the file when it stops. `vm run --no-ssh-config` keeps a VM out of it:
+Every local VM is also an ssh host named `vm-NAME` while it runs, so plain `ssh`, `scp`, `rsync` and apps that list the hosts of `~/.ssh/config` reach it without `vm`. Hosts are kept in `~/.vm/ssh_config`, which the first VM includes at the top of `~/.ssh/config`; a VM leaves the file when it stops:
 
 ```sh
 ssh vm-$vm                    # same as `vm ssh $vm`

@@ -94,10 +94,6 @@ suspends. `vm ls` shows suspended VMs."
                 ("--node NAME", "Run on a node from ~/.vm/nodes".into()),
                 ("--any", "Pick the least loaded node with room".into()),
                 (
-                    "--no-ssh-config",
-                    "Leave the VM out of ~/.vm/ssh_config, see `vm help ssh`".into(),
-                ),
-                (
                     "--wait-network",
                     "Return only once the guest has network and DNS (about a second more)".into(),
                 ),
@@ -240,8 +236,7 @@ While a local VM runs, it is also host vm-NAME in ~/.vm/ssh_config, which
 ~/.ssh/config includes, so plain ssh, scp, rsync and editors or agent apps
 that list your ssh hosts, such as OpenCode Desktop and VS Code Remote-SSH,
 reach it without `vm`. The first VM adds the Include at the top of
-~/.ssh/config; a VM leaves the file when it stops. `vm run --no-ssh-config`
-keeps a VM out of it."
+~/.ssh/config; a VM leaves the file when it stops."
                 .into(),
             options: vec![],
             examples: &[
@@ -352,12 +347,12 @@ mouse reporting, such as Ghostty, Kitty or WezTerm."
         Command {
             name: "stream",
             group: "Screen and input",
-            usage: "vm stream NAME [--fps N] [--no-audio]",
+            usage: "vm stream NAME [--fps N]",
             summary: "Write the screen as H.264 and the sound as Opus to stdout",
             description: "\
-Streams the screen, and the sound unless --no-audio, until the VM stops or
-the reader goes away, for programs that show the screen elsewhere. Each
-message starts with a u8 kind; numbers are little-endian:
+Streams the screen and the sound until the VM stops or the reader goes
+away, for programs that show the screen elsewhere. Each message starts
+with a u8 kind; numbers are little-endian:
 
   video  0, width u32, height u32, keyframe u8 (1 or 0), length u32,
          then an H.264 access unit in Annex B form
@@ -366,13 +361,10 @@ message starts with a u8 kind; numbers are little-endian:
 The first video message is a keyframe with its parameter sets. Video is sent
 only when the screen changes, so a still screen sends nothing."
                 .into(),
-            options: vec![
-                ("--fps N", "Most frames per second (default 30, at most 60)".into()),
-                ("--no-audio", "Leave out the sound".into()),
-            ],
+            options: vec![("--fps N", "Most frames per second (default 30, at most 60)".into())],
             examples: &[
                 ("vm stream $vm > screen.bin", ""),
-                ("vm stream $vm --no-audio | my-viewer", ""),
+                ("vm stream $vm | my-viewer", ""),
             ],
         },
         Command {
