@@ -71,8 +71,9 @@ def user_environment(account, terminal=None):
         "USER": account.pw_name,
         "LOGNAME": account.pw_name,
         "SHELL": account.pw_shell,
-        # mise shims make tools installed with `mise use -g` work in `varmint exec`.
-        "PATH": f"{account.pw_dir}/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin",
+        # ~/bin holds seeded commands; mise shims make tools installed with
+        # `mise use -g` work in `varmint exec`.
+        "PATH": f"{account.pw_dir}/bin:{account.pw_dir}/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin",
         "WAYLAND_DISPLAY": "wayland-1",
         "DISPLAY": ":0",
         "XDG_RUNTIME_DIR": f"/run/user/{account.pw_uid}",

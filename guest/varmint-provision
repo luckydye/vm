@@ -327,10 +327,11 @@ set -g extended-keys on
 set -as terminal-features 'xterm*:extkeys:RGB'
 EOF_TMUX
 
-# Login shells (bash -l, ssh commands) reset PATH in /etc/profile; the shims
-# keep tools installed with `mise use -g` available there too.
+# Login shells (bash -l, ssh commands) reset PATH in /etc/profile; ~/bin and
+# the shims keep seeded commands and tools installed with `mise use -g`
+# available there too.
 cat > /etc/profile.d/mise.sh <<'EOF_PROFILE'
-export PATH="$HOME/.local/share/mise/shims:$PATH"
+export PATH="$HOME/bin:$HOME/.local/share/mise/shims:$PATH"
 EOF_PROFILE
 
 cat >> /etc/bash.bashrc <<'EOF_BASHRC'

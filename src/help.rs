@@ -66,7 +66,8 @@ Seeds copy host files or directories into the VM at every start, for
 example an agent's skills, settings or ssh key. The contents of the
 ~/.vm/seeds directory go into the guest home of every VM; symlinks in it
 are followed. A directory in a git work tree leaves out what .gitignore
-ignores. Changes in the VM never reach the host.
+ignores. Changes in the VM never reach the host. Commands in the guest's
+~/bin are on PATH, so a script in ~/.vm/seeds/bin runs by name.
 
 Text copied in the guest goes to the host clipboard while an interactive
 session, `vm screen` or a window is open. Ctrl+V in any of them first puts the

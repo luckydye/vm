@@ -140,13 +140,14 @@ Text copied in the guest goes to the host clipboard while an interactive session
 vm run --mount ~/project:/work --mount ~/datasets:data:ro
 ```
 
-**Seeds** copy host files or directories into the VM at start, one way: changes in the VM never reach the host. A directory in a git work tree leaves out what `.gitignore` ignores but keeps `.git`. The contents of the `~/.vm/seeds` directory go into the guest home of every VM, with symlinks followed and file modes kept; pass `--seed HOST:GUEST` for one run:
+**Seeds** copy host files or directories into the VM at start, one way: changes in the VM never reach the host. A directory in a git work tree leaves out what `.gitignore` ignores but keeps `.git`. The contents of the `~/.vm/seeds` directory go into the guest home of every VM, with symlinks followed and file modes kept; pass `--seed HOST:GUEST` for one run. Commands in the guest's `~/bin` are on `PATH`, so a script in `~/.vm/seeds/bin` runs by name:
 
 ```sh
-mkdir -p ~/.vm/seeds/.claude ~/.vm/seeds/.ssh
+mkdir -p ~/.vm/seeds/.claude ~/.vm/seeds/.ssh ~/.vm/seeds/bin
 ln -s ~/.claude/skills ~/.vm/seeds/.claude/skills
 ln -s ~/.gitconfig ~/.vm/seeds/.gitconfig
 ssh-keygen -t ed25519 -N "" -f ~/.vm/seeds/.ssh/id_ed25519   # a key just for the VMs
+cp ~/bin/lg ~/.vm/seeds/bin/                                 # a host command, available in every VM
 ```
 
 **Environment** variables are copied from your shell with `--env NAME`; `CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_API_KEY` always are when set. Values are never passed as arguments, so `ps` and shell history do not show them. They are set in `run` and `ssh` sessions, and programs in the VM can read them:
