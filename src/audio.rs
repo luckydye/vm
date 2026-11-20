@@ -63,6 +63,8 @@ pub struct PeriodSink {
     producer: Producer<Period>,
     playback: Arc<PlaybackState>,
     listeners: Arc<Listeners>,
+    /// The timer clock, which sleeps until playback starts.
+    clock: Option<thread::Thread>,
 }
 
 /// Receivers of the guest's audio as it is queued for playback, such as web UI streams.
@@ -142,6 +144,7 @@ impl Backend {
             speakers.then(pulse::Output::open).transpose()?,
         ));
 
+        let clock = clock_thread.as_ref().map(|thread| thread.thread().clone());
         Ok((
             Backend {
                 #[cfg(target_os = "macos")]
@@ -154,6 +157,7 @@ impl Backend {
                 producer,
                 playback,
                 listeners,
+                clock,
             },
         ))
     }
@@ -181,7 +185,8 @@ fn play_on_speakers(mut state: CallbackState) -> Result<AudioUnit, coreaudio::Er
     Ok(unit)
 }
 
-/// Consumes the guest's audio at the pace of a timer, standing in for the sound card.
+/// Consumes the guest's audio at the pace of a timer, standing in for the sound
+/// card. It sleeps while the guest plays nothing, so an idle VM has no timer.
 #[cfg(target_os = "macos")]
 fn spawn_clock(clock_state: Arc<CompletionState>, mut state: CallbackState) -> JoinHandle<()> {
     thread::Builder::new()
@@ -190,6 +195,10 @@ fn spawn_clock(clock_state: Arc<CompletionState>, mut state: CallbackState) -> J
             let mut out = vec![0; BYTES_PER_SECOND * CLOCK_TICK.as_millis() as usize / 1000];
             let mut next = Instant::now();
             while clock_state.running.load(Ordering::Acquire) {
+                if state.wait_for_playback() {
+                    next = Instant::now();
+                    continue;
+                }
                 state.render(&mut out);
                 next += CLOCK_TICK;
                 thread::sleep(next.saturating_duration_since(Instant::now()));
@@ -199,7 +208,8 @@ fn spawn_clock(clock_state: Arc<CompletionState>, mut state: CallbackState) -> J
 }
 
 /// Consumes the guest's audio at the pace of `output`, whose writes block
-/// while it is full, or of a timer standing in for the sound card.
+/// while it is full, or of a timer standing in for the sound card. The timer
+/// sleeps while the guest plays nothing, so an idle VM has no timer.
 #[cfg(target_os = "linux")]
 fn spawn_clock(
     clock_state: Arc<CompletionState>,
@@ -212,6 +222,10 @@ fn spawn_clock(
             let mut out = vec![0; BYTES_PER_SECOND * CLOCK_TICK.as_millis() as usize / 1000];
             let mut next = Instant::now();
             while clock_state.running.load(Ordering::Acquire) {
+                if output.is_none() && state.wait_for_playback() {
+                    next = Instant::now();
+                    continue;
+                }
                 state.render(&mut out);
                 match &output {
                     Some(output) => output.write(&out).unwrap_or_else(|error| panic!("{error}")),
@@ -230,6 +244,7 @@ impl Drop for Backend {
         self.completion.running.store(false, Ordering::Release);
 
         if let Some(thread) = self.clock_thread.take() {
+            thread.thread().unpark();
             let _ = thread.join();
         }
 
@@ -241,6 +256,16 @@ impl Drop for Backend {
 }
 
 impl CallbackState {
+    /// Sleeps until playback may have started or the backend stops, if the
+    /// guest plays nothing. Returns whether it slept.
+    fn wait_for_playback(&self) -> bool {
+        if self.playback.running.load(Ordering::Acquire) {
+            return false;
+        }
+        thread::park();
+        true
+    }
+
     fn render(&mut self, out: &mut [u8]) {
         let mut filled = 0;
 
@@ -318,6 +343,9 @@ impl PeriodSink {
 
     pub fn start(&self) {
         self.playback.running.store(true, Ordering::Release);
+        if let Some(clock) = &self.clock {
+            clock.unpark();
+        }
     }
 
     pub fn stop(&self) {
