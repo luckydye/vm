@@ -33,8 +33,9 @@ virt-customize --network -a "$work_image" \
     --run-command '[ "$(dpkg --print-architecture)" != arm64 ] || { test -x /usr/local/bin/FEX && test "$(readlink /usr/local/bin/FEXBash)" = FEX && test "$(readlink /usr/local/bin/FEXRootFSFetcher)" = FEX && test ! -e /home/varmint/.local/share/fex-emu/RootFS; }' \
     --run-command '[ "$(dpkg --print-architecture)" != amd64 ] || for initrd in /boot/initrd.img-*; do lsinitramfs "$initrd" | grep -q "/virtio_mmio.ko" || { echo "initramfs is missing virtio_mmio: $initrd" >&2; exit 1; }; done' \
     --run-command 'test -f /home/varmint/.config/hypr/hyprland.conf' \
+    --run-command 'test -x /usr/lib/systemd/system-generators/zram-generator && test -f /etc/systemd/zram-generator.conf' \
     --run-command 'grep -q "^varmint:" /etc/subuid && grep -q "^varmint:" /etc/subgid' \
-    --run-command 'systemctl enable varmint-grow-root.service varmint-drop-caches.timer' \
+    --run-command 'systemctl enable varmint-grow-root.service varmint-reclaim.timer' \
     --run-command 'passwd -l root' \
     --run-command 'printf "varmint\n" > /etc/hostname' \
     --run-command 'truncate -s 0 /etc/machine-id' \

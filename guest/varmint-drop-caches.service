@@ -1,9 +1,0 @@
-[Unit]
-Description=Drop the guest page cache so its memory goes back to the host
-
-# Free page reporting returns only free memory to the host, and the page cache
-# would otherwise keep filling guest RAM. Reads it dropped are served again from
-# the host's own cache of the disk image and shared files.
-[Service]
-Type=oneshot
-ExecStart=/bin/sh -c 'echo 1 > /proc/sys/vm/drop_caches'

@@ -1,0 +1,6 @@
+[Unit]
+Description=Reclaim cold guest memory so it goes back to the host
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/varmint-reclaim

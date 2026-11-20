@@ -88,6 +88,7 @@ apt-get install -y --no-install-recommends \
     rtkit \
     squashfs-tools \
     sudo \
+    systemd-zram-generator \
     tmux \
     uidmap \
     vulkan-tools \
@@ -416,6 +417,23 @@ EOF_PORTS
 # ssh sessions get the host-provided variables too; optional, so a VM that
 # has not received any yet still accepts logins.
 printf 'session optional pam_env.so envfile=/run/varmint/environment\n' >> /etc/pam.d/sshd
+
+# /tmp on the root disk instead of tmpfs, whose files would hold guest RAM
+# that the host then cannot take back.
+systemctl mask tmp.mount
+
+# Swap on compressed RAM: under memory pressure the guest compresses cold
+# memory instead of thrashing its page cache until the OOM killer steps in.
+# Pages swap in one at a time, as compressed RAM gains nothing from reading
+# ahead.
+cat > /etc/systemd/zram-generator.conf <<'EOF_ZRAM'
+[zram0]
+zram-size = ram
+compression-algorithm = zstd
+EOF_ZRAM
+cat > /etc/sysctl.d/80-varmint-zram.conf <<'EOF_ZRAM_SYSCTL'
+vm.page-cluster = 0
+EOF_ZRAM_SYSCTL
 
 systemctl enable ssh.service
 systemctl enable greetd.service
