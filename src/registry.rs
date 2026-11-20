@@ -10,6 +10,8 @@ use crate::{
     instance,
     protocol::{RegistryToken, RegistryTokenRequest},
 };
+#[cfg(target_os = "macos")]
+use std::os::unix::process::CommandExt;
 use std::{
     env, fs,
     io::Write,
@@ -131,13 +133,20 @@ fn credentials(registry: &str) -> Result<String, String> {
 
 /// Runs curl with its options on stdin, where `ps` does not show them.
 fn curl(config: &str) -> Result<String, String> {
-    let mut child = Command::new("curl")
+    let mut command = Command::new("curl");
+    command
         .args(["--silent", "--show-error", "--config", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("failed to run curl: {error}"))?;
+        .stderr(Stdio::piped());
+    // macOS posix_spawn rejects stdio pipes at or above OPEN_MAX (10240), and
+    // virtio-fs pins a fd per guest directory, so the VM process gets there.
+    // A closure makes std spawn with fork+exec, which has no such limit.
+    #[cfg(target_os = "macos")]
+    unsafe {
+        command.pre_exec(|| Ok(()));
+    }
+    let mut child = command.spawn().map_err(|error| format!("failed to run curl: {error}"))?;
     child
         .stdin
         .take()
