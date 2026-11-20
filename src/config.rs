@@ -13,8 +13,11 @@ use std::{
 /// No device needs bounce buffers, so swiotlb would only pin 64 MiB of guest RAM.
 /// Free page reporting releases free blocks down to one 16 KiB host page (order 2)
 /// instead of 2 MiB, so fragmented free memory goes back to the host too.
+/// Transparent huge pages only for programs that ask for them: a partly used
+/// 2 MiB page is never free, so it would keep that memory from the host.
 const KERNEL_ARGS: &str = "root=LABEL=varmint-root rootflags=discard rw quiet loglevel=3 apparmor=0 \
-     systemd.condition-needs-update=0 swiotlb=noforce page_reporting.page_reporting_order=2";
+     systemd.condition-needs-update=0 swiotlb=noforce page_reporting.page_reporting_order=2 \
+     transparent_hugepage=madvise";
 const MIB: u64 = 1024 * 1024;
 pub const GIB: u64 = 1024 * MIB;
 
