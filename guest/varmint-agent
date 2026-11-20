@@ -33,7 +33,7 @@ ENVIRONMENT_FILE = "/run/varmint/environment"
 HOST_ENVIRONMENT = {}
 HEADER = struct.Struct("<IBI")
 (OPEN, DATA, STDERR, EOF, EXIT, RESIZE, HELLO, SETUP, CLOSE, SETUP_DONE, TELEMETRY, REGISTRY_TOKEN,
- STORE, STORE_DATA) = range(1, 15)
+ STORE, STORE_DATA, CLIPBOARD_IMAGE, CLIPBOARD_TEXT, CLIPBOARD_PASTED, TIME) = range(1, 19)
 REGISTRY_PORT = 5100
 STORE_PORT = 5101
 # Bytes per frame of a store request's body, store::CHUNK.
@@ -733,6 +733,19 @@ def setup(payload, link):
     """Applies host settings; returns the registry mirror or None and a list of error messages."""
     request = json.loads(payload)
     time.clock_settime(time.CLOCK_REALTIME, request["time_ms"] / 1000)
+    timezone = request.get("timezone")
+    if timezone:
+        zoneinfo = os.path.realpath(os.path.join("/usr/share/zoneinfo", timezone))
+        if zoneinfo.startswith("/usr/share/zoneinfo/") and os.path.isfile(zoneinfo):
+            try:
+                os.unlink("/etc/localtime")
+            except FileNotFoundError:
+                pass
+            os.symlink(zoneinfo, "/etc/localtime")
+            with open("/etc/timezone", "w", encoding="utf-8") as file:
+                file.write(f"{timezone}\n")
+        os.environ["TZ"] = timezone
+        time.tzset()
 
     account = pwd.getpwnam(USER)
     ssh_dir = os.path.join(account.pw_dir, ".ssh")
@@ -809,6 +822,9 @@ def main():
                 if kind == SETUP:
                     registries, errors = setup(payload, link)
                     link.send(0, SETUP_DONE, json.dumps({"errors": errors}).encode())
+                elif kind == TIME:
+                    (time_ms,) = struct.unpack("<Q", payload)
+                    time.clock_settime(time.CLOCK_REALTIME, time_ms / 1000)
                 elif kind == REGISTRY_TOKEN:
                     registries.answer(payload)
                 elif kind in (STORE, STORE_DATA):

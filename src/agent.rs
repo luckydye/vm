@@ -98,6 +98,10 @@ impl Agent {
             .expect("runtime event pump exited");
     }
 
+    pub fn sync_time(&self) {
+        self.send(&Frame::new(0, kind::TIME, now_ms().to_le_bytes().to_vec()));
+    }
+
     pub fn open(&self, session: &Session) -> (u32, Receiver<Frame>) {
         let stream = self.next_stream.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = channel();
@@ -166,12 +170,9 @@ impl Agent {
         self.streams.lock().unwrap().clear();
         self.store_requests.lock().unwrap().clear();
 
-        let time_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("host clock is before the unix epoch")
-            .as_millis() as u64;
         let setup = Setup {
-            time_ms,
+            time_ms: now_ms(),
+            timezone: timezone(),
             authorized_keys: self.authorized_keys.clone(),
             mounts: self.mounts.clone(),
             environment: self.environment.clone(),
@@ -236,4 +237,25 @@ impl Agent {
             self.booted.notify_all();
         }
     }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("host clock is before the unix epoch")
+        .as_millis() as u64
+}
+
+fn timezone() -> Option<String> {
+    if let Ok(tz) = std::env::var("TZ") {
+        let tz = tz.trim().trim_start_matches(':');
+        let tz = tz.split_once("zoneinfo/").map_or(tz, |(_, zone)| zone);
+        if !tz.is_empty() {
+            return Some(tz.to_owned());
+        }
+    }
+    let target = std::fs::read_link("/etc/localtime").ok()?;
+    let target = target.to_str()?;
+    let (_, zone) = target.split_once("zoneinfo/")?;
+    (!zone.is_empty()).then(|| zone.to_owned())
 }

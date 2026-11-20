@@ -60,6 +60,8 @@ pub mod kind {
     /// Answers a paste on a [`super::Request::Clipboard`] connection once the
     /// guest clipboard holds it, with why it does not when the payload is not empty.
     pub const CLIPBOARD_PASTED: u8 = 17;
+    /// The host's current time as a little-endian u64 of milliseconds since the Unix epoch.
+    pub const TIME: u8 = 18;
 }
 
 /// The kinds of messages in an H.264 [`Request::Stream`].
@@ -225,6 +227,8 @@ pub enum Session {
 #[derive(Serialize, Deserialize)]
 pub struct Setup {
     pub time_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
     pub authorized_keys: String,
     pub mounts: Vec<GuestMount>,
     pub environment: BTreeMap<String, String>,

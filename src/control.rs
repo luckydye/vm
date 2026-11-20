@@ -75,7 +75,10 @@ fn handle(connection: UnixStream, context: &Context<'_>) -> io::Result<()> {
         }
     };
     // Asking for usage, as `vm ls` and node load balancing do, is not activity.
-    let _client = (!matches!(request, Request::Usage)).then(|| context.suspend.client());
+    let _client = (!matches!(request, Request::Usage)).then(|| {
+        context.agent.sync_time();
+        context.suspend.client()
+    });
     match request {
         Request::Wait => match context.agent.wait_booted() {
             Ok(boot_time) => protocol::write_json(
