@@ -32,7 +32,7 @@ use std::{
 const DEFAULT_HARDWARE: Hardware = Hardware {
     persist: false,
     cpus: 4,
-    memory_mib: 6144,
+    memory_mib: 4096,
     disk_gib: 64,
     width: 1920,
     height: 1200,

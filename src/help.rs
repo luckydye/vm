@@ -500,7 +500,7 @@ connection sends one JSON line and gets one JSON line back, then closes.
 Every request carries the token from ~/.vm/serve-token, which is
 created on first use:
 
-  {\"token\": \"...\", \"op\": \"run\", \"persist\": false, \"cpus\": 4, \"memory_mib\": 6144,
+  {\"token\": \"...\", \"op\": \"run\", \"persist\": false, \"cpus\": 4, \"memory_mib\": 4096,
    \"disk_gib\": 64, \"size\": [1920, 1080], \"wait_network\": true}
                                                -> {\"name\": \"swift-otter\", \"created\": true}
   {\"token\": \"...\", \"op\": \"ls\"}           -> {\"vms\": [{\"name\", \"running\", \"hardware\", \"memory_bytes\", \"cpu_ms\", \"suspended\"}],
