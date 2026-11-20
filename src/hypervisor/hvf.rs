@@ -6,7 +6,7 @@ mod sysreg;
 use crate::{
     devices::Devices,
     machine::{Boot, GICD_START, GICR_START},
-    memory::GuestMemory,
+    memory::{BLOCK, GuestMemory},
     suspend::Suspend,
 };
 use applevisor::{error::HypervisorError, prelude::*};
@@ -41,6 +41,35 @@ fn check(result: i32, what: &str) -> io::Result<()> {
         return Err(io::Error::other(format!("{what} failed: {result:#x}")));
     }
     Ok(())
+}
+
+/// The whole [`BLOCK`]s of `guest_addr..guest_addr + len`.
+fn discard_blocks(guest_addr: u64, len: usize) -> (u64, u64) {
+    let start = guest_addr.next_multiple_of(BLOCK as u64);
+    (start, (guest_addr + len as u64) / BLOCK as u64 * BLOCK as u64)
+}
+
+/// Best effort: a memory object whose pages the guest has written to stays.
+fn madvise(host_addr: *mut u8, len: u64) -> io::Result<()> {
+    if unsafe { libc::madvise(host_addr.cast(), len as usize, libc::MADV_FREE_REUSABLE) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Puts a fresh, zeroed memory object behind the block at `addr`.
+fn replace_block(addr: *mut u8, len: usize) {
+    let block = unsafe {
+        libc::mmap(
+            addr.cast(),
+            len,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_ANON | libc::MAP_PRIVATE | libc::MAP_FIXED,
+            -1,
+            0,
+        )
+    };
+    assert_eq!(block, addr.cast(), "mmap of a guest RAM block failed: {}", io::Error::last_os_error());
 }
 
 /// The sizes of the GIC distributor and of the redistributors for `vcpus`.
@@ -94,17 +123,35 @@ impl Vm {
         check(unsafe { hv_vm_unmap(guest_addr, size) }, "hv_vm_unmap")
     }
 
-    /// Releases the host pages behind page-aligned guest RAM. Pages the guest
-    /// touched stay held by its mapping, which `madvise` silently ignores, so
-    /// guest access to the range is dropped around it.
+    /// Releases the host pages behind page-aligned guest RAM. `madvise` keeps
+    /// the pages of a memory object that the guest has written to, so the whole
+    /// blocks of the range are given back by replacing their memory; the rest
+    /// is only `madvise`d, which is best effort.
     pub fn discard(&self, host_addr: *mut u8, guest_addr: u64, len: usize) -> io::Result<()> {
-        check(unsafe { hv_vm_protect(guest_addr, len, 0) }, "hv_vm_protect")?;
-        let result = unsafe { libc::madvise(host_addr.cast(), len, libc::MADV_FREE_REUSABLE) };
-        assert_eq!(result, 0, "madvise failed: {}", io::Error::last_os_error());
-        check(
-            unsafe { hv_vm_protect(guest_addr, len, HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC) },
-            "hv_vm_protect",
-        )
+        let (blocks_start, blocks_end) = discard_blocks(guest_addr, len);
+        if blocks_end < blocks_start {
+            return madvise(host_addr, len as u64);
+        }
+        let blocks_len = (blocks_end - blocks_start) as usize;
+        if blocks_len > 0 {
+            let blocks_host = unsafe { host_addr.add((blocks_start - guest_addr) as usize) };
+            self.unmap(blocks_start, blocks_len)?;
+            for offset in (0..blocks_len).step_by(BLOCK) {
+                // XNU keeps the pages of a block whose mapping fails, so leaving
+                // it as it was only costs memory.
+                replace_block(unsafe { blocks_host.add(offset) }, BLOCK.min(blocks_len - offset));
+            }
+            self.map(blocks_host, blocks_start, blocks_len, true)?;
+        }
+        let released = |from: u64, to: u64| -> io::Result<()> {
+            if from < to {
+                madvise(unsafe { host_addr.add((from - guest_addr) as usize) }, to - from)?;
+            }
+            Ok(())
+        };
+        released(guest_addr, blocks_start)?;
+        released(blocks_end, guest_addr + len as u64)?;
+        Ok(())
     }
 
     /// Runs the vCPUs until the boot CPU stops.

@@ -1,6 +1,11 @@
 use crate::hypervisor::Vm;
 use std::{ffi::c_void, io, ptr};
 
+/// Guest RAM is mapped into the hypervisor in blocks of this size, so that the
+/// hypervisor can hand one back on its own. Successive blocks of a region are
+/// adjacent in guest memory, so the guest sees no difference.
+pub const BLOCK: usize = 2 << 20;
+
 /// Guest RAM: anonymous host memory mapped into the guest in one or more
 /// regions. Unlike memory from `hv_vm_allocate`, macOS takes its pages back
 /// when they are discarded.
@@ -37,8 +42,14 @@ impl GuestMemory {
         let host_addr = host_addr.cast::<u8>();
         let mut offset = 0;
         for &(guest_addr, len) in &regions {
-            vm.map(unsafe { host_addr.add(offset) }, guest_addr, len, true)
-                .unwrap_or_else(|error| panic!("mapping guest RAM failed: {error}"));
+            assert_eq!(guest_addr % BLOCK as u64, 0, "guest RAM at {guest_addr:#x} is not block aligned");
+            let mut block = 0;
+            while block < len {
+                let block_len = BLOCK.min(len - block);
+                vm.map(unsafe { host_addr.add(offset + block) }, guest_addr + block as u64, block_len, true)
+                    .unwrap_or_else(|error| panic!("mapping guest RAM failed: {error}"));
+                block += block_len;
+            }
             offset += len;
         }
         Self {
@@ -68,7 +79,8 @@ impl GuestMemory {
 
     /// Releases the host pages behind guest RAM the guest no longer uses, so they
     /// stop counting toward the VM's memory. A later guest access reads zeroes or
-    /// stale data. Only whole host pages inside the range are released.
+    /// stale data. Only whole host pages inside the range are released; the
+    /// hypervisor can hand back the whole [`BLOCK`]s the range covers.
     pub fn discard(&self, guest_addr: u64, len: usize) -> io::Result<()> {
         let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
         let start = guest_addr.next_multiple_of(page);
