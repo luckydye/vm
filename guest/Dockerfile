@@ -131,6 +131,8 @@ RUN install -Dm0755 /opt/varmint/source/build-image-container.sh /usr/local/bin/
     install -Dm0755 /opt/varmint/source/varmint-initramfs-fsck-hook /opt/varmint/rootfs/etc/initramfs-tools/hooks/varmint-fsck && \
     install -Dm0644 /opt/varmint/source/varmint-agent.service /opt/varmint/rootfs/etc/systemd/system/varmint-agent.service && \
     install -Dm0644 /opt/varmint/source/varmint-grow-root.service /opt/varmint/rootfs/etc/systemd/system/varmint-grow-root.service && \
+    install -Dm0644 /opt/varmint/source/varmint-drop-caches.service /opt/varmint/rootfs/etc/systemd/system/varmint-drop-caches.service && \
+    install -Dm0644 /opt/varmint/source/varmint-drop-caches.timer /opt/varmint/rootfs/etc/systemd/system/varmint-drop-caches.timer && \
     install -Dm0644 /opt/varmint/source/hyprland.conf /opt/varmint/rootfs/etc/skel/.config/hypr/hyprland.conf && \
     rm -rf /opt/varmint/source
 

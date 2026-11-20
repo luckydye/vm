@@ -34,7 +34,7 @@ virt-customize --network -a "$work_image" \
     --run-command '[ "$(dpkg --print-architecture)" != amd64 ] || for initrd in /boot/initrd.img-*; do lsinitramfs "$initrd" | grep -q "/virtio_mmio.ko" || { echo "initramfs is missing virtio_mmio: $initrd" >&2; exit 1; }; done' \
     --run-command 'test -f /home/varmint/.config/hypr/hyprland.conf' \
     --run-command 'grep -q "^varmint:" /etc/subuid && grep -q "^varmint:" /etc/subgid' \
-    --run-command 'systemctl enable varmint-grow-root.service' \
+    --run-command 'systemctl enable varmint-grow-root.service varmint-drop-caches.timer' \
     --run-command 'passwd -l root' \
     --run-command 'printf "varmint\n" > /etc/hostname' \
     --run-command 'truncate -s 0 /etc/machine-id' \

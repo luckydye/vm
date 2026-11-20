@@ -96,6 +96,8 @@ vm ls | vm stop --delete    # delete all VMs
 
 The first `run` decompresses the base image once; later VMs clone it in milliseconds. `run` returns as soon as the guest agent is up, and the network follows a moment later unless you pass `--wait-network`.
 
+VMs get 4 GiB of memory by default. Free page reporting returns memory the guest frees to the host, and the guest drops its page cache every 5 minutes, so a VM only holds what it works with rather than everything it has read.
+
 A VM suspends after 15 minutes without a client: no command, shell, ssh session, tunnel, screen or stream attached to it. Its vCPUs stop and it uses no CPU, but it keeps its memory. The next command resumes it at once, and the guest clock jumps ahead by the time it slept. Background work in the guest that no client is attached to pauses too, so use `--idle-suspend MIN` to change the timeout, or set it to 0 to turn suspending off. A VM with a window never suspends. `vm ls` shows suspended VMs.
 
 Run a single command in a fresh VM, which stops afterwards:
