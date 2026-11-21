@@ -424,10 +424,10 @@ impl Workspace {
                     cx.listener(|this, _, window, cx| this.toggle_sidebar(&ToggleSidebar, window, cx)),
                 ))
             })
+            .when(self.sidebar_open, |bar| bar.pl_3())
             .when_some(machine, |bar, machine| {
                 let (start, stop, delete) = (machine.name.clone(), machine.name.clone(), machine.name.clone());
-                bar.pl_3()
-                    .child(div().font_weight(gpui::FontWeight::MEDIUM).child(machine.name.clone()))
+                bar.child(div().font_weight(gpui::FontWeight::MEDIUM).child(machine.name.clone()))
                     .child(div().text_color(rgb(MUTED)).child(state_label(&machine)))
                     .child(div().flex_1())
                     .when(machine.vm.running, |bar| {
@@ -590,12 +590,6 @@ impl Workspace {
                                     .text_color(rgb(FAINT))
                                     .child(format!("{} CPU · {} GiB", self.new_preset.cpus, self.new_preset.memory_mib / 1024)),
                             )
-                            .child(choice("persist", "Keep after stop", self.new_persist).flex_none().on_click(cx.listener(
-                                |this, _, _, cx| {
-                                    this.new_persist = !this.new_persist;
-                                    cx.notify();
-                                },
-                            )))
                             .when(!nodes.is_empty(), move |strip| {
                                 strip.child(
                                     Button::new("node-select")
@@ -636,6 +630,12 @@ impl Workspace {
                             }),
                     )
                     .child(div().w(px(1.)).h(px(16.)).flex_none().bg(rgb(BORDER)))
+                    .child(choice("persist", "Keep after stop", self.new_persist).flex_none().on_click(cx.listener(
+                        |this, _, _, cx| {
+                            this.new_persist = !this.new_persist;
+                            cx.notify();
+                        },
+                    )))
                     .child(
                         div()
                             .id("create")
@@ -969,7 +969,7 @@ fn render_notice(notice: &Notice, machines: &Entity<Machines>) -> impl IntoEleme
                 .px_3()
                 .py_2()
                 .flex()
-                .items_start()
+                .items_center()
                 .gap_3()
                 .rounded(CARD_RADIUS)
                 .bg(rgb(CARD))

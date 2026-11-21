@@ -19,7 +19,10 @@ fn cell_size(font: &Font, window: &Window) -> (Pixels, Pixels) {
     let text_system = window.text_system();
     let font_id = text_system.resolve_font(font);
     let width = text_system.advance(font_id, FONT_SIZE, 'm').expect("the monospace font has an m").width;
-    (width, (FONT_SIZE * 1.35).round())
+    // The glyphs' own height, not extra leading: block and box characters
+    // fill it edge to edge, so rows must meet without gaps.
+    let height = text_system.ascent(font_id, FONT_SIZE) + text_system.descent(font_id, FONT_SIZE);
+    (width, height)
 }
 
 pub fn render(shell: Entity<Shell>, focus: &FocusHandle, window: &mut Window, cx: &mut App) -> AnyElement {
