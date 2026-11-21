@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Builds dist/vm on Linux: bin/vm with its kernel and base image in
 # share/vm, and the same as dist/vm-linux-ARCH.tar.gz. virglrenderer,
-# libx264, libopus, PulseAudio and passt come from the distribution.
+# libx264, libopus, libavcodec, PulseAudio, passt and the libraries of the
+# `vm ui` window come from the distribution.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,7 +30,7 @@ for file in "$KERNEL" "$INITRD" "$BASE_IMAGE"; do
   need_file "$file"
 done
 require_commands cargo pkg-config tar
-for library in virglrenderer x264 opus libpulse-simple sqlite3; do
+for library in virglrenderer x264 opus libavcodec libpulse-simple sqlite3 fontconfig wayland-client xkbcommon-x11; do
   pkg-config --exists "$library" || die "missing development files for $library"
 done
 

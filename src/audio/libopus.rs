@@ -1,5 +1,6 @@
-//! Opus encoding of the guest's audio with libopus, for streams to clients on
-//! a network: about 96 kbit/s instead of 1.5 Mbit/s of PCM.
+//! Opus with libopus: encoding the guest's audio for streams to clients on a
+//! network, about 96 kbit/s instead of 1.5 Mbit/s of PCM, and decoding it
+//! again in `vm ui`.
 
 use std::ffi::{c_int, c_void};
 
@@ -19,6 +20,9 @@ unsafe extern "C" {
     fn opus_encoder_ctl(encoder: *mut c_void, request: c_int, ...) -> c_int;
     fn opus_encode(encoder: *mut c_void, pcm: *const i16, frames: c_int, data: *mut u8, max_bytes: i32) -> i32;
     fn opus_encoder_destroy(encoder: *mut c_void);
+    fn opus_decoder_create(sample_rate: i32, channels: c_int, error: *mut c_int) -> *mut c_void;
+    fn opus_decode(decoder: *mut c_void, data: *const u8, len: i32, pcm: *mut i16, frames: c_int, fec: c_int) -> c_int;
+    fn opus_decoder_destroy(decoder: *mut c_void);
 }
 
 pub struct OpusEncoder {
@@ -79,5 +83,38 @@ impl OpusEncoder {
 impl Drop for OpusEncoder {
     fn drop(&mut self) {
         unsafe { opus_encoder_destroy(self.encoder) };
+    }
+}
+
+pub struct OpusDecoder(*mut c_void);
+
+unsafe impl Send for OpusDecoder {}
+
+impl OpusDecoder {
+    pub fn new() -> Result<Self, String> {
+        let mut error = 0;
+        let decoder = unsafe { opus_decoder_create(48_000, 2, &mut error) };
+        if decoder.is_null() {
+            return Err(format!("failed to create the Opus decoder: {error}"));
+        }
+        Ok(Self(decoder))
+    }
+
+    /// The 48 kHz stereo signed 16-bit PCM of one Opus packet.
+    pub fn decode(&mut self, packet: &[u8]) -> Result<Vec<u8>, String> {
+        // The longest packet Opus allows, 120 ms.
+        let mut samples = vec![0i16; 5760 * 2];
+        let frames =
+            unsafe { opus_decode(self.0, packet.as_ptr(), packet.len() as i32, samples.as_mut_ptr(), 5760, 0) };
+        if frames < 0 {
+            return Err(format!("failed to decode Opus: {frames}"));
+        }
+        Ok(samples[..frames as usize * 2].iter().flat_map(|sample| sample.to_le_bytes()).collect())
+    }
+}
+
+impl Drop for OpusDecoder {
+    fn drop(&mut self) {
+        unsafe { opus_decoder_destroy(self.0) };
     }
 }

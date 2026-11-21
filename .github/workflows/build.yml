@@ -53,6 +53,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Zig from mise.toml, which builds Ghostty's terminal for `vm ui`.
+      - uses: jdx/mise-action@v2
+
       - name: Install build dependencies
         run: |
           brew install meson pkg-config
@@ -119,11 +122,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Zig from mise.toml, which builds Ghostty's terminal for `vm ui`.
+      - uses: jdx/mise-action@v2
+
       - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libopus-dev libpulse-dev libsqlite3-dev libvirglrenderer-dev libx264-dev pkg-config
+            libavcodec-dev libfontconfig-dev libopus-dev libpulse-dev libsqlite3-dev libvirglrenderer-dev \
+            libwayland-dev libx264-dev libxkbcommon-x11-dev pkg-config
 
       - name: Download guest runtime
         uses: actions/download-artifact@v4

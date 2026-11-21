@@ -1,5 +1,6 @@
-//! Opus encoding of the guest's audio with AudioToolbox, for streams to
-//! clients on a network: about 96 kbit/s instead of 1.5 Mbit/s of PCM.
+//! Opus with AudioToolbox: encoding the guest's audio for streams to clients
+//! on a network, about 96 kbit/s instead of 1.5 Mbit/s of PCM, and decoding
+//! it again in `vm ui`.
 
 use std::{ffi::c_void, mem, ptr};
 
@@ -33,6 +34,30 @@ struct AudioStreamBasicDescription {
     bits_per_channel: u32,
     reserved: u32,
 }
+
+const PCM: AudioStreamBasicDescription = AudioStreamBasicDescription {
+    sample_rate: 48_000.0,
+    format_id: FORMAT_LINEAR_PCM,
+    format_flags: FLAGS_SIGNED_PACKED,
+    bytes_per_packet: BYTES_PER_FRAME,
+    frames_per_packet: 1,
+    bytes_per_frame: BYTES_PER_FRAME,
+    channels_per_frame: 2,
+    bits_per_channel: 16,
+    reserved: 0,
+};
+
+const OPUS: AudioStreamBasicDescription = AudioStreamBasicDescription {
+    sample_rate: 48_000.0,
+    format_id: FORMAT_OPUS,
+    format_flags: 0,
+    bytes_per_packet: 0,
+    frames_per_packet: FRAMES_PER_PACKET,
+    bytes_per_frame: 0,
+    channels_per_frame: 2,
+    bits_per_channel: 0,
+    reserved: 0,
+};
 
 #[repr(C)]
 struct AudioBufferList {
@@ -100,30 +125,8 @@ unsafe impl Send for OpusEncoder {}
 
 impl OpusEncoder {
     pub fn new() -> Result<Self, String> {
-        let source = AudioStreamBasicDescription {
-            sample_rate: 48_000.0,
-            format_id: FORMAT_LINEAR_PCM,
-            format_flags: FLAGS_SIGNED_PACKED,
-            bytes_per_packet: BYTES_PER_FRAME,
-            frames_per_packet: 1,
-            bytes_per_frame: BYTES_PER_FRAME,
-            channels_per_frame: 2,
-            bits_per_channel: 16,
-            reserved: 0,
-        };
-        let destination = AudioStreamBasicDescription {
-            sample_rate: 48_000.0,
-            format_id: FORMAT_OPUS,
-            format_flags: 0,
-            bytes_per_packet: 0,
-            frames_per_packet: FRAMES_PER_PACKET,
-            bytes_per_frame: 0,
-            channels_per_frame: 2,
-            bits_per_channel: 0,
-            reserved: 0,
-        };
         let mut converter = ptr::null_mut();
-        let status = unsafe { AudioConverterNew(&source, &destination, &mut converter) };
+        let status = unsafe { AudioConverterNew(&PCM, &OPUS, &mut converter) };
         if status != 0 {
             return Err(format!("failed to create the Opus encoder: {status}"));
         }
@@ -219,6 +222,106 @@ extern "C" fn provide_input(
 }
 
 impl Drop for OpusEncoder {
+    fn drop(&mut self) {
+        unsafe { AudioConverterDispose(self.converter) };
+    }
+}
+
+pub struct OpusDecoder {
+    converter: *mut c_void,
+    packet: Packet,
+}
+
+/// The packet the converter decodes, handed to it once.
+struct Packet {
+    data: Vec<u8>,
+    description: AudioStreamPacketDescription,
+    handed: bool,
+}
+
+unsafe impl Send for OpusDecoder {}
+
+impl OpusDecoder {
+    pub fn new() -> Result<Self, String> {
+        let mut converter = ptr::null_mut();
+        let status = unsafe { AudioConverterNew(&OPUS, &PCM, &mut converter) };
+        if status != 0 {
+            return Err(format!("failed to create the Opus decoder: {status}"));
+        }
+        Ok(Self {
+            converter,
+            packet: Packet {
+                data: Vec::new(),
+                description: AudioStreamPacketDescription::default(),
+                handed: true,
+            },
+        })
+    }
+
+    /// The 48 kHz stereo signed 16-bit PCM of one Opus packet.
+    pub fn decode(&mut self, packet: &[u8]) -> Result<Vec<u8>, String> {
+        self.packet.data = packet.to_vec();
+        self.packet.description = AudioStreamPacketDescription {
+            start_offset: 0,
+            variable_frames_in_packet: 0,
+            data_byte_size: packet.len() as u32,
+        };
+        self.packet.handed = false;
+        let mut pcm = vec![0u8; (FRAMES_PER_PACKET * BYTES_PER_FRAME) as usize];
+        let mut frames = FRAMES_PER_PACKET;
+        let mut output = AudioBufferList {
+            number_buffers: 1,
+            buffers: [AudioBuffer {
+                number_channels: 2,
+                data_byte_size: pcm.len() as u32,
+                data: pcm.as_mut_ptr().cast(),
+            }],
+        };
+        let status = unsafe {
+            AudioConverterFillComplexBuffer(
+                self.converter,
+                provide_packet,
+                (&raw mut self.packet).cast(),
+                &mut frames,
+                &mut output,
+                ptr::null_mut(),
+            )
+        };
+        if status != 0 && status != NEEDS_INPUT {
+            return Err(format!("failed to decode Opus: {status}"));
+        }
+        pcm.truncate((frames * BYTES_PER_FRAME) as usize);
+        Ok(pcm)
+    }
+}
+
+extern "C" fn provide_packet(
+    _converter: *mut c_void,
+    packets: *mut u32,
+    data: *mut AudioBufferList,
+    descriptions: *mut *mut AudioStreamPacketDescription,
+    user_data: *mut c_void,
+) -> OSStatus {
+    let packet = unsafe { &mut *user_data.cast::<Packet>() };
+    if packet.handed {
+        unsafe { *packets = 0 };
+        return NEEDS_INPUT;
+    }
+    packet.handed = true;
+    unsafe {
+        *packets = 1;
+        let buffer = &mut (*data).buffers[0];
+        buffer.number_channels = 2;
+        buffer.data_byte_size = packet.data.len() as u32;
+        buffer.data = packet.data.as_mut_ptr().cast();
+        if !descriptions.is_null() {
+            *descriptions = &raw mut packet.description;
+        }
+    }
+    0
+}
+
+impl Drop for OpusDecoder {
     fn drop(&mut self) {
         unsafe { AudioConverterDispose(self.converter) };
     }

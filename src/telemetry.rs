@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS vms (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
     persist INTEGER NOT NULL,
+    -- @deprecated: always 0 since VMs no longer have their own window; kept for existing databases.
     window INTEGER NOT NULL,
     cpus INTEGER NOT NULL,
     memory_mib INTEGER NOT NULL,
@@ -125,7 +126,7 @@ pub fn now() -> f64 {
 }
 
 /// Opens the database, registers this VM run and starts the writer thread.
-pub fn start(name: &str, hardware: &Hardware, mounts: usize, window: bool) {
+pub fn start(name: &str, hardware: &Hardware, mounts: usize) {
     let path = instance::home().join("telemetry.sqlite");
     let connection =
         Connection::open(&path).unwrap_or_else(|error| panic!("failed to open {}: {error}", path.display()));
@@ -139,11 +140,10 @@ pub fn start(name: &str, hardware: &Hardware, mounts: usize, window: bool) {
     connection
         .execute(
             "INSERT INTO vms (name, persist, window, cpus, memory_mib, mounts, started_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             VALUES (?1, ?2, 0, ?3, ?4, ?5, ?6)",
             params![
                 name,
                 hardware.persist,
-                window,
                 hardware.cpus as i64,
                 hardware.memory_mib as i64,
                 mounts as i64,

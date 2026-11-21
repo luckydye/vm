@@ -1,4 +1,4 @@
-use super::{DisplayBuffer, DisplayNotifier, Rect};
+use super::{DisplayBuffer, Rect};
 #[cfg(target_os = "macos")]
 use super::{angle::AngleCopy, iosurface::ScopedIOSurface};
 use crate::virtio::gpu::{PresentFrame, PresentSource, Presentation};
@@ -6,7 +6,6 @@ use std::sync::Mutex;
 
 pub struct ScanoutPublisher<'a> {
     display: &'a Mutex<DisplayBuffer>,
-    display_notifier: DisplayNotifier,
     #[cfg(target_os = "macos")]
     angle_copy: AngleCopy,
     #[cfg(target_os = "macos")]
@@ -14,10 +13,9 @@ pub struct ScanoutPublisher<'a> {
 }
 
 impl<'a> ScanoutPublisher<'a> {
-    pub fn new(display: &'a Mutex<DisplayBuffer>, display_notifier: DisplayNotifier) -> Self {
+    pub fn new(display: &'a Mutex<DisplayBuffer>) -> Self {
         Self {
             display,
-            display_notifier,
             #[cfg(target_os = "macos")]
             angle_copy: AngleCopy::new(),
             #[cfg(target_os = "macos")]
@@ -37,7 +35,6 @@ impl<'a> ScanoutPublisher<'a> {
 
     fn configure(&mut self, width: u32, height: u32) {
         self.display.lock().unwrap().resize(width as usize, height as usize);
-        self.display_notifier.notify();
     }
 
     fn present_frame(&mut self, frame: PresentFrame<'_>) -> bool {
@@ -54,7 +51,7 @@ impl<'a> ScanoutPublisher<'a> {
             height: frame.damage.height as usize,
         };
 
-        let published = match frame.source {
+        match frame.source {
             PresentSource::Pixels { data, stride, .. } => {
                 self.display
                     .lock()
@@ -96,10 +93,6 @@ impl<'a> ScanoutPublisher<'a> {
                     .unwrap()
                     .publish_iosurface(surface.id(), source, damage)
             }
-        };
-
-        if published {
-            self.display_notifier.notify();
         }
 
         true

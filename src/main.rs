@@ -1,5 +1,4 @@
 mod agent;
-mod app;
 mod audio;
 mod cli;
 mod clipboard;
@@ -13,8 +12,6 @@ mod hypervisor;
 mod instance;
 mod keymap;
 mod machine;
-#[cfg(target_os = "macos")]
-mod macos_ui;
 mod memory;
 mod net;
 mod node;
@@ -28,6 +25,7 @@ mod stdio;
 mod store;
 mod suspend;
 mod telemetry;
+mod ui;
 mod uart;
 mod virtio;
 mod vmm;

@@ -16,16 +16,10 @@ pub enum RuntimeInputEvent {
     PointerButton {
         button: u16,
         pressed: bool,
-        relative: bool,
     },
     Scroll {
         horizontal: bool,
         value: i32,
-        relative: bool,
-    },
-    RelativeMouseMotion {
-        dx: i32,
-        dy: i32,
     },
 }
 
@@ -135,50 +129,19 @@ impl<'a> RuntimeEventPump<'a> {
                     .handle_external_event(ExternalInput::Key { code, pressed }, self.mem);
             }
             RuntimeInputEvent::PointerMove { .. } => unreachable!(),
-            RuntimeInputEvent::PointerButton {
-                button,
-                pressed,
-                relative,
-            } => {
-                if relative {
-                    self.devices
-                        .mouse
-                        .lock()
-                        .unwrap()
-                        .handle_external_event(ExternalInput::PointerButton { button, pressed }, self.mem);
-                } else {
-                    self.devices
-                        .tablet
-                        .lock()
-                        .unwrap()
-                        .handle_external_event(ExternalInput::PointerButton { button, pressed }, self.mem);
-                }
-            }
-            RuntimeInputEvent::Scroll {
-                horizontal,
-                value,
-                relative,
-            } => {
-                if relative {
-                    self.devices
-                        .mouse
-                        .lock()
-                        .unwrap()
-                        .handle_external_event(ExternalInput::Scroll { horizontal, value }, self.mem);
-                } else {
-                    self.devices
-                        .tablet
-                        .lock()
-                        .unwrap()
-                        .handle_external_event(ExternalInput::Scroll { horizontal, value }, self.mem);
-                }
-            }
-            RuntimeInputEvent::RelativeMouseMotion { dx, dy } => {
+            RuntimeInputEvent::PointerButton { button, pressed } => {
                 self.devices
-                    .mouse
+                    .tablet
                     .lock()
                     .unwrap()
-                    .handle_external_event(ExternalInput::RelMotion { dx, dy }, self.mem);
+                    .handle_external_event(ExternalInput::PointerButton { button, pressed }, self.mem);
+            }
+            RuntimeInputEvent::Scroll { horizontal, value } => {
+                self.devices
+                    .tablet
+                    .lock()
+                    .unwrap()
+                    .handle_external_event(ExternalInput::Scroll { horizontal, value }, self.mem);
             }
         }
     }

@@ -3,7 +3,7 @@ mod gpu;
 
 use crate::{
     agent, audio, clipboard,
-    display::{DisplayBuffer, DisplayNotifier},
+    display::DisplayBuffer,
     hypervisor::Vm,
     machine::*,
     memory::GuestMemory,
@@ -214,11 +214,10 @@ impl<'a> Runtime<'a> {
         display: &Mutex<DisplayBuffer>,
         runtime_event_rx: Receiver<RuntimeEvent>,
         audio_event_rx: Receiver<audio::BackendEvent>,
-        display_notifier: &DisplayNotifier,
         suspend: &Suspend,
     ) -> io::Result<()> {
         thread::scope(|scope| {
-            scope.spawn(|| self.gpu_worker.run(mem, display, display_notifier));
+            scope.spawn(|| self.gpu_worker.run(mem, display));
 
             for (worker, transport) in self.share_workers.into_iter().zip(&self.devices.shares) {
                 scope.spawn(move || worker.run(transport, mem));

@@ -236,17 +236,9 @@ fn inject(event: InputEvent, context: &Context<'_>) {
                 height: height as u32,
             }
         }
-        InputEvent::Button { button, down } => RuntimeInputEvent::PointerButton {
-            button,
-            pressed: down,
-            relative: false,
-        },
+        InputEvent::Button { button, down } => RuntimeInputEvent::PointerButton { button, pressed: down },
         InputEvent::Key { code, down } => RuntimeInputEvent::Key { code, pressed: down },
-        InputEvent::Scroll { value, horizontal } => RuntimeInputEvent::Scroll {
-            horizontal,
-            value,
-            relative: false,
-        },
+        InputEvent::Scroll { value, horizontal } => RuntimeInputEvent::Scroll { horizontal, value },
     };
     context
         .runtime_tx

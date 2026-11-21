@@ -1,10 +1,10 @@
 use crate::{
-    agent, app, audio, clipboard,
+    agent, audio, clipboard,
     config::{self, Mount, Seed, VmConfig},
     fuse,
     control,
     devices::{HostBackends, Runtime, RuntimeEvent},
-    display::{DisplayBuffer, DisplayNotifier},
+    display::DisplayBuffer,
     hypervisor::Vm,
     instance::{self, Launch},
     machine::{self, MAX_SHARES},
@@ -75,7 +75,6 @@ fn vmm_thread(
     display: &Mutex<DisplayBuffer>,
     runtime_event_rx: Receiver<RuntimeEvent>,
     audio_event_rx: Receiver<audio::BackendEvent>,
-    display_notifier: DisplayNotifier,
     config: &VmConfig,
     boot: BootPayload,
     backends: HostBackends,
@@ -99,16 +98,14 @@ fn vmm_thread(
         display,
         runtime_event_rx,
         audio_event_rx,
-        &display_notifier,
         suspend,
     )
 }
 
 /// `idle_suspend` is how long the VM waits without control clients before it
-/// suspends, `None` to never suspend. A VM with a window never suspends.
+/// suspends, `None` to never suspend.
 pub fn run(
     launch: Launch,
-    window: bool,
     idle_suspend: Option<Duration>,
     mounts: &[Mount],
     seeds: &[Seed],
@@ -122,7 +119,7 @@ pub fn run(
     } = launch;
     let hardware = instance.hardware().unwrap_or_else(|error| panic!("{error}"));
     let config = VmConfig::new(&instance, &hardware);
-    telemetry::start(&instance.name, &hardware, mounts.len(), window);
+    telemetry::start(&instance.name, &hardware, mounts.len());
 
     if !hardware.persist {
         EPHEMERAL_DIR.set(instance.dir.clone()).unwrap();
@@ -219,20 +216,15 @@ pub fn run(
     })
     .unwrap_or_else(|error| panic!("failed to start networking: {error}"));
 
-    // Only a VM with a window plays on the host's speakers; every VM streams its
-    // audio to control clients.
+    // The VM plays to control clients, such as `vm ui`, which play it on their speakers.
     let audio_listeners = Arc::new(audio::Listeners::default());
     let (audio_event_tx, audio_event_rx) = std::sync::mpsc::channel();
-    let (_audio_backend, period_sink) = audio::Backend::new(window, Arc::clone(&audio_listeners), move |event| {
+    let (_audio_backend, period_sink) = audio::Backend::new(false, Arc::clone(&audio_listeners), move |event| {
         let _ = audio_event_tx.send(event);
     })
     .unwrap_or_else(|error| panic!("failed to start audio output: {error}"));
 
     let clipboard = Arc::new(clipboard::Guest::new(runtime_event_tx.clone()));
-    if window {
-        let (_, copies) = clipboard.subscribe();
-        thread::spawn(move || copies.into_iter().for_each(|text| clipboard::copy_text(&text)));
-    }
 
     let serial_rx_tx = runtime_event_tx.clone();
     let serial = stdio::start(move |byte| {
@@ -261,18 +253,13 @@ pub fn run(
         display_size: (config.width, config.height),
     };
 
-    let event_loop = window.then(app::event_loop);
-    let display_notifier = match &event_loop {
-        Some(event_loop) => DisplayNotifier::Window(event_loop.create_proxy()),
-        None => DisplayNotifier::Headless,
-    };
 
     thread::scope(|scope| {
         let vm = &vm;
         let display = &display;
         let config = &config;
         let suspend = &suspend;
-        if let Some(timeout) = idle_suspend.filter(|_| !window) {
+        if let Some(timeout) = idle_suspend {
             scope.spawn(move || suspend.watch(timeout));
         }
         scope.spawn(move || {
@@ -281,7 +268,6 @@ pub fn run(
                 display,
                 runtime_event_rx,
                 audio_event_rx,
-                display_notifier,
                 config,
                 boot,
                 backends,
@@ -291,25 +277,15 @@ pub fn run(
             shutdown("exited")
         });
 
-        match event_loop {
-            Some(event_loop) => {
-                let control_context = &control_context;
-                scope.spawn(move || control::serve(listener, control_context));
-                app::run(event_loop, display, runtime_event_tx, &clipboard, (config.width, config.height));
-                shutdown("window-closed")
-            }
-            None => {
-                runtime_event_tx
-                    .send(RuntimeEvent::DisplayResized {
-                        physical_width: config.width,
-                        physical_height: config.height,
-                        logical_width: config.width,
-                        logical_height: config.height,
-                        refresh_millihertz: 60_000,
-                    })
-                    .expect("runtime event pump exited");
-                control::serve(listener, &control_context)
-            }
-        }
+        runtime_event_tx
+            .send(RuntimeEvent::DisplayResized {
+                physical_width: config.width,
+                physical_height: config.height,
+                logical_width: config.width,
+                logical_height: config.height,
+                refresh_millihertz: 60_000,
+            })
+            .expect("runtime event pump exited");
+        control::serve(listener, &control_context)
     })
 }

@@ -10,17 +10,22 @@ crossterm = "0.29.0"
 num_enum = "0.7.6"
 polyfuse-kernel = "0.2.0"
 rtrb = "0.3.4"
-winit = "0.30.13"
 zerocopy = { version = "0.8.50", features = ["derive"] }
-raw-window-handle = "0.6"
 rusqlite = "0.40.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "1.1"
 vm-fdt = "0.3.0"
 zstd = "0.13"
-font8x8 = "0.3.1"
 uuid = { version = "1", features = ["v4"] }
+gpui = { package = "gpui-pre", version = "=0.3.11" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11", features = ["font-kit"] }
+gpui-component = "0.9.0"
+gpui-kit-assets = "0.9.0"
+# Frames for gpui images; gpui uses it without re-exporting it.
+image = { version = "0.25", default-features = false }
+# Terminal emulation for `vm ui` shells, from Ghostty; builds with the zig in mise.toml.
+libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs", rev = "483ea3d5247b214060da58ef6037a95f30ae89fb", default-features = false }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -32,30 +37,9 @@ objc2-foundation = "0.3.2"
 objc2-io-surface = "0.3.2"
 objc2-core-foundation = "0.3.2"
 objc2-app-kit = "0.3.2"
-objc2-metal = { version = "0.3.2", default-features = false, features = [
-    "MTLBlitCommandEncoder",
-    "MTLCommandBuffer",
-    "MTLCommandEncoder",
-    "MTLCommandQueue",
-    "MTLDevice",
-    "MTLDrawable",
-    "MTLPixelFormat",
-    "MTLResource",
-    "MTLTexture",
-    "MTLTypes",
-    "objc2-io-surface",
-] }
-objc2-quartz-core = { version = "0.3.2", default-features = false, features = [
-    "CALayer",
-    "CAMetalLayer",
-    "objc2-core-graphics",
-    "objc2-metal",
-] }
-raw-window-metal = "1.1.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 kvm-ioctls = "0.24"
 kvm-bindings = { version = "0.14", features = ["fam-wrappers"] }
 arboard = { version = "3", default-features = false, features = ["image-data", "wayland-data-control"] }
-softbuffer = { version = "0.4", default-features = false, features = ["x11", "x11-dlopen", "wayland", "wayland-dlopen"] }
 png = "0.18"

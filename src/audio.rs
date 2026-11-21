@@ -6,7 +6,7 @@ mod opus;
 #[cfg(target_os = "linux")]
 mod pulse;
 
-pub use opus::OpusEncoder;
+pub use opus::{OpusDecoder, OpusEncoder};
 
 #[cfg(target_os = "macos")]
 use coreaudio::audio_unit::{

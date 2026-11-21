@@ -24,7 +24,8 @@ On Linux, unpack `vm-linux-ARCH.tar.gz` from the build artifacts into a prefix, 
 
 ```sh
 sudo tar -xzf vm-linux-$(uname -m).tar.gz -C /usr/local --strip-components=1
-sudo apt install libvirglrenderer1 virgl-server libx264-164 libopus0 libpulse0 libsqlite3-0 passt   # Debian and Ubuntu
+sudo apt install libvirglrenderer1 virgl-server libx264-164 libopus0 libpulse0 libsqlite3-0 passt \
+  libavcodec61 libfontconfig1 libwayland-client0 libxkbcommon-x11-0 libvulkan1   # Debian 13; libavcodec60 on Ubuntu 24.04
 sudo usermod -aG kvm $USER
 ```
 
@@ -61,7 +62,7 @@ vm run $vm -- sh -c 'cd work && exec claude'   # or any command
 vm run $vm --                                   # interactive shell
 ```
 
-Add `--window` when you start the VM for a desktop in a window. Variables such as `CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_API_KEY` are copied from your shell automatically; pass others with `--env NAME`.
+Open `vm ui` to see its desktop in a window. Variables such as `CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_API_KEY` are copied from your shell automatically; pass others with `--env NAME`.
 
 **4. Get your work back.** With a seed, fetch the VM's branches into your repo as `$vm/BRANCH` and push them from the host with your own credentials:
 
@@ -80,9 +81,8 @@ For a VM that survives restarts, start it with `--persist` instead and start it 
 ## VMs
 
 ```sh
-vm=$(vm run)                  # ephemeral and headless; prints the VM name
+vm=$(vm run)                  # ephemeral; prints the VM name
 vm run sandbox --persist      # kept across stops, restart with `vm run sandbox`
-vm run --window               # with a window
 vm run --wait-network         # return once the guest has network and DNS
 vm run --idle-suspend 0       # never suspend when idle (default: after 15 minutes)
 vm run --cpus 8 --memory 8192 --disk 32 --size 1920x1080
@@ -98,7 +98,7 @@ The first `run` decompresses the base image once; later VMs clone it in millisec
 
 VMs get 4 GiB of memory by default. Free page reporting returns memory the guest frees to the host, and every 5 minutes the guest reclaims a tenth of the memory it holds, least recently used first, dropping cold page cache and compressing cold program memory into zram, so a VM only holds what it works with rather than everything it has read. Under memory pressure it swaps to zram instead of thrashing.
 
-A VM suspends after 15 minutes without a client: no command, shell, ssh session, tunnel, screen or stream attached to it. Its vCPUs stop and it uses no CPU, but it keeps its memory. The next command resumes it at once, and the guest clock jumps ahead by the time it slept. Background work in the guest that no client is attached to pauses too, so use `--idle-suspend MIN` to change the timeout, or set it to 0 to turn suspending off. A VM with a window never suspends. `vm ls` shows suspended VMs.
+A VM suspends after 15 minutes without a client: no command, shell, ssh session, tunnel, screen or stream attached to it. Its vCPUs stop and it uses no CPU, but it keeps its memory. The next command resumes it at once, and the guest clock jumps ahead by the time it slept. Background work in the guest that no client is attached to pauses too, so use `--idle-suspend MIN` to change the timeout, or set it to 0 to turn suspending off. `vm ls` shows suspended VMs.
 
 Run a single command in a fresh VM, which stops afterwards:
 
@@ -133,7 +133,7 @@ rsync -a dist/ vm-$vm:dist/
 vm run --mount .:work --idle-suspend 0   # then open vm-NAME in OpenCode Desktop
 ```
 
-Text copied in the guest goes to the host clipboard while an interactive session, `vm screen` or a window is open. Ctrl+V in any of them first puts the host clipboard into the guest clipboard, its image if it has one and its text otherwise, so you can paste screenshots into Claude Code. The host clipboard reaches the guest only this way.
+Text copied in the guest goes to the host clipboard while an interactive session, `vm screen` or `vm ui` is open. Ctrl+V in any of them first puts the host clipboard into the guest clipboard, its image if it has one and its text otherwise, so you can paste screenshots into Claude Code. The host clipboard reaches the guest only this way.
 
 ## Getting files in
 **Mounts** share host directories over virtio-fs, optionally read-only. Files appear owned by the guest user, changes happen as your host user, and the guest cannot follow symlinks out of a share. Relative guest paths are under `/home/varmint`:
@@ -193,7 +193,9 @@ vm pull $vm                   # fetch the VM's branches into the current repo as
 `pull` fetches through git's `ext::` transport over `vm run` and works any time while the VM runs, so you push from the host with your own credentials.
 
 ## Screen and input
-Coordinates are screenshot pixels:
+`vm ui` opens a window with the VMs of this machine and every node. It starts, stops, creates and deletes them, and shows the selected VM's screen with mouse, keyboard, sound and clipboard. ⌘K (Ctrl+K on Linux) searches the VMs and ⌘B hides the sidebar.
+
+From the CLI, coordinates are screenshot pixels:
 
 ```sh
 vm screenshot $vm shot.png
@@ -216,8 +218,6 @@ guest Vulkan => Mesa Venus => virglrenderer => host Vulkan driver          (Linu
 guest OpenGL => Mesa VirGL => virglrenderer => host OpenGL driver over EGL (Linux)
 ```
 
-In a window, F12 captures and releases the mouse. On macOS the View menu shows statistics and enters full screen; on Linux F10 and F11 do.
-
 ## Nodes
 `vm` uses this machine by default. Add remote `vm serve` instances to `~/.vm/nodes` and their VMs join one pool:
 
@@ -237,7 +237,7 @@ vm screenshot mini/swift-otter shot.png
 vm stop mini/swift-otter
 ```
 
-Every command accepts `NODE/NAME`, so `vm ls | vm stop` and `vm run | vm screen` work across the pool. `run --any` picks by free memory and CPU. `--base` and `--store` are node-local, so use `--node` with them; a `vm save` of `mini/NAME` keeps the image on mini. Mounts, seeds and `--window` are local-only because they name this machine's files or desktop. Use `vm ssh NODE/NAME -L 3000:localhost:3000` for a guest port, or copy files into the guest.
+Every command accepts `NODE/NAME`, so `vm ls | vm stop` and `vm run | vm screen` work across the pool. `run --any` picks by free memory and CPU. `--base` and `--store` are node-local, so use `--node` with them; a `vm save` of `mini/NAME` keeps the image on mini. Mounts and seeds are local-only because they name this machine's files. Use `vm ssh NODE/NAME -L 3000:localhost:3000` for a guest port, or copy files into the guest.
 
 ## Remote provisioning
 `vm serve` takes provisioning requests over TCP, for a relay or an app to create and stop VMs on this host. Each connection sends one JSON line with the token from `~/.vm/serve-token` and gets one JSON line back:
@@ -268,7 +268,7 @@ tail -f ~/.vm/serve.jsonl | jq -c 'select(.type == "dev.vm.serve.reply" and .dat
 ## Telemetry
 Every VM records what it does in `~/.vm/telemetry.sqlite`, so you can see which programs run too often or get installed repeatedly and are worth preinstalling:
 
-* `vms`: start, boot time, stop time and stop reason (`stopped`, `guest-poweroff`, `window-closed`, `exited`, `crash`) of every run
+* `vms`: start, boot time, stop time and stop reason (`stopped`, `guest-poweroff`, `exited`, `crash`) of every run
 * `processes`: every process that exited in the guest, with wall and CPU time (kernel process accounting; names are truncated to 15 characters)
 * `commands`: command lines typed in interactive guest shells (`shell`) or run with `vm run` (`exec`)
 * `packages`: apt packages and mise tools installed in the guest
@@ -289,7 +289,7 @@ SELECT name, boot_ms, round(stopped_at - started_at) AS seconds, stop_reason FRO
 ```
 
 ## Building from source
-On macOS, requires macOS 26 or later, Xcode, Rust and Docker.
+On macOS, requires macOS 26 or later, Xcode, Rust, Docker and the Zig of `mise.toml` (`mise install`), which builds Ghostty's terminal for `vm ui`; the first build fetches Ghostty's source.
 
 ```sh
 brew install cmake meson ninja pkg-config python
@@ -299,10 +299,11 @@ make install                       # into ~/.local, or INSTALL_PREFIX=...
 make pkg                           # dist/vm.pkg
 ```
 
-On Linux, requires Rust and Docker; the guest image is built for the host's architecture, or `GUEST_ARCH=arm64|amd64`.
+On Linux, requires Rust, Docker and the Zig of `mise.toml`; the guest image is built for the host's architecture, or `GUEST_ARCH=arm64|amd64`.
 
 ```sh
-sudo apt install libvirglrenderer-dev libx264-dev libopus-dev libpulse-dev libsqlite3-dev pkg-config
+sudo apt install libvirglrenderer-dev libx264-dev libopus-dev libpulse-dev libsqlite3-dev libavcodec-dev \
+  libfontconfig-dev libwayland-dev libxkbcommon-x11-dev pkg-config
 make build                         # dist/vm and dist/vm-linux-ARCH.tar.gz
 make install                       # into ~/.local, or INSTALL_PREFIX=...
 ```

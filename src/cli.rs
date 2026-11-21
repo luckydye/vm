@@ -83,6 +83,7 @@ pub fn main() {
         "scroll" => scroll(args),
         "nodes" => nodes_command(args),
         "serve" => serve_command(args),
+        "ui" => ui_command(args),
         "store" => store_command(args),
         "__vmm" => vmm_process(args),
         _ => user_command(command, args),
@@ -249,7 +250,6 @@ impl Vm {
 
 struct RunOptions {
     name: Option<String>,
-    window: bool,
     /// Minutes without clients before the VM suspends, 0 for never.
     idle_suspend: Option<u64>,
     wait_network: bool,
@@ -276,7 +276,6 @@ fn run(args: &[String]) {
     let started = Instant::now();
     let mut options = RunOptions {
         name: None,
-        window: false,
         idle_suspend: None,
         wait_network: false,
         mounts: Vec::new(),
@@ -301,10 +300,6 @@ fn run(args: &[String]) {
             break;
         }
         match arg.as_str() {
-            "--window" => {
-                options.window = true;
-                options.start_flags = true;
-            }
             "--wait-network" => options.wait_network = true,
             "--idle-suspend" => {
                 options.idle_suspend = Some(parse(args.next(), "--idle-suspend"));
@@ -433,7 +428,7 @@ fn run_local(options: RunOptions, started: Instant) {
                         if options.start_flags {
                             fail(format!(
                                 "VM {name} is already running; stop it before changing its mounts, seeds, \
-                                 stores, environment, window or idle suspend"
+                                 stores, environment or idle suspend"
                             ));
                         }
                         (Vm::Running(instance), false)
@@ -470,7 +465,7 @@ fn run_local(options: RunOptions, started: Instant) {
     let name = vm.instance().name.clone();
     if let Vm::Booting(launch) = vm {
         let idle_suspend = options.idle_suspend.unwrap_or(suspend::DEFAULT_IDLE_MINUTES);
-        spawn_vmm(launch, options.window, idle_suspend, &mounts, &seeds, &grants, &environment);
+        spawn_vmm(launch, idle_suspend, &mounts, &seeds, &grants, &environment);
     }
 
     let target = Target::Local(open(&name));
@@ -516,9 +511,6 @@ fn run_local(options: RunOptions, started: Instant) {
 }
 
 fn run_remote(node: node::Node, options: RunOptions) {
-    if options.window {
-        fail("--window needs the local desktop; use `vm screen` or `vm stream` for a remote VM");
-    }
     if !options.mounts.is_empty() {
         fail(
             "--mount shares a local directory, which a remote node cannot see; \
@@ -578,8 +570,8 @@ fn run_remote(node: node::Node, options: RunOptions) {
 }
 
 fn place_any(options: &RunOptions) -> Placement {
-    if options.window || !options.mounts.is_empty() || !options.seeds.is_empty() {
-        fail("--any cannot place local files or a window; use --node local or --node NAME");
+    if !options.mounts.is_empty() || !options.seeds.is_empty() {
+        fail("--any cannot place local files; use --node local or --node NAME");
     }
     if options.image.is_some() || !options.grants.is_empty() {
         fail("--any cannot choose a node for --base or --store yet; use --node NAME");
@@ -644,7 +636,7 @@ fn fits(status: &Status, hardware: &Hardware) -> bool {
 const NODE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Asks every node in parallel and returns the answers that arrived in time.
-fn remote_statuses(nodes: Vec<node::Node>) -> Vec<(String, Result<Status, String>)> {
+pub(crate) fn remote_statuses(nodes: Vec<node::Node>) -> Vec<(String, Result<Status, String>)> {
     let names: Vec<String> = nodes.iter().map(|node| node.name.clone()).collect();
     let (sender, receiver) = std::sync::mpsc::channel();
     for node in nodes {
@@ -714,7 +706,6 @@ fn wait_for_network(target: &Target) {
 
 fn spawn_vmm(
     launch: Launch,
-    window: bool,
     idle_suspend: u64,
     mounts: &[Mount],
     seeds: &[Seed],
@@ -744,9 +735,6 @@ fn spawn_vmm(
         .stdout(log.try_clone().unwrap_or_else(|error| fail(error)))
         .stderr(log)
         .process_group(0);
-    if window {
-        command.arg("--window");
-    }
     for mount in mounts {
         command.arg("--mount").arg(mount.spec());
     }
@@ -806,10 +794,9 @@ fn max_files_per_process() -> libc::rlim_t {
 /// Entry point of the detached VM process started by `vm run`.
 fn vmm_process(args: &[String]) {
     let [name, lock_fd, listen_fd, rest @ ..] = args else {
-        fail("internal: __vmm NAME LOCK_FD LISTEN_FD --idle-suspend MIN [--window] [--mount SPEC]...");
+        fail("internal: __vmm NAME LOCK_FD LISTEN_FD --idle-suspend MIN [--mount SPEC]...");
     };
     raise_open_file_limit();
-    let mut window = false;
     let mut idle_suspend = None;
     let mut mounts = Vec::new();
     let mut seeds = Vec::new();
@@ -817,7 +804,6 @@ fn vmm_process(args: &[String]) {
     let mut rest = rest.iter();
     while let Some(arg) = rest.next() {
         match arg.as_str() {
-            "--window" => window = true,
             "--idle-suspend" => idle_suspend = Some(parse::<u64>(rest.next(), "--idle-suspend")),
             "--mount" => {
                 let spec = rest.next().unwrap_or_else(|| fail("internal: --mount needs a spec"));
@@ -855,7 +841,7 @@ fn vmm_process(args: &[String]) {
     // Helpers started by the VM must not see the guest's secrets.
     unsafe { env::remove_var(GUEST_ENVIRONMENT_VARIABLE) };
 
-    vmm::run(launch, window, idle_suspend, &mounts, &seeds, grants, environment).unwrap_or_else(|error| panic!("VM failed: {error:?}"));
+    vmm::run(launch, idle_suspend, &mounts, &seeds, grants, environment).unwrap_or_else(|error| panic!("VM failed: {error:?}"));
 }
 
 /// `vm store`: the shared object store from the host, through the same
@@ -1418,8 +1404,8 @@ fn paste_frame() -> Frame {
 
 /// Puts the text copied in the guest on the host clipboard, and returns a paste
 /// that puts the host clipboard into the guest clipboard and returns once it is there.
-fn clipboard_link(target: &Target) -> impl FnMut() -> io::Result<()> + Send + 'static {
-    let control = node::request(target, &Request::Clipboard).unwrap_or_else(|error| fail(error));
+pub(crate) fn clipboard_link(target: &Target) -> Result<impl FnMut() -> io::Result<()> + Send + 'static, String> {
+    let control = node::request(target, &Request::Clipboard)?;
     let mut reader = control.reader;
     let mut writer = control.writer;
     let (answers, answered) = mpsc::channel();
@@ -1432,7 +1418,7 @@ fn clipboard_link(target: &Target) -> impl FnMut() -> io::Result<()> + Send + 's
             }
         }
     });
-    move || {
+    Ok(move || {
         protocol::write_frame(&mut writer, &paste_frame())?;
         let error = answered
             .recv()
@@ -1441,7 +1427,7 @@ fn clipboard_link(target: &Target) -> impl FnMut() -> io::Result<()> + Send + 's
             eprint!("vm: {}\r\n", String::from_utf8_lossy(&error));
         }
         Ok(())
-    }
+    })
 }
 
 /// Sends the terminal size to the guest pty whenever the window changes.
@@ -1511,7 +1497,7 @@ fn screen_command(args: &[String]) {
             .map(drop)
             .map_err(io::Error::other)
     };
-    let error = screen::run(frames.reader, input.writer, clipboard_link(&target), resize).unwrap_err();
+    let error = screen::run(frames.reader, input.writer, clipboard_link(&target).unwrap_or_else(|error| fail(error)), resize).unwrap_err();
     fail(format!("VM {}: {error}", target.qualified_name()))
 }
 
@@ -1665,4 +1651,11 @@ fn scroll(args: &[String]) {
     let value = parse(args.get(1), "scroll amount");
     let horizontal = args[2..].iter().any(|arg| arg == "--horizontal");
     send_input(&resolve(name), vec![InputEvent::Scroll { value, horizontal }]);
+}
+
+fn ui_command(args: &[String]) {
+    if !args.is_empty() {
+        usage_error("ui");
+    }
+    crate::ui::run();
 }

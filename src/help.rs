@@ -47,15 +47,15 @@ Without --persist the VM is ephemeral and deleted when it stops. Running
 `vm run NAME` for a stopped persistent VM starts it again with its disk
 intact; hardware options only apply when a VM is created. A persistent VM
 starts with the buckets it was last given with --store unless new ones are
-named. Mounts, seeds, stores, environment and --window apply when a VM
-starts, so they cannot be changed on one that is already running.
+named. Mounts, seeds, stores and environment apply when a VM starts, so
+they cannot be changed on one that is already running.
 
 NAME may be NODE/NAME to use a node from ~/.vm/nodes. --node NAME picks a
 node explicitly and --any picks the least loaded node with room. A remote
 VM keeps its name qualified, such as mini/swift-otter, which every command
-accepts. Mounts, seeds and --window name files or a desktop on this
-machine and are not available remotely; use --node with --base or --store,
-which are node-local.
+accepts. Mounts and seeds name files on this machine and are not
+available remotely; use --node with --base or --store, which are
+node-local.
 
 CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY, and variables named with
 --env, are copied from your environment into the VM's shells, commands and
@@ -70,7 +70,7 @@ ignores. Changes in the VM never reach the host. Commands in the guest's
 ~/bin are on PATH, so a script in ~/.vm/seeds/bin runs by name.
 
 Text copied in the guest goes to the host clipboard while an interactive
-session, `vm screen` or a window is open. Ctrl+V in any of them first puts the
+session, `vm screen` or `vm ui` is open. Ctrl+V in any of them first puts the
 host clipboard into the guest clipboard, its image if it has one and its text
 otherwise, so programs like Claude Code can paste screenshots.
 
@@ -78,12 +78,10 @@ A VM suspends when no client has been attached to it for the idle timeout:
 no command, shell, ssh session, tunnel, screen or stream. Its vCPUs stop, so
 it takes no CPU but keeps its memory, and the next command resumes it at
 once; the guest clock jumps ahead by the time it slept. Work in the guest
-that no client is attached to pauses with it. A VM with a window never
-suspends. `vm ls` shows suspended VMs."
+that no client is attached to pauses with it. `vm ls` shows suspended VMs."
                 .into(),
             options: vec![
                 ("--persist", "Keep the VM and its disk after it stops".into()),
-                ("--window", "Show the screen in a window".into()),
                 (
                     "--idle-suspend MIN",
                     format!(
@@ -136,13 +134,13 @@ suspends. `vm ls` shows suspended VMs."
                 ),
             ],
             examples: &[
-                ("vm=$(vm run)", "ephemeral VM without a window"),
+                ("vm=$(vm run)", "ephemeral VM"),
                 ("vm run sandbox --persist", "persistent VM named sandbox"),
                 ("vm run sandbox", "start sandbox again after it stopped"),
                 ("vm run sandbox -- htop", "interactive program in sandbox"),
                 ("vm run sandbox --", "interactive shell in sandbox"),
                 ("vm run --mount .:work --wait-network", "current directory at ~/work, network ready"),
-                ("vm run --window --size 1920x1080", "VM with a window"),
+                ("vm run --size 1920x1080", "VM with a larger screen, see it with vm ui"),
                 ("vm run sandbox --idle-suspend 0", "keep sandbox running when idle"),
                 ("vm run --env GITHUB_TOKEN", "pass a variable from your shell"),
                 ("vm run --mount .:work -- make -C work test", "one-off VM for a single command"),
@@ -346,6 +344,20 @@ mouse reporting, such as Ghostty, Kitty or WezTerm."
             ],
         },
         Command {
+            name: "ui",
+            group: "Screen and input",
+            usage: "vm ui",
+            summary: "Open a window with all VMs and their screens",
+            description: "\
+Opens a window listing the VMs of this machine and of every node in
+~/.vm/nodes. It starts, stops, creates and deletes them like the CLI does,
+and shows the screen of the selected VM with mouse and keyboard. Ctrl+K
+(Cmd+K on macOS) searches the VMs and Ctrl+B (Cmd+B) hides the sidebar."
+                .into(),
+            options: vec![],
+            examples: &[("vm ui", "")],
+        },
+        Command {
             name: "stream",
             group: "Screen and input",
             usage: "vm stream NAME [--fps N]",
@@ -534,8 +546,7 @@ attach hands the connection to the VM's control socket after its reply,
 with request as the first line there: stream for the screen as H.264
 (codec h264) or raw pixels (codec rgb), with \"audio\": true for the
 sound as Opus in H.264 streams, inputstream for mouse and keyboard
-events, or open for a shell. Only VMs with a window play their sound on
-the host.
+events, or open for a shell.
 
 stderr is an event log of CloudEvents 1.0 as JSON lines, with the types
 dev.vm.serve.request (with only the names of env), .exec (args,
