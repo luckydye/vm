@@ -2,6 +2,7 @@
 //! their screens, and the actions of the CLI.
 
 mod display;
+mod layout;
 mod machines;
 mod shell;
 mod shell_view;

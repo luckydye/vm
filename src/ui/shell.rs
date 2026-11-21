@@ -6,7 +6,7 @@ use crate::{
     node::{self, Target},
     protocol::{self, Frame, Request, Session, kind},
 };
-use gpui::{AppContext, AsyncApp, Context, Keystroke, Task, WeakEntity};
+use gpui::{AppContext, AsyncApp, Context, EventEmitter, Keystroke, Task, WeakEntity};
 use libghostty_vt::{
     color::Rgb,
     fmt::Formatter,
@@ -64,6 +64,22 @@ pub struct Grid {
 enum Command {
     Input(Vec<u8>),
     Resize(u16, u16),
+}
+
+/// What subscribers of a [`Shell`] hear about.
+pub enum ShellEvent {
+    /// The program exited, so its pane closes.
+    Exited,
+}
+
+impl EventEmitter<ShellEvent> for Shell {}
+
+/// How a session ended.
+enum End {
+    /// The program exited.
+    Exited,
+    /// The connection failed, with what to tell the user.
+    Failed(String),
 }
 
 pub struct Shell {
@@ -125,10 +141,13 @@ impl Shell {
             started: Instant::now(),
             writer,
             _read: cx.spawn(async move |this, cx| {
-                let ended = read(name, size, commands, this.clone(), cx).await;
-                this.update(cx, |this, cx| {
-                    this.ended = Some(ended);
-                    cx.notify();
+                let end = read(name, size, commands, this.clone(), cx).await;
+                this.update(cx, |this, cx| match end {
+                    End::Exited => cx.emit(ShellEvent::Exited),
+                    End::Failed(reason) => {
+                        this.ended = Some(reason);
+                        cx.notify();
+                    }
                 })
                 .ok();
             }),
@@ -332,14 +351,14 @@ fn rgb(color: Rgb) -> u32 {
 }
 
 /// Opens the session and feeds its output into the terminal until it ends,
-/// and returns why it did.
+/// and returns how it did.
 async fn read(
     name: String,
     size: (u16, u16),
     commands: mpsc::Receiver<Command>,
     this: WeakEntity<Shell>,
     cx: &mut AsyncApp,
-) -> String {
+) -> End {
     let session = Session::Pty {
         argv: Vec::new(),
         cols: size.0,
@@ -359,7 +378,7 @@ async fn read(
         .await;
     let control = match opened {
         Ok(control) => control,
-        Err(error) => return error,
+        Err(error) => return End::Failed(error),
     };
     let mut writer = control.writer;
     thread::spawn(move || {
@@ -386,23 +405,20 @@ async fn read(
         reader = returned;
         let frame = match frame {
             Ok(Some(frame)) => frame,
-            Ok(None) => return "The connection to the machine closed.".to_owned(),
-            Err(error) => return format!("The connection to the machine failed: {error}"),
+            Ok(None) => return End::Failed("The connection to the machine closed.".to_owned()),
+            Err(error) => return End::Failed(format!("The connection to the machine failed: {error}")),
         };
         match frame.kind {
             kind::DATA | kind::STDERR => {
                 let shown = this.update(cx, |this, cx| this.output(&frame.payload, cx));
                 if shown.is_err() {
-                    return "The terminal closed.".to_owned();
+                    return End::Failed("The terminal closed.".to_owned());
                 }
             }
-            kind::EXIT => {
-                let code = i32::from_le_bytes(frame.payload.try_into().expect("malformed exit frame"));
-                return format!("The shell exited with code {code}.");
-            }
+            kind::EXIT => return End::Exited,
             // Text copied in the guest goes to the host clipboard of interactive sessions.
             kind::CLIPBOARD_TEXT => clipboard::copy_text(&frame.payload),
-            other => return format!("unexpected frame kind {other} from the machine"),
+            other => return End::Failed(format!("unexpected frame kind {other} from the machine")),
         }
     }
 }

@@ -1,13 +1,14 @@
 //! The window of `vm ui`: a floating sidebar with the machines, and a main
-//! pane with the overview or the selected machine's screen and terminals.
-//! Views render the state of [`Machines`], [`Display`] and [`Shell`] and
-//! forward what the user does.
+//! pane with the overview or the selected machine's screen and terminals,
+//! tiled side by side and stacked. Views render the state of [`Machines`],
+//! [`Display`], [`Shell`] and the [`layout`] and forward what the user does.
 
 use super::{
     FocusSearch, ToggleSidebar,
     display::{self, Display},
+    layout::{self, Axis, Node, Pane, Step},
     machines::{Machine, Machines, NewMachine, Notice, PRESETS, Preset, Tone},
-    shell::Shell,
+    shell::{Shell, ShellEvent},
     shell_view,
     theme::*,
 };
@@ -23,17 +24,30 @@ use gpui::{
 };
 use gpui_component::{
     Icon, Sizable,
+    button::Button,
     input::{Input, InputEvent as TextEvent, InputState},
+    menu::{DropdownMenu, PopupMenuItem},
 };
 use gpui_kit_assets::IconName;
-use std::{cell::Cell, collections::BTreeMap, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    collections::{BTreeMap, HashMap},
+    rc::Rc,
+};
 
-/// What the main pane shows of the selected machine.
-#[derive(Clone, Copy, PartialEq)]
-enum Tab {
-    Screen,
-    /// A terminal, by its index in the machine's shells.
-    Shell(usize),
+/// The windows of a running machine, kept while another machine is shown.
+struct Page {
+    /// `None` once every window is closed.
+    layout: Option<Node>,
+    shells: BTreeMap<u32, (Entity<Shell>, FocusHandle)>,
+    next_shell: u32,
+    _subscriptions: Vec<Subscription>,
+}
+
+/// A divider being dragged.
+struct Resizing {
+    path: Vec<Step>,
+    axis: Axis,
 }
 
 pub struct Workspace {
@@ -42,9 +56,11 @@ pub struct Workspace {
     selected: Option<String>,
     /// The selected machine's screen, while it runs.
     display: Option<Entity<Display>>,
-    /// The terminals of each running machine, kept while another is shown.
-    shells: BTreeMap<String, Vec<Entity<Shell>>>,
-    tab: Tab,
+    pages: BTreeMap<String, Page>,
+    resizing: Option<Resizing>,
+    /// Where each split of the shown page was laid out, by its path, for
+    /// turning a dragged divider's position into a ratio.
+    splits: Rc<RefCell<HashMap<Vec<Step>, Bounds<Pixels>>>>,
     sidebar_open: bool,
     search: Entity<InputState>,
     new_name: Entity<InputState>,
@@ -78,8 +94,9 @@ impl Workspace {
             machines,
             selected: None,
             display: None,
-            shells: BTreeMap::new(),
-            tab: Tab::Screen,
+            pages: BTreeMap::new(),
+            resizing: None,
+            splits: Rc::new(RefCell::new(HashMap::new())),
             sidebar_open: true,
             search,
             new_name,
@@ -96,62 +113,107 @@ impl Workspace {
     fn select(&mut self, name: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         self.selected = name;
         self.display = None;
-        self.tab = Tab::Screen;
         self.follow_machines(window, cx);
     }
 
-    fn open_shell(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn page(&mut self) -> &mut Page {
+        let name = self.selected.as_ref().expect("windows open in the selected machine");
+        self.pages.get_mut(name).expect("a running machine has a page")
+    }
+
+    /// Opens a terminal beside `beside` along `axis`, or beside everything.
+    fn open_shell(&mut self, beside: Option<(Pane, Axis)>, window: &mut Window, cx: &mut Context<Self>) {
         let name = self.selected.clone().expect("a terminal opens in the selected machine");
-        let shell = cx.new(|cx| Shell::new(name.clone(), (80, 24), cx));
-        let shells = self.shells.entry(name).or_default();
-        shells.push(shell);
-        self.tab = Tab::Shell(shells.len() - 1);
-        self.screen_focus.focus(window, cx);
+        let machine = name.clone();
+        let shell = cx.new(move |cx| Shell::new(machine, (80, 24), cx));
+        let focus = cx.focus_handle();
+        focus.focus(window, cx);
+        let page = self.page();
+        let id = page.next_shell;
+        page.next_shell += 1;
+        let subscription = cx.subscribe_in(&shell, window, move |this, _, _: &ShellEvent, window, cx| {
+            this.close_in(name.clone(), Pane::Shell(id), window, cx);
+        });
+        page.shells.insert(id, (shell, focus));
+        page._subscriptions.push(subscription);
+        let pane = Pane::Shell(id);
+        page.layout = Some(match (page.layout.take(), beside) {
+            (Some(layout), Some((beside, axis))) => layout.split(beside, pane, axis),
+            (layout, _) => layout::added(layout, pane),
+        });
         cx.notify();
     }
 
-    fn close_shell(&mut self, index: usize, cx: &mut Context<Self>) {
-        let name = self.selected.as_ref().expect("a terminal closes in the selected machine");
-        let shells = self.shells.get_mut(name).expect("the closed terminal is listed");
-        shells.remove(index);
-        self.tab = match self.tab {
-            Tab::Shell(shown) if shown > index => Tab::Shell(shown - 1),
-            Tab::Shell(shown) if shown == index => Tab::Screen,
-            tab => tab,
+    fn open_screen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let page = self.page();
+        page.layout = Some(layout::added(page.layout.take(), Pane::Screen));
+        self.follow_machines(window, cx);
+    }
+
+    fn close(&mut self, pane: Pane, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self.selected.clone().expect("panes belong to the selected machine");
+        self.close_in(name, pane, window, cx);
+    }
+
+    /// Closes `pane` in machine `name`'s page, should it still have one.
+    fn close_in(&mut self, name: String, pane: Pane, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(page) = self.pages.get_mut(&name) else {
+            return;
         };
-        cx.notify();
+        page.layout = page.layout.take().and_then(|layout| layout.without(pane));
+        if let Pane::Shell(id) = pane {
+            page.shells.remove(&id);
+        }
+        self.follow_machines(window, cx);
     }
 
-    fn show(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
-        self.tab = tab;
-        self.screen_focus.focus(window, cx);
-        cx.notify();
-    }
-
-    /// Opens the screen of the selected machine once it runs and closes it
-    /// when it stops or goes away.
+    /// Keeps a page for each running machine, and the selected machine's
+    /// screen open while its page shows it.
     fn follow_machines(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let machines = self.machines.read(cx);
+        let running = |name: &str| machines.find(name).is_some_and(|machine| machine.vm.running);
         // Terminals end with their machine.
-        self.shells.retain(|name, _| machines.find(name).is_some_and(|machine| machine.vm.running));
-        if matches!(self.tab, Tab::Shell(_)) && !self.selected.as_ref().is_some_and(|name| self.shells.contains_key(name)) {
-            self.tab = Tab::Screen;
+        self.pages.retain(|name, _| running(name));
+        if machines.loaded && self.selected.as_deref().is_some_and(|name| machines.find(name).is_none()) {
+            self.selected = None;
         }
-        let selected = self.selected.as_deref().and_then(|name| machines.find(name));
-        match (selected.map(|machine| machine.vm.running), &self.display) {
-            (None, _) if machines.loaded => {
-                self.selected = None;
-                self.display = None;
-            }
-            (Some(true), None) => {
-                let name = self.selected.clone().expect("a running selection has a name");
+        let selected = self.selected.clone().filter(|name| running(name));
+        if let Some(name) = &selected {
+            self.pages.entry(name.clone()).or_insert_with(|| Page {
+                layout: Some(Node::Leaf(Pane::Screen)),
+                shells: BTreeMap::new(),
+                next_shell: 1,
+                _subscriptions: Vec::new(),
+            });
+        }
+        let shows_screen = selected.as_ref().is_some_and(|name| {
+            self.pages[name].layout.as_ref().is_some_and(|layout| layout.panes().contains(&Pane::Screen))
+        });
+        match (shows_screen, &self.display) {
+            (true, None) => {
+                let name = selected.expect("a shown screen has a machine");
                 self.display = Some(cx.new(|cx| Display::new(name, cx)));
                 self.modifiers = Modifiers::default();
                 self.screen_focus.focus(window, cx);
             }
-            (Some(false), Some(_)) => self.display = None,
+            (false, Some(_)) => self.display = None,
             _ => {}
         }
+        cx.notify();
+    }
+
+    /// Moves the dragged divider to `position`.
+    fn resize(&mut self, position: gpui::Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(resizing) = &self.resizing else {
+            return;
+        };
+        let bounds = self.splits.borrow()[&resizing.path];
+        let ratio = match resizing.axis {
+            Axis::Row => (position.x - bounds.origin.x) / bounds.size.width,
+            Axis::Column => (position.y - bounds.origin.y) / bounds.size.height,
+        };
+        let path = resizing.path.clone();
+        self.page().layout.as_mut().expect("a dragged divider has a layout").resized(&path, ratio);
         cx.notify();
     }
 
@@ -196,6 +258,21 @@ impl Render for Workspace {
             .key_context("Workspace")
             .on_action(cx.listener(Self::focus_search))
             .on_action(cx.listener(Self::toggle_sidebar))
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| this.resize(event.position, cx)))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if this.resizing.take().is_some() {
+                        cx.notify();
+                    }
+                }),
+            )
+            .when(self.resizing.is_some(), |workspace| {
+                workspace.cursor(match self.resizing.as_ref().map(|resizing| resizing.axis) {
+                    Some(Axis::Row) => gpui::CursorStyle::ResizeLeftRight,
+                    _ => gpui::CursorStyle::ResizeUpDown,
+                })
+            })
             .size_full()
             .flex()
             .bg(rgb(WINDOW))
@@ -225,7 +302,7 @@ impl Render for Workspace {
 impl Workspace {
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let machines = self.machines.read(cx);
-        let (loaded, count) = (machines.loaded, machines.running_count());
+        let loaded = machines.loaded;
         let query = self.search.read(cx).value().to_lowercase();
         let shown: Vec<Machine> =
             machines.machines.iter().filter(|machine| machine.name.to_lowercase().contains(&query)).cloned().collect();
@@ -258,36 +335,8 @@ impl Workspace {
             )))
             .child(
                 div()
-                    .flex()
-                    .items_center()
-                    .gap_2p5()
-                    .px_1()
-                    .pt_1()
-                    .pb_3()
-                    .child(
-                        div()
-                            .size(px(32.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(ROW_RADIUS)
-                            .bg(rgb(WINDOW))
-                            .child(Icon::new(IconName::HardDrive).size(ICON_SIZE).text_color(rgb(TEXT))),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .child(div().text_size(TEXT_SIZE).font_weight(gpui::FontWeight::MEDIUM).child("vm"))
-                            .child(div().text_size(SMALL_TEXT_SIZE).text_color(rgb(MUTED)).child(match count {
-                                0 => "Nothing running".to_owned(),
-                                count => format!("{count} running"),
-                            })),
-                    ),
-            )
-            .child(
-                div()
                     .h(CONTROL_HEIGHT)
+                    .mt_2()
                     .px_2p5()
                     .flex()
                     .items_center()
@@ -358,7 +407,9 @@ impl Workspace {
         let machines = self.machines.read(cx);
         let machine = self.selected.as_deref().and_then(|name| machines.find(name)).cloned();
         let busy = machine.as_ref().is_some_and(|machine| machines.pending.contains(&machine.name));
-        let shells = machine.as_ref().and_then(|machine| self.shells.get(&machine.name)).map_or(0, Vec::len);
+        let screen_closed = machine.as_ref().and_then(|machine| self.pages.get(&machine.name)).is_some_and(|page| {
+            !page.layout.as_ref().is_some_and(|layout| layout.panes().contains(&Pane::Screen))
+        });
         drag_area()
             .h(TITLEBAR_HEIGHT)
             .flex_none()
@@ -378,8 +429,18 @@ impl Workspace {
                 bar.pl_3()
                     .child(div().font_weight(gpui::FontWeight::MEDIUM).child(machine.name.clone()))
                     .child(div().text_color(rgb(MUTED)).child(state_label(&machine)))
-                    .when(machine.vm.running, |bar| bar.child(self.render_tabs(shells, cx)))
                     .child(div().flex_1())
+                    .when(machine.vm.running, |bar| {
+                        bar.when(screen_closed, |bar| {
+                            bar.child(pill("open-screen", "Screen", false, Some(IconName::Frame)).on_click(
+                                cx.listener(|this, _, window, cx| this.open_screen(window, cx)),
+                            ))
+                        })
+                        .child(pill("open-shell", "Terminal", false, Some(IconName::Plus)).on_click(
+                            cx.listener(|this, _, window, cx| this.open_shell(None, window, cx)),
+                        ))
+                        .child(div().w(px(1.)).h(px(16.)).mx_1().bg(rgb(BORDER)))
+                    })
                     .child(match machine.vm.running {
                         true => pill("stop", "Stop", busy, Some(IconName::Square)).on_click(cx.listener(move |this, _, _, cx| {
                             this.machines.update(cx, |machines, cx| machines.stop(&stop, cx))
@@ -392,45 +453,6 @@ impl Workspace {
                         cx.listener(move |this, _, _, cx| this.machines.update(cx, |machines, cx| machines.delete(&delete, cx))),
                     ))
             })
-    }
-}
-
-// The tabs of a running machine.
-impl Workspace {
-    fn render_tabs(&self, shells: usize, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .ml_4()
-            .flex()
-            .items_center()
-            .gap_1p5()
-            .child(choice("tab-screen", "Screen", self.tab == Tab::Screen).on_click(
-                cx.listener(|this, _, window, cx| this.show(Tab::Screen, window, cx)),
-            ))
-            .children((0..shells).map(|index| {
-                let ended = self.selected.as_ref().and_then(|name| self.shells.get(name)).is_some_and(|shells| {
-                    shells[index].read(cx).ended.is_some()
-                });
-                choice(SharedString::from(format!("tab-shell-{index}")), format!("Terminal {}", index + 1), self.tab == Tab::Shell(index))
-                    .gap_2()
-                    .when(ended, |tab| tab.text_color(rgb(FAINT)))
-                    .on_click(cx.listener(move |this, _, window, cx| this.show(Tab::Shell(index), window, cx)))
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("close-shell-{index}")))
-                            .rounded_full()
-                            .hover(|close| close.bg(rgb(HOVER)))
-                            .child(Icon::new(IconName::Close).size(px(11.)).text_color(rgb(MUTED)))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.close_shell(index, cx);
-                            })),
-                    )
-            }))
-            .child(icon_button(
-                "new-shell",
-                IconName::Plus,
-                cx.listener(|this, _, window, cx| this.open_shell(window, cx)),
-            ))
     }
 }
 
@@ -449,7 +471,7 @@ impl Workspace {
             .overflow_y_scroll()
             .px(px(20.))
             .pb(px(20.))
-            .child(div().max_w(px(880.)).flex().flex_col().gap(px(20.)).child(
+            .child(div().max_w(px(880.)).mx_auto().flex().flex_col().gap(px(20.)).child(
                 div()
                     .flex()
                     .flex_col()
@@ -531,6 +553,9 @@ impl Workspace {
         let machines = self.machines.read(cx);
         let creating = machines.pending.contains("");
         let nodes = machines.nodes.clone();
+        let selected = self.new_node.clone();
+        let host = selected.clone().unwrap_or_else(|| "Local".to_owned());
+        let workspace = cx.weak_entity();
         card()
             .border_1()
             .border_color(rgb(BORDER))
@@ -571,23 +596,43 @@ impl Workspace {
                                     cx.notify();
                                 },
                             )))
-                            .when(!nodes.is_empty(), |strip| {
-                                let local = segment("node-local", "Local", self.new_node.is_none()).on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        this.new_node = None;
-                                        cx.notify();
-                                    },
-                                ));
-                                let remote = nodes.into_iter().map(|node| {
-                                    let selected = self.new_node.as_deref() == Some(node.as_str());
-                                    segment(SharedString::from(format!("node-{node}")), node.clone(), selected).on_click(
-                                        cx.listener(move |this, _, _, cx| {
-                                            this.new_node = Some(node.clone());
-                                            cx.notify();
+                            .when(!nodes.is_empty(), move |strip| {
+                                strip.child(
+                                    Button::new("node-select")
+                                        .small()
+                                        .outline()
+                                        .dropdown_caret(true)
+                                        .w(px(120.))
+                                        .label(host)
+                                        .dropdown_menu(move |menu, _, _| {
+                                            let local =
+                                                PopupMenuItem::new("Local").checked(selected.is_none()).on_click({
+                                                    let workspace = workspace.clone();
+                                                    move |_, _, cx| {
+                                                        workspace
+                                                            .update(cx, |this, cx| {
+                                                                this.new_node = None;
+                                                                cx.notify();
+                                                            })
+                                                            .ok();
+                                                    }
+                                                });
+                                            let menu = menu.item(local);
+                                            nodes.iter().cloned().fold(menu, |menu, node| {
+                                                let checked = selected.as_deref() == Some(node.as_str());
+                                                let workspace = workspace.clone();
+                                                menu.item(PopupMenuItem::new(node.clone()).checked(checked).on_click(move |_, _, cx| {
+                                                    let node = node.clone();
+                                                    workspace
+                                                        .update(cx, |this, cx| {
+                                                            this.new_node = Some(node);
+                                                            cx.notify();
+                                                        })
+                                                        .ok();
+                                                }))
+                                            })
                                         }),
-                                    )
-                                });
-                                strip.child(segmented([local].into_iter().chain(remote)))
+                                )
                             }),
                     )
                     .child(div().w(px(1.)).h(px(16.)).flex_none().bg(rgb(BORDER)))
@@ -624,11 +669,29 @@ impl Workspace {
         let Some(machine) = machines.find(name) else {
             return div().flex_1().into_any_element();
         };
-        if let Tab::Shell(index) = self.tab {
-            let shell = self.shells[name][index].clone();
-            return shell_view::render(shell, &self.screen_focus, window, cx);
+        if let Some(page) = self.pages.get(name) {
+            self.splits.borrow_mut().clear();
+            return match page.layout.clone() {
+                Some(layout) => div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .child(self.render_node(&layout, Vec::new(), window, cx))
+                    .into_any_element(),
+                None => div()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(rgb(MUTED))
+                    .child("Open the screen or a terminal from the bar above.")
+                    .into_any_element(),
+            };
         }
-        let Some(display) = self.display.clone() else {
+        if machine.vm.running {
+            return div().flex_1().into_any_element();
+        }
+        {
             let start = machine.name.clone();
             let busy = machines.pending.contains(name);
             return div()
@@ -650,8 +713,121 @@ impl Workspace {
                         ))),
                 )
                 .into_any_element();
+        }
+    }
+
+    /// The windows of `node`, a split at `path` down from the page's root.
+    fn render_node(&self, node: &Node, path: Vec<Step>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let (axis, ratio, first, second) = match node {
+            Node::Leaf(pane) => return self.render_pane(*pane, window, cx),
+            Node::Split { axis, ratio, first, second } => (*axis, *ratio, first, second),
         };
-        self.render_screen(display, window, cx)
+        let step = |step| [path.clone(), vec![step]].concat();
+        let first = self.render_node(first, step(Step::First), window, cx);
+        let second = self.render_node(second, step(Step::Second), window, cx);
+        let (splits, laid_out) = (self.splits.clone(), path.clone());
+        let divider = div()
+            .id(SharedString::from(format!("divider-{path:?}")))
+            .flex_none()
+            .map(|divider| match axis {
+                Axis::Row => divider.w(GAP).h_full().cursor(gpui::CursorStyle::ResizeLeftRight),
+                Axis::Column => divider.h(GAP).w_full().cursor(gpui::CursorStyle::ResizeUpDown),
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    this.resizing = Some(Resizing { path: path.clone(), axis });
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            );
+        let along = |element: gpui::Div, share: Option<f32>| match (axis, share) {
+            (Axis::Row, Some(share)) => element.flex_none().w(gpui::relative(share)).h_full(),
+            (Axis::Column, Some(share)) => element.flex_none().h(gpui::relative(share)).w_full(),
+            (Axis::Row, None) => element.flex_1().min_w_0().h_full(),
+            (Axis::Column, None) => element.flex_1().min_h_0().w_full(),
+        };
+        div()
+            .size_full()
+            .relative()
+            .flex()
+            .when(axis == Axis::Column, |split| split.flex_col())
+            .child(
+                canvas(move |bounds, _, _| { splits.borrow_mut().insert(laid_out, bounds); }, |_, _, _, _| {})
+                    .absolute()
+                    .size_full(),
+            )
+            .child(along(div().flex(), Some(ratio)).child(first))
+            .child(divider)
+            .child(along(div().flex(), None).child(second))
+            .into_any_element()
+    }
+
+    /// A window with a bar naming it and splitting or closing it.
+    fn render_pane(&self, pane: Pane, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let page = &self.pages[self.selected.as_ref().expect("panes belong to the selected machine")];
+        let (title, focus, content) = match pane {
+            Pane::Screen => {
+                let content = match self.display.clone() {
+                    Some(display) => self.render_screen(display, window, cx),
+                    None => div().into_any_element(),
+                };
+                ("Screen".to_owned(), self.screen_focus.clone(), content)
+            }
+            Pane::Shell(id) => {
+                let (shell, focus) = page.shells[&id].clone();
+                let ended = shell.read(cx).ended.is_some();
+                let title = format!("Terminal {id}{}", if ended { " · ended" } else { "" });
+                (title, focus.clone(), shell_view::render(shell, &focus, window, cx))
+            }
+        };
+        let focused = focus.contains_focused(window, cx);
+        let key = match pane {
+            Pane::Screen => "screen".to_owned(),
+            Pane::Shell(id) => format!("shell-{id}"),
+        };
+        let button = |action: &str, icon: IconName, on_click: Box<dyn Fn(&mut Self, &mut Window, &mut Context<Self>)>| {
+            icon_button(
+                SharedString::from(format!("{action}-{key}")),
+                icon,
+                cx.listener(move |this, _, window, cx| on_click(this, window, cx)),
+            )
+        };
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .rounded(CARD_RADIUS)
+            .border_1()
+            .border_color(rgb(if focused { FAINT } else { BORDER }))
+            .bg(rgb(CARD))
+            .overflow_hidden()
+            .child(
+                div()
+                    .h(px(28.))
+                    .flex_none()
+                    .pl_3()
+                    .pr_1()
+                    .flex()
+                    .items_center()
+                    .gap_0p5()
+                    .text_size(SMALL_TEXT_SIZE)
+                    .text_color(rgb(if focused { TEXT } else { MUTED }))
+                    .child(div().flex_1().truncate().child(title))
+                    .child(button(
+                        "split-right",
+                        IconName::PanelRight,
+                        Box::new(move |this, window, cx| this.open_shell(Some((pane, Axis::Row)), window, cx)),
+                    ))
+                    .child(button(
+                        "split-down",
+                        IconName::PanelBottom,
+                        Box::new(move |this, window, cx| this.open_shell(Some((pane, Axis::Column)), window, cx)),
+                    ))
+                    .child(button("close", IconName::Close, Box::new(move |this, window, cx| this.close(pane, window, cx)))),
+            )
+            .child(div().flex_1().min_h_0().flex().child(content))
+            .into_any_element()
     }
 
     fn render_screen(&self, display: Entity<Display>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -664,11 +840,7 @@ impl Workspace {
             .id("screen")
             .key_context("Pane")
             .track_focus(&self.screen_focus)
-            .flex_1()
-            .min_h_0()
-            .rounded(CARD_RADIUS)
-            .border_1()
-            .border_color(rgb(BORDER))
+            .size_full()
             .bg(gpui::black())
             .overflow_hidden()
             .relative()
@@ -867,7 +1039,7 @@ fn nav_row(
 }
 
 fn icon_button(
-    id: &'static str,
+    id: impl Into<gpui::ElementId>,
     icon: IconName,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> impl IntoElement {

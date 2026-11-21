@@ -113,10 +113,6 @@ impl Machines {
         self.machines.iter().find(|machine| machine.name == name)
     }
 
-    pub fn running_count(&self) -> usize {
-        self.machines.iter().filter(|machine| machine.vm.running).count()
-    }
-
     pub fn start(&mut self, name: &str, cx: &mut Context<Self>) {
         let machine = self.find(name).expect("starting a machine that is not listed");
         let mut args = vec!["run".to_owned(), machine.short_name().to_owned()];
