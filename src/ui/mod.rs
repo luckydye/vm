@@ -37,11 +37,11 @@ pub fn run() {
         .detach();
 
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(1280.), px(820.)), cx))),
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(1100.), px(720.)), cx))),
             titlebar: Some(TitlebarOptions {
                 title: Some("vm".into()),
                 appears_transparent: true,
-                traffic_light_position: Some(point(px(26.), px(26.))),
+                traffic_light_position: Some(point(px(20.), px(20.))),
             }),
             window_min_size: Some(size(px(720.), px(480.))),
             ..WindowOptions::default()

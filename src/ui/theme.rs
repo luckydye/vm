@@ -1,34 +1,35 @@
-//! The look of `vm ui`: layered dark surfaces, separated by 1px borders
-//! instead of shadows. Views take every color, radius and spacing from here.
+//! The look of `vm ui`, from the tokens of Shade's gpui theme: layered dark
+//! surfaces separated by 1px borders instead of shadows, 13px text. Views take
+//! every color, radius and spacing from here.
 
 use gpui::{App, Pixels, px, rgb};
 use gpui_component::{Theme, ThemeMode};
 
 /// Behind everything: the main pane and the gaps around the sidebar.
-pub const WINDOW: u32 = 0x101010;
+pub const WINDOW: u32 = 0x111111;
 /// The sidebar panel floating above the window.
-pub const PANEL: u32 = 0x1a1a1a;
+pub const PANEL: u32 = 0x1b1b1b;
 /// Cards in the main pane.
-pub const CARD: u32 = 0x202020;
+pub const CARD: u32 = 0x1e1e21;
 /// A hovered row.
 pub const HOVER: u32 = 0x262626;
 /// The selected row.
-pub const SELECTED: u32 = 0x303030;
-pub const BORDER: u32 = 0x2a2a2a;
+pub const SELECTED: u32 = 0x2f2f32;
+pub const BORDER: u32 = 0x29292b;
 /// The faint line between rows of a card.
-pub const DIVIDER: u32 = 0x262626;
+pub const DIVIDER: u32 = 0x252527;
 
-pub const TEXT: u32 = 0xededed;
-pub const MUTED: u32 = 0x8a8a8a;
-pub const FAINT: u32 = 0x5c5c5c;
+pub const TEXT: u32 = 0xf5f5f4;
+pub const MUTED: u32 = 0xa3a3a3;
+pub const FAINT: u32 = 0x6b6b6b;
 
-pub const RUNNING: u32 = 0x4ade80;
+pub const RUNNING: u32 = 0x34d399;
 pub const SUSPENDED: u32 = 0xfbbf24;
 pub const DANGER: u32 = 0xf87171;
 
-pub const PANEL_RADIUS: Pixels = px(14.);
-pub const CARD_RADIUS: Pixels = px(12.);
-pub const ROW_RADIUS: Pixels = px(8.);
+pub const PANEL_RADIUS: Pixels = px(12.);
+pub const CARD_RADIUS: Pixels = px(8.);
+pub const ROW_RADIUS: Pixels = px(6.);
 
 pub const SIDEBAR_WIDTH: Pixels = px(232.);
 /// Space between the window edge, the sidebar and the main pane.
@@ -37,8 +38,11 @@ pub const GAP: Pixels = px(8.);
 pub const TITLEBAR_HEIGHT: Pixels = px(38.);
 
 pub const TEXT_SIZE: Pixels = px(13.);
-pub const SMALL_TEXT_SIZE: Pixels = px(11.);
-pub const HEADING_SIZE: Pixels = px(15.);
+/// Secondary text: hardware, states, hints, pills.
+pub const SMALL_TEXT_SIZE: Pixels = px(12.);
+/// Section labels.
+pub const LABEL_SIZE: Pixels = px(11.);
+pub const HEADING_SIZE: Pixels = px(13.);
 pub const ICON_SIZE: Pixels = px(14.);
 /// A row of the sidebar.
 pub const ROW_HEIGHT: Pixels = px(28.);

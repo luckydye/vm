@@ -279,7 +279,7 @@ impl Workspace {
                             .flex()
                             .flex_col()
                             .child(div().text_size(TEXT_SIZE).font_weight(gpui::FontWeight::MEDIUM).child("vm"))
-                            .child(div().text_color(rgb(MUTED)).child(match count {
+                            .child(div().text_size(SMALL_TEXT_SIZE).text_color(rgb(MUTED)).child(match count {
                                 0 => "Nothing running".to_owned(),
                                 count => format!("{count} running"),
                             })),
@@ -297,7 +297,7 @@ impl Workspace {
                     .border_color(rgb(BORDER))
                     .child(Icon::new(IconName::Search).size(ICON_SIZE).text_color(rgb(MUTED)))
                     .child(div().flex_1().child(Input::new(&self.search).appearance(false).small()))
-                    .child(div().text_color(rgb(FAINT)).child(if cfg!(target_os = "macos") { "⌘ K" } else { "Ctrl K" })),
+                    .child(div().text_size(SMALL_TEXT_SIZE).text_color(rgb(FAINT)).child(if cfg!(target_os = "macos") { "⌘K" } else { "Ctrl K" })),
             )
             .child(
                 div()
@@ -367,7 +367,7 @@ impl Workspace {
             .gap_2()
             // Room for the traffic lights when the sidebar no longer holds them.
             .when(!self.sidebar_open, |bar| {
-                bar.pl(px(70.)).child(icon_button(
+                bar.pl(px(80.)).child(icon_button(
                     "show-sidebar",
                     IconName::PanelLeft,
                     cx.listener(|this, _, window, cx| this.toggle_sidebar(&ToggleSidebar, window, cx)),
@@ -439,7 +439,7 @@ impl Workspace {
     fn render_overview(&self, cx: &mut Context<Self>) -> AnyElement {
         let listed = self.machines.read(cx).machines.clone();
         let rows: Vec<AnyElement> =
-            listed.iter().enumerate().map(|(index, machine)| self.render_overview_row(machine, index == 0, cx)).collect();
+            listed.iter().enumerate().map(|(index, machine)| self.render_overview_row(machine, (index, listed.len()), cx)).collect();
         let composer = self.render_composer(cx);
         let machines = self.machines.read(cx);
         let empty = rows.is_empty();
@@ -482,10 +482,10 @@ impl Workspace {
                         .child(heading("Hosts"))
                         .child(card().children(machines.hosts.iter().enumerate().map(|(index, usage)| {
                             let used = usage.host.used_bytes as f64 / usage.host.memory_bytes as f64;
-                            row(index == 0)
+                            row((index, machines.hosts.len()))
                                 .child(Icon::new(IconName::Cpu).size(ICON_SIZE).text_color(rgb(MUTED)))
                                 .child(div().flex_1().child(usage.node.clone().unwrap_or_else(|| "This computer".to_owned())))
-                                .child(div().text_color(rgb(MUTED)).child(format!(
+                                .child(div().text_size(SMALL_TEXT_SIZE).text_color(rgb(MUTED)).child(format!(
                                     "{} CPUs · {} of {} memory",
                                     usage.host.cpus,
                                     gib(usage.host.used_bytes),
@@ -498,10 +498,10 @@ impl Workspace {
             .into_any_element()
     }
 
-    fn render_overview_row(&self, machine: &Machine, first: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn render_overview_row(&self, machine: &Machine, place: (usize, usize), cx: &mut Context<Self>) -> AnyElement {
         let name = machine.name.clone();
         let hardware = &machine.vm.hardware;
-        row(first)
+        row(place)
             .id(SharedString::from(format!("overview-{name}")))
             .cursor_pointer()
             .hover(|row| row.bg(rgb(HOVER)))
@@ -513,7 +513,7 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .child(div().font_weight(gpui::FontWeight::MEDIUM).truncate().child(name.clone()))
-                    .child(div().text_color(rgb(MUTED)).child(format!(
+                    .child(div().text_size(SMALL_TEXT_SIZE).text_color(rgb(MUTED)).child(format!(
                         "{} CPUs · {} GiB memory · {} GiB disk{}",
                         hardware.cpus,
                         hardware.memory_mib / 1024,
@@ -521,7 +521,7 @@ impl Workspace {
                         if hardware.persist { " · kept after stop" } else { "" }
                     ))),
             )
-            .child(div().text_color(rgb(MUTED)).child(state_label(machine)))
+            .child(div().text_size(SMALL_TEXT_SIZE).text_color(rgb(MUTED)).child(state_label(machine)))
             .on_click(cx.listener(move |this, _, window, cx| this.select(Some(name.clone()), window, cx)))
             .into_any_element()
     }
@@ -538,50 +538,65 @@ impl Workspace {
             .child(
                 div()
                     .px_3()
-                    .py_2p5()
+                    .py_2()
                     .flex()
-                    .flex_wrap()
                     .items_center()
-                    .gap_1p5()
-                    .children(PRESETS.iter().map(|preset| {
-                        let preset = *preset;
-                        choice(
-                            SharedString::from(format!("preset-{}", preset.label)),
-                            format!("{} · {} CPUs · {} GiB", preset.label, preset.cpus, preset.memory_mib / 1024),
-                            self.new_preset == preset,
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.new_preset = preset;
-                            cx.notify();
-                        }))
-                    }))
-                    .child(choice("persist", "Keep after stop", self.new_persist).on_click(cx.listener(|this, _, _, cx| {
-                        this.new_persist = !this.new_persist;
-                        cx.notify();
-                    })))
-                    .when(!nodes.is_empty(), |strip| {
-                        strip
-                            .child(choice("node-local", "This computer", self.new_node.is_none()).on_click(cx.listener(
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .overflow_hidden()
+                            .child(segmented(PRESETS.iter().map(|preset| {
+                                let preset = *preset;
+                                segment(SharedString::from(format!("preset-{}", preset.label)), preset.label, self.new_preset == preset)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.new_preset = preset;
+                                        cx.notify();
+                                    }))
+                            })))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_size(SMALL_TEXT_SIZE)
+                                    .text_color(rgb(FAINT))
+                                    .child(format!("{} CPU · {} GiB", self.new_preset.cpus, self.new_preset.memory_mib / 1024)),
+                            )
+                            .child(choice("persist", "Keep after stop", self.new_persist).flex_none().on_click(cx.listener(
                                 |this, _, _, cx| {
-                                    this.new_node = None;
+                                    this.new_persist = !this.new_persist;
                                     cx.notify();
                                 },
                             )))
-                            .children(nodes.into_iter().map(|node| {
-                                let selected = self.new_node.as_deref() == Some(node.as_str());
-                                choice(SharedString::from(format!("node-{node}")), node.clone(), selected).on_click(
-                                    cx.listener(move |this, _, _, cx| {
-                                        this.new_node = Some(node.clone());
+                            .when(!nodes.is_empty(), |strip| {
+                                let local = segment("node-local", "Local", self.new_node.is_none()).on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.new_node = None;
                                         cx.notify();
-                                    }),
-                                )
-                            }))
-                    })
-                    .child(div().flex_1())
+                                    },
+                                ));
+                                let remote = nodes.into_iter().map(|node| {
+                                    let selected = self.new_node.as_deref() == Some(node.as_str());
+                                    segment(SharedString::from(format!("node-{node}")), node.clone(), selected).on_click(
+                                        cx.listener(move |this, _, _, cx| {
+                                            this.new_node = Some(node.clone());
+                                            cx.notify();
+                                        }),
+                                    )
+                                });
+                                strip.child(segmented([local].into_iter().chain(remote)))
+                            }),
+                    )
+                    .child(div().w(px(1.)).h(px(16.)).flex_none().bg(rgb(BORDER)))
                     .child(
                         div()
                             .id("create")
+                            .flex_none()
                             .h(CONTROL_HEIGHT)
+                            .text_size(SMALL_TEXT_SIZE)
                             .px_3()
                             .flex()
                             .items_center()
@@ -802,20 +817,30 @@ fn drag_area() -> gpui::Div {
 }
 
 fn heading(text: &'static str) -> impl IntoElement {
-    div().pt_1().text_size(HEADING_SIZE).text_color(rgb(MUTED)).child(text)
+    div().pt_1().text_size(HEADING_SIZE).font_weight(gpui::FontWeight::MEDIUM).text_color(rgb(MUTED)).child(text)
 }
 
 fn section_label(text: &'static str) -> impl IntoElement {
-    div().px_2p5().pt_3().pb_1().text_size(SMALL_TEXT_SIZE).text_color(rgb(FAINT)).child(text)
+    div().px_2p5().pt_3().pb_1().text_size(LABEL_SIZE).text_color(rgb(FAINT)).child(text)
 }
 
 fn card() -> gpui::Div {
     div().bg(rgb(CARD)).rounded(CARD_RADIUS).overflow_hidden().flex().flex_col()
 }
 
-/// A row of a card; all but the first get a divider above.
-fn row(first: bool) -> gpui::Div {
-    div().px_4().py_2p5().flex().items_center().gap_3().when(!first, |row| row.border_t_1().border_color(rgb(DIVIDER)))
+/// The row at `index` of a card of `count` rows: all but the first get a
+/// divider above, and the outer ones round with the card, since cards clip
+/// their rows only to their rectangle.
+fn row((index, count): (usize, usize)) -> gpui::Div {
+    div()
+        .px_4()
+        .py_2p5()
+        .flex()
+        .items_center()
+        .gap_3()
+        .when(index > 0, |row| row.border_t_1().border_color(rgb(DIVIDER)))
+        .when(index == 0, |row| row.rounded_t(CARD_RADIUS))
+        .when(index + 1 == count, |row| row.rounded_b(CARD_RADIUS))
 }
 
 fn nav_row(
@@ -870,6 +895,7 @@ fn pill(id: &'static str, label: &'static str, busy: bool, icon: Option<IconName
         .items_center()
         .gap_1p5()
         .rounded_full()
+        .text_size(SMALL_TEXT_SIZE)
         .border_1()
         .border_color(rgb(BORDER))
         .when(busy, |pill| pill.opacity(0.5))
@@ -877,6 +903,35 @@ fn pill(id: &'static str, label: &'static str, busy: bool, icon: Option<IconName
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .children(icon.map(|icon| Icon::new(icon).size(px(12.))))
         .child(label)
+}
+
+/// Options side by side in one rounded track, the selected one raised.
+fn segmented(segments: impl IntoIterator<Item = gpui::Stateful<gpui::Div>>) -> impl IntoElement {
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .p(px(2.))
+        .gap(px(2.))
+        .rounded_full()
+        .border_1()
+        .border_color(rgb(BORDER))
+        .children(segments)
+}
+
+fn segment(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>, selected: bool) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .h(CONTROL_HEIGHT - px(6.))
+        .px_2p5()
+        .flex()
+        .items_center()
+        .rounded_full()
+        .text_size(SMALL_TEXT_SIZE)
+        .cursor_pointer()
+        .when(selected, |segment| segment.bg(rgb(SELECTED)))
+        .when(!selected, |segment| segment.text_color(rgb(MUTED)).hover(|segment| segment.bg(rgb(HOVER))))
+        .child(label.into())
 }
 
 /// A pill that is one of several choices.
@@ -888,6 +943,7 @@ fn choice(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>, select
         .flex()
         .items_center()
         .rounded_full()
+        .text_size(SMALL_TEXT_SIZE)
         .border_1()
         .cursor_pointer()
         .when(selected, |pill| pill.bg(rgb(SELECTED)).border_color(rgb(SELECTED)))
@@ -901,7 +957,7 @@ fn status_dot(machine: &Machine) -> impl IntoElement {
         Some(false) => rgb(RUNNING),
         None => rgb(FAINT),
     };
-    div().size(px(7.)).flex_none().rounded_full().bg(color)
+    div().size(px(6.)).flex_none().rounded_full().bg(color)
 }
 
 fn state_label(machine: &Machine) -> &'static str {
