@@ -67,7 +67,7 @@ pub struct PeriodSink {
     clock: Option<thread::Thread>,
 }
 
-/// Receivers of the guest's audio as it is queued for playback, such as web UI streams.
+/// Receivers of the guest's audio as it is queued for playback, such as `vm ui` streams.
 #[derive(Default)]
 pub struct Listeners(Mutex<Vec<SyncSender<Arc<[u8]>>>>);
 

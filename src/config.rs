@@ -52,7 +52,7 @@ impl Hardware {
 }
 
 /// A host directory shared into the guest: `HOST:GUEST[:ro]`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Mount {
     pub host: PathBuf,
     pub guest: String,

@@ -327,7 +327,6 @@ fn run(args: &[String]) {
             "--mount" => {
                 let spec = args.next().unwrap_or_else(|| fail("--mount needs HOST:GUEST[:ro]"));
                 options.mounts.push(spec.clone());
-                options.start_flags = true;
             }
             "--base" => {
                 options.image = Some(args.next().unwrap_or_else(|| usage_error("run")).clone());
@@ -427,9 +426,13 @@ fn run_local(options: RunOptions, started: Instant) {
                     None => {
                         if options.start_flags {
                             fail(format!(
-                                "VM {name} is already running; stop it before changing its mounts, seeds, \
+                                "VM {name} is already running; stop it before changing its seeds, \
                                  stores, environment or idle suspend"
                             ));
+                        }
+                        // Naming the mounts it runs with is fine, so a project can be opened twice.
+                        if !mounts.is_empty() && mounts != instance.mounts().unwrap_or_else(|error| fail(error)) {
+                            fail(format!("VM {name} is already running with other mounts; stop it before changing them"));
                         }
                         (Vm::Running(instance), false)
                     }
@@ -459,6 +462,22 @@ fn run_local(options: RunOptions, started: Instant) {
             grants = vm.instance().stores().unwrap_or_else(|error| fail(error));
         } else {
             vm.instance().set_stores(&grants).unwrap_or_else(|error| fail(error));
+        }
+    }
+
+    // A VM keeps the mounts it was last given, which `ls` reports and a persistent VM starts with again.
+    let mut mounts = mounts;
+    if booting {
+        if mounts.is_empty() {
+            mounts = vm
+                .instance()
+                .mounts()
+                .unwrap_or_else(|error| fail(error))
+                .iter()
+                .map(|mount| Mount::parse(&mount.spec()).unwrap_or_else(|error| fail(error)))
+                .collect();
+        } else {
+            vm.instance().set_mounts(&mounts).unwrap_or_else(|error| fail(error));
         }
     }
 
@@ -1120,12 +1139,10 @@ fn stop_all(args: &[String]) {
 const DEFAULT_SERVE_ADDRESS: &str = "127.0.0.1:7420";
 
 fn serve_command(args: &[String]) {
-    let mut ui = false;
     let (mut cert, mut key, mut address) = (None, None, None);
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--ui" => ui = true,
             "--cert" => cert = Some(PathBuf::from(args.next().unwrap_or_else(|| usage_error("serve")))),
             "--key" => key = Some(PathBuf::from(args.next().unwrap_or_else(|| usage_error("serve")))),
             _ if address.is_none() => address = Some(arg.as_str()),
@@ -1143,11 +1160,7 @@ fn serve_command(args: &[String]) {
         TcpListener::bind(address).unwrap_or_else(|error| fail(format!("failed to listen on {address}: {error}")));
     // stderr is the event log, so this goes to stdout.
     println!("serving on {address}; clients authenticate with the token in {}", serve::token_path().display());
-    if ui {
-        let scheme = if tls.is_some() { "https" } else { "http" };
-        println!("web UI: {scheme}://{address}/#token={token}");
-    }
-    serve::serve(listener, &token, ui, tls)
+    serve::serve(listener, &token, tls)
 }
 
 fn nodes_command(args: &[String]) {

@@ -7,7 +7,7 @@ use super::{
     FocusSearch, ToggleSidebar,
     display::{self, Display},
     layout::{self, Axis, Node, Pane, Step},
-    machines::{Machine, Machines, NewMachine, Notice, PRESETS, Preset, Tone},
+    machines::{self, Machine, Machines, NewMachine, Notice, PRESETS, Preset, Tone},
     shell::{Shell, ShellEvent},
     shell_view,
     theme::*,
@@ -19,19 +19,19 @@ use crate::{
 };
 use gpui::{
     AnyElement, Bounds, Context, Entity, FocusHandle, Focusable, Hsla, KeyDownEvent, KeyUpEvent, Modifiers,
-    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollDelta,
+    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, ScrollDelta,
     ScrollEvent, SharedString, Subscription, Window, canvas, div, prelude::*, px, rgb, size,
 };
 use gpui_component::{
     Icon, Sizable,
-    button::Button,
     input::{Input, InputEvent as TextEvent, InputState},
-    menu::{DropdownMenu, PopupMenuItem},
+    tooltip::Tooltip,
 };
 use gpui_kit_assets::IconName;
 use std::{
     cell::{Cell, RefCell},
     collections::{BTreeMap, HashMap},
+    path::PathBuf,
     rc::Rc,
 };
 
@@ -68,6 +68,8 @@ pub struct Workspace {
     new_persist: bool,
     /// `None` for this host.
     new_node: Option<String>,
+    /// The project folder the new machine mounts, which keeps it on this host.
+    new_folder: Option<PathBuf>,
     screen_focus: FocusHandle,
     /// The modifiers held over the screen, to send their presses and releases.
     modifiers: Modifiers,
@@ -85,8 +87,10 @@ impl Workspace {
             cx.observe_in(&machines, window, |this, _, window, cx| this.follow_machines(window, cx)),
             cx.subscribe(&search, |_, _, _: &TextEvent, cx| cx.notify()),
             cx.subscribe_in(&new_name, window, |this, _, event: &TextEvent, window, cx| {
-                if matches!(event, TextEvent::PressEnter { .. }) {
-                    this.create(window, cx);
+                match event {
+                    TextEvent::PressEnter { .. } => this.create(window, cx),
+                    // The create button tells whether the name is taken, so it starts that machine.
+                    _ => cx.notify(),
                 }
             }),
         ];
@@ -103,6 +107,7 @@ impl Workspace {
             new_preset: PRESETS[1],
             new_persist: false,
             new_node: None,
+            new_folder: None,
             screen_focus: cx.focus_handle(),
             modifiers: Modifiers::default(),
             drawn: Rc::new(Cell::new(Bounds::default())),
@@ -218,14 +223,41 @@ impl Workspace {
     }
 
     fn create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let folder = self.new_folder.take();
         let new = NewMachine {
             name: self.new_name.read(cx).value().trim().to_owned(),
-            node: self.new_node.clone(),
+            node: if folder.is_some() { None } else { self.new_node.clone() },
+            folder,
             preset: self.new_preset,
             persist: self.new_persist,
         };
         self.new_name.update(cx, |input, cx| input.set_value("", window, cx));
         self.machines.update(cx, |machines, cx| machines.create(new, cx));
+    }
+
+    /// Asks for a project folder for the new machine. A project's machine is
+    /// kept after stop, so it comes back with the folder.
+    fn choose_folder(&mut self, cx: &mut Context<Self>) {
+        let chosen = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Open".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let chosen = chosen.await.expect("the folder prompt answers");
+            this.update(cx, |this, cx| match chosen {
+                Ok(Some(mut paths)) => {
+                    this.new_folder = Some(paths.pop().expect("a chosen folder"));
+                    this.new_persist = true;
+                    cx.notify();
+                }
+                Ok(None) => {}
+                Err(error) => this.machines.update(cx, |machines, cx| machines.fail(format!("Choosing a folder failed: {error}"), cx)),
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
@@ -304,8 +336,12 @@ impl Workspace {
         let machines = self.machines.read(cx);
         let loaded = machines.loaded;
         let query = self.search.read(cx).value().to_lowercase();
-        let shown: Vec<Machine> =
-            machines.machines.iter().filter(|machine| machine.name.to_lowercase().contains(&query)).cloned().collect();
+        let shown: Vec<Machine> = machines
+            .machines
+            .iter()
+            .filter(|machine| format!("{} {}", machine.name, machine.folders()).to_lowercase().contains(&query))
+            .cloned()
+            .collect();
         let running: Vec<AnyElement> = shown
             .iter()
             .filter(|machine| machine.vm.running)
@@ -427,8 +463,10 @@ impl Workspace {
             .when(self.sidebar_open, |bar| bar.pl_3())
             .when_some(machine, |bar, machine| {
                 let (start, stop, delete) = (machine.name.clone(), machine.name.clone(), machine.name.clone());
+                let folders = machine.folders();
                 bar.child(div().font_weight(gpui::FontWeight::MEDIUM).child(machine.name.clone()))
                     .child(div().text_color(rgb(MUTED)).child(state_label(&machine)))
+                    .when(!folders.is_empty(), |bar| bar.child(folder_label(folders)))
                     .child(div().flex_1())
                     .when(machine.vm.running, |bar| {
                         bar.when(screen_closed, |bar| {
@@ -535,8 +573,12 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .child(div().font_weight(gpui::FontWeight::MEDIUM).truncate().child(name.clone()))
-                    .child(div().text_size(SMALL_TEXT_SIZE).text_color(rgb(MUTED)).child(format!(
-                        "{} CPUs · {} GiB memory · {} GiB disk{}",
+                    .child(div().text_size(SMALL_TEXT_SIZE).text_color(rgb(MUTED)).truncate().child(format!(
+                        "{}{} CPUs · {} GiB memory · {} GiB disk{}",
+                        match machine.folders().as_str() {
+                            "" => String::new(),
+                            folders => format!("{folders} · "),
+                        },
                         hardware.cpus,
                         hardware.memory_mib / 1024,
                         hardware.disk_gib,
@@ -548,88 +590,70 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// The new machine form: an inset name field over a strip of choices.
+    /// The new machine form: the name and project folder over a strip with
+    /// its size and host on the left and keeping it and creating it on the right.
     fn render_composer(&self, cx: &mut Context<Self>) -> AnyElement {
         let machines = self.machines.read(cx);
         let creating = machines.pending.contains("");
-        let nodes = machines.nodes.clone();
-        let selected = self.new_node.clone();
-        let host = selected.clone().unwrap_or_else(|| "Local".to_owned());
-        let workspace = cx.weak_entity();
+        let folder = self.new_folder.clone();
+        let typed = self.new_name.read(cx).value().trim().to_owned();
+        let starts = Machines::new_name(&typed, folder.as_deref()).is_some_and(|name| machines.find(&name).is_some());
+        // A folder lives on this host, so its machine does too.
+        let nodes = if folder.is_some() { Vec::new() } else { machines.nodes.clone() };
+        let hosts = std::iter::once(None).chain(nodes.into_iter().map(Some)).collect::<Vec<_>>();
         card()
             .border_1()
             .border_color(rgb(BORDER))
-            .child(div().bg(rgb(WINDOW)).px_3().py_3().min_h(px(56.)).child(Input::new(&self.new_name).appearance(false)))
+            .child(
+                div()
+                    .bg(rgb(WINDOW))
+                    .pl_3()
+                    .pr_2()
+                    .min_h(px(56.))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().flex_1().min_w_0().child(Input::new(&self.new_name).appearance(false)))
+                    .child(match &folder {
+                        None => quiet_button("choose-folder", "Open folder", IconName::FolderOpen)
+                            .on_click(cx.listener(|this, _, _, cx| this.choose_folder(cx)))
+                            .into_any_element(),
+                        Some(folder) => folder_chip(folder, cx.listener(|this, _, _, cx| {
+                            this.new_folder = None;
+                            cx.notify();
+                        })),
+                    }),
+            )
             .child(
                 div()
                     .px_3()
                     .py_2()
                     .flex()
                     .items_center()
-                    .gap_3()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .overflow_hidden()
-                            .child(segmented(PRESETS.iter().map(|preset| {
-                                let preset = *preset;
-                                segment(SharedString::from(format!("preset-{}", preset.label)), preset.label, self.new_preset == preset)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.new_preset = preset;
-                                        cx.notify();
-                                    }))
-                            })))
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_size(SMALL_TEXT_SIZE)
-                                    .text_color(rgb(FAINT))
-                                    .child(format!("{} CPU · {} GiB", self.new_preset.cpus, self.new_preset.memory_mib / 1024)),
-                            )
-                            .when(!nodes.is_empty(), move |strip| {
-                                strip.child(
-                                    Button::new("node-select")
-                                        .small()
-                                        .outline()
-                                        .dropdown_caret(true)
-                                        .w(px(120.))
-                                        .label(host)
-                                        .dropdown_menu(move |menu, _, _| {
-                                            let local =
-                                                PopupMenuItem::new("Local").checked(selected.is_none()).on_click({
-                                                    let workspace = workspace.clone();
-                                                    move |_, _, cx| {
-                                                        workspace
-                                                            .update(cx, |this, cx| {
-                                                                this.new_node = None;
-                                                                cx.notify();
-                                                            })
-                                                            .ok();
-                                                    }
-                                                });
-                                            let menu = menu.item(local);
-                                            nodes.iter().cloned().fold(menu, |menu, node| {
-                                                let checked = selected.as_deref() == Some(node.as_str());
-                                                let workspace = workspace.clone();
-                                                menu.item(PopupMenuItem::new(node.clone()).checked(checked).on_click(move |_, _, cx| {
-                                                    let node = node.clone();
-                                                    workspace
-                                                        .update(cx, |this, cx| {
-                                                            this.new_node = Some(node);
-                                                            cx.notify();
-                                                        })
-                                                        .ok();
-                                                }))
-                                            })
-                                        }),
-                                )
-                            }),
-                    )
-                    .child(div().w(px(1.)).h(px(16.)).flex_none().bg(rgb(BORDER)))
+                    .gap_2()
+                    .child(segmented(PRESETS.iter().map(|preset| {
+                        let preset = *preset;
+                        let specs = format!("{} CPUs · {} GiB memory", preset.cpus, preset.memory_mib / 1024);
+                        segment(SharedString::from(format!("preset-{}", preset.label)), preset.label, self.new_preset == preset)
+                            .tooltip(move |window, cx| Tooltip::new(specs.clone()).build(window, cx))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.new_preset = preset;
+                                cx.notify();
+                            }))
+                    })))
+                    .when(hosts.len() > 1, |strip| {
+                        strip.child(segmented(hosts.into_iter().map(|node| {
+                            let selected = self.new_node == node;
+                            let label = node.clone().unwrap_or_else(|| "Local".to_owned());
+                            segment(SharedString::from(format!("host-{label}")), label, selected).on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.new_node = node.clone();
+                                    cx.notify();
+                                },
+                            ))
+                        })))
+                    })
+                    .child(div().flex_1())
                     .child(choice("persist", "Keep after stop", self.new_persist).flex_none().on_click(cx.listener(
                         |this, _, _, cx| {
                             this.new_persist = !this.new_persist;
@@ -654,8 +678,12 @@ impl Workspace {
                             .when(!creating, |button| {
                                 button.cursor_pointer().on_click(cx.listener(|this, _, window, cx| this.create(window, cx)))
                             })
-                            .child(Icon::new(IconName::Plus).size(ICON_SIZE))
-                            .child(if creating { "Creating…" } else { "Create" }),
+                            .child(Icon::new(if starts { IconName::Play } else { IconName::Plus }).size(ICON_SIZE))
+                            .child(match (creating, starts) {
+                                (true, _) => "Creating…",
+                                (false, true) => "Start",
+                                (false, false) => "Create",
+                            }),
                     ),
             )
             .into_any_element()
@@ -708,6 +736,19 @@ impl Workspace {
                         .gap_3()
                         .child(div().font_weight(gpui::FontWeight::MEDIUM).child("This machine is stopped"))
                         .child(div().text_color(rgb(MUTED)).child("Its disk is kept until you delete it."))
+                        .children(machine.vm.mounts.iter().map(|mount| {
+                            div()
+                                .text_size(SMALL_TEXT_SIZE)
+                                .flex()
+                                .items_center()
+                                .gap_1p5()
+                                .child(Icon::new(IconName::Folder).size(ICON_SIZE).text_color(rgb(MUTED)))
+                                .child(div().truncate().child(format!(
+                                    "{} at {}",
+                                    machines::home_relative(&mount.host),
+                                    mount.guest.replacen("/home/varmint", "~", 1)
+                                )))
+                        }))
                         .child(div().flex().child(pill("start-stopped", "Start", busy, Some(IconName::Play)).on_click(
                             cx.listener(move |this, _, _, cx| this.machines.update(cx, |machines, cx| machines.start(&start, cx))),
                         ))),
@@ -1121,6 +1162,61 @@ fn choice(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>, select
         .when(selected, |pill| pill.bg(rgb(SELECTED)).border_color(rgb(SELECTED)))
         .when(!selected, |pill| pill.border_color(rgb(BORDER)).text_color(rgb(MUTED)).hover(|pill| pill.bg(rgb(HOVER))))
         .child(label.into())
+}
+
+/// The folders a machine mounts, beside its name.
+fn folder_label(folders: String) -> impl IntoElement {
+    div()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap_1()
+        .text_size(SMALL_TEXT_SIZE)
+        .text_color(rgb(FAINT))
+        .child(Icon::new(IconName::Folder).size(px(12.)))
+        .child(div().truncate().child(folders))
+}
+
+/// A borderless button with an icon, for a secondary action inside a field.
+fn quiet_button(id: &'static str, label: &'static str, icon: IconName) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .flex_none()
+        .h(CONTROL_HEIGHT)
+        .px_2p5()
+        .flex()
+        .items_center()
+        .gap_1p5()
+        .rounded_full()
+        .text_size(SMALL_TEXT_SIZE)
+        .text_color(rgb(MUTED))
+        .cursor_pointer()
+        .hover(|button| button.bg(rgb(HOVER)).text_color(rgb(TEXT)))
+        .child(Icon::new(icon).size(px(12.)))
+        .child(label)
+}
+
+/// The chosen project folder of a new machine, with a button that clears it.
+fn folder_chip(
+    folder: &std::path::Path,
+    on_clear: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> AnyElement {
+    div()
+        .flex_none()
+        .max_w(px(280.))
+        .h(CONTROL_HEIGHT)
+        .pl_3()
+        .pr_1()
+        .flex()
+        .items_center()
+        .gap_1p5()
+        .rounded_full()
+        .text_size(SMALL_TEXT_SIZE)
+        .bg(rgb(SELECTED))
+        .child(Icon::new(IconName::Folder).size(px(12.)).flex_none())
+        .child(div().min_w_0().truncate().child(machines::home_relative(folder)))
+        .child(icon_button("clear-folder", IconName::Close, on_clear))
+        .into_any_element()
 }
 
 fn status_dot(machine: &Machine) -> impl IntoElement {

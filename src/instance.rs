@@ -5,7 +5,7 @@
 //! detected without pid files.
 
 use crate::{
-    config::{GIB, Hardware, Resources},
+    config::{GIB, Hardware, Mount, Resources},
     ssh_config,
     store::Grant,
 };
@@ -190,6 +190,28 @@ impl Instance {
         let path = self.stores_path();
         let specs: Vec<String> = grants.iter().map(Grant::spec).collect();
         fs::write(&path, serde_json::to_vec_pretty(&specs).unwrap())
+            .map_err(|error| format!("failed to write {}: {error}", path.display()))
+    }
+
+    fn mounts_path(&self) -> PathBuf {
+        self.dir.join("mounts.json")
+    }
+
+    /// The directories the VM was last started with, which a persistent VM
+    /// is started with again when `run` names none.
+    pub fn mounts(&self) -> Result<Vec<Mount>, String> {
+        let path = self.mounts_path();
+        let source = match fs::read(&path) {
+            Ok(source) => source,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(format!("failed to read {}: {error}", path.display())),
+        };
+        serde_json::from_slice(&source).map_err(|error| format!("failed to parse {}: {error}", path.display()))
+    }
+
+    pub fn set_mounts(&self, mounts: &[Mount]) -> Result<(), String> {
+        let path = self.mounts_path();
+        fs::write(&path, serde_json::to_vec_pretty(mounts).unwrap())
             .map_err(|error| format!("failed to write {}: {error}", path.display()))
     }
 

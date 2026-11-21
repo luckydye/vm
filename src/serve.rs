@@ -18,10 +18,9 @@
 
 mod forward;
 pub mod tls;
-mod web;
 
 use crate::{
-    config::{GUEST_ENVIRONMENT_VARIABLE, Hardware},
+    config::{GUEST_ENVIRONMENT_VARIABLE, Hardware, Mount},
     instance, protocol, store,
 };
 use serde::{Deserialize, Serialize};
@@ -161,6 +160,10 @@ pub(crate) struct Vm {
     pub(crate) cpu_ms: Option<u64>,
     /// Whether the VM is suspended for being idle, while it runs.
     pub(crate) suspended: Option<bool>,
+    /// The host directories it was last started with.
+    /// @deprecated default: nodes from before mounts were listed leave them out.
+    #[serde(default)]
+    pub(crate) mounts: Vec<Mount>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -209,10 +212,8 @@ pub fn token() -> Result<String, String> {
     Ok(token)
 }
 
-/// With `ui`, connections that do not start with a JSON request are HTTP,
-/// answered by [`web`] with the web UI and its API. With `tls`, every
-/// connection is TLS.
-pub fn serve(listener: TcpListener, token: &str, ui: bool, tls: Option<Arc<rustls::ServerConfig>>) -> ! {
+/// With `tls`, every connection is TLS.
+pub fn serve(listener: TcpListener, token: &str, tls: Option<Arc<rustls::ServerConfig>>) -> ! {
     // Keeps the Mac awake while serving, also with the screen locked or off.
     #[cfg(target_os = "macos")]
     let _awake = objc2_foundation::NSProcessInfo::processInfo().beginActivityWithOptions_reason(
@@ -244,8 +245,8 @@ pub fn serve(listener: TcpListener, token: &str, ui: bool, tls: Option<Arc<rustl
             let tls = tls.clone();
             scope.spawn(move || {
                 let handled = match tls {
-                    Some(tls) => tls::wrap(connection, tls, |connection| handle(connection, &client, token, ui)),
-                    None => handle(connection, &client, token, ui),
+                    Some(tls) => tls::wrap(connection, tls, |connection| handle(connection, &client, token)),
+                    None => handle(connection, &client, token),
                 };
                 if let Err(error) = handled {
                     client.emit("error", json!({ "message": error.to_string() }));
@@ -372,16 +373,13 @@ fn rfc3339(time: SystemTime) -> String {
     )
 }
 
-fn handle(connection: impl Connection, client: &Client, token: &str, ui: bool) -> io::Result<()> {
+fn handle(connection: impl Connection, client: &Client, token: &str) -> io::Result<()> {
     let deadline = Deadline {
         stream: connection.try_clone()?,
         deadline: Instant::now() + REQUEST_TIMEOUT,
     };
     let mut reader = BufReader::new(deadline.take(MAX_REQUEST_BYTES));
     let mut writer = connection;
-    if ui && reader.fill_buf()?.first().is_some_and(|&byte| byte != b'{') {
-        return web::handle(client, reader, writer, token);
-    }
     let request = protocol::read_json(&mut reader).map_err(|error| format!("unreadable request: {error}"));
     let (reply, control) = respond(client, request, token);
     protocol::write_json(&mut writer, &reply)?;
@@ -552,6 +550,7 @@ pub(crate) fn local_vms() -> Result<(Vec<Vm>, Host), String> {
                 memory_bytes: usage.as_ref().map(|usage| usage.memory_bytes.expect("a usage reply has memory_bytes")),
                 cpu_ms: usage.as_ref().map(|usage| usage.cpu_ms.expect("a usage reply has cpu_ms")),
                 suspended: usage.map(|usage| usage.suspended.expect("a usage reply has suspended")),
+                mounts: instance.mounts()?,
                 name: instance.name,
             })
         })

@@ -1,5 +1,4 @@
-//! How a machine's page tiles its windows, as in the web UI's layout.js: a
-//! binary tree whose leaves are windows and whose splits hold two nodes side
+//! How a machine's page tiles its windows: a binary tree whose leaves are windows and whose splits hold two nodes side
 //! by side or stacked, with the share of the space the first one takes.
 
 /// A window on a machine's page.

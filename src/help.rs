@@ -46,9 +46,11 @@ persistent VMs and VMs that were already running stay up.
 Without --persist the VM is ephemeral and deleted when it stops. Running
 `vm run NAME` for a stopped persistent VM starts it again with its disk
 intact; hardware options only apply when a VM is created. A persistent VM
-starts with the buckets it was last given with --store unless new ones are
-named. Mounts, seeds, stores and environment apply when a VM starts, so
-they cannot be changed on one that is already running.
+starts with the buckets it was last given with --store, and the directories
+it was last given with --mount, unless new ones are named. Seeds, stores and
+environment apply when a VM starts, so they cannot be changed on one that is
+already running; --mount on a running VM is accepted only with the mounts it
+runs with.
 
 NAME may be NODE/NAME to use a node from ~/.vm/nodes. --node NAME picks a
 node explicitly and --any picks the least loaded node with room. A remote
@@ -504,7 +506,7 @@ NODE/NAME; `vm ls` includes them and every command accepts that name.
         Command {
             name: "serve",
             group: "Remote",
-            usage: "vm serve [ADDRESS] [--ui] [--cert FILE --key FILE]",
+            usage: "vm serve [ADDRESS] [--cert FILE --key FILE]",
             summary: "Provision VMs over the network",
             description: "\
 Listens on ADDRESS (default 127.0.0.1:7420) for provisioning requests. Each
@@ -515,7 +517,8 @@ created on first use:
   {\"token\": \"...\", \"op\": \"run\", \"persist\": false, \"cpus\": 4, \"memory_mib\": 4096,
    \"disk_gib\": 64, \"size\": [1920, 1080], \"wait_network\": true}
                                                -> {\"name\": \"swift-otter\", \"created\": true}
-  {\"token\": \"...\", \"op\": \"ls\"}           -> {\"vms\": [{\"name\", \"running\", \"hardware\", \"memory_bytes\", \"cpu_ms\", \"suspended\"}],
+  {\"token\": \"...\", \"op\": \"ls\"}           -> {\"vms\": [{\"name\", \"running\", \"hardware\", \"memory_bytes\", \"cpu_ms\", \"suspended\",
+                                                   \"mounts\": [{\"host\", \"guest\", \"readonly\"}]}],
                                                    \"host\": {\"memory_bytes\", \"used_bytes\", \"cpu_busy_ms\", \"cpu_total_ms\", \"cpus\"}}
   {\"token\": \"...\", \"op\": \"stop\", \"name\": \"swift-otter\"} -> {}
   {\"token\": \"...\", \"op\": \"rm\", \"name\": \"swift-otter\"}   -> {}
@@ -554,28 +557,20 @@ exit_code, duration_ms), .reply and .error (a client that left before
 the reply, or a failed accept). The extension attributes peer and requestid name the client and
 tie the events of one request together. Tokens are never logged.
 
-With --ui the same address also serves a web UI over HTTP, with a live
-wall of every VM's screen and each VM's shell and display. It prints a link
-that carries the token; the browser keeps it, so open the link once.
-
 With --cert and --key, a PEM certificate chain and its private key, every
-connection is TLS and the web UI is on https, which browsers on other
-machines need for its video. mkcert makes a certificate they trust.
-Without them the connection is not encrypted: keep ADDRESS on the loopback
+connection is TLS. Without them the connection is not encrypted: keep ADDRESS on the loopback
 or a private network and reach it through a relay or tunnel."
                 .into(),
             options: vec![
-                ("--ui", "Also serve the web UI on ADDRESS".into()),
                 ("--cert FILE", "Serve TLS with this PEM certificate chain".into()),
                 ("--key FILE", "The PEM private key of --cert".into()),
             ],
             examples: &[
                 ("vm serve", "listen on 127.0.0.1:7420"),
                 ("vm serve 0.0.0.0:7420", "listen on all interfaces"),
-                ("vm serve --ui", "with the web UI at http://127.0.0.1:7420"),
                 (
-                    "vm serve --ui 0.0.0.0:7420 --cert mac.pem --key mac-key.pem",
-                    "with the web UI over https for the local network",
+                    "vm serve 0.0.0.0:7420 --cert mac.pem --key mac-key.pem",
+                    "over TLS for the local network",
                 ),
             ],
         },

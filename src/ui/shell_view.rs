@@ -18,10 +18,16 @@ const PADDING: Pixels = px(12.);
 fn cell_size(font: &Font, window: &Window) -> (Pixels, Pixels) {
     let text_system = window.text_system();
     let font_id = text_system.resolve_font(font);
-    let width = text_system.advance(font_id, FONT_SIZE, 'm').expect("the monospace font has an m").width;
+    let width = text_system
+        .advance(font_id, FONT_SIZE, 'm')
+        .expect("the monospace font has an m")
+        .width;
     // The glyphs' own height, not extra leading: block and box characters
-    // fill it edge to edge, so rows must meet without gaps.
-    let height = text_system.ascent(font_id, FONT_SIZE) + text_system.descent(font_id, FONT_SIZE);
+    // fill it edge to edge, so rows must meet without gaps. Font metrics give
+    // the descent below the baseline as a negative number.
+    let descent = text_system.descent(font_id, FONT_SIZE);
+    assert!(descent <= px(0.), "the font's descent is not below the baseline");
+    let height = (text_system.ascent(font_id, FONT_SIZE) - descent).ceil();
     (width, height)
 }
 
@@ -56,7 +62,11 @@ pub fn render(shell: Entity<Shell>, focus: &FocusHandle, window: &mut Window, cx
             let keystroke = &event.keystroke;
             let modifiers = &keystroke.modifiers;
             // Cmd+C and Cmd+V on macOS, Ctrl+Shift+C and Ctrl+Shift+V elsewhere, as terminals do.
-            let shortcut = if cfg!(target_os = "macos") { modifiers.platform } else { modifiers.control && modifiers.shift };
+            let shortcut = if cfg!(target_os = "macos") {
+                modifiers.platform
+            } else {
+                modifiers.control && modifiers.shift
+            };
             if shortcut && keystroke.key == "c" {
                 if let Some(text) = keys.read(cx).selected_text() {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -145,35 +155,54 @@ fn paint(
     window: &mut Window,
     cx: &mut App,
 ) {
-    for (index, line) in grid.lines.iter().enumerate() {
-        let top = origin.y + line_height * index as f32;
-        let runs: Vec<TextRun> = line
-            .runs
-            .iter()
-            .map(|run| TextRun {
-                len: run.len,
-                font: Font {
-                    weight: if run.bold { FontWeight::BOLD } else { FontWeight::NORMAL },
-                    style: if run.italic { FontStyle::Italic } else { FontStyle::Normal },
-                    ..mono.clone()
-                },
-                color: rgb(run.foreground).into(),
-                background_color: run.background.map(|background| rgb(background).into()),
-                underline: run.underline.then(|| UnderlineStyle {
-                    thickness: px(1.),
-                    color: Some(rgb(run.foreground).into()),
-                    wavy: false,
-                }),
-                strikethrough: None,
-            })
-            .collect();
-        let shaped = window.text_system().shape_line(line.text.clone().into(), FONT_SIZE, &runs, Some(cell_width));
-        shaped
-            .paint(point(origin.x, top), line_height, TextAlign::Left, None, window, cx)
+    let shaped: Vec<_> = grid
+        .lines
+        .iter()
+        .map(|line| {
+            let runs: Vec<TextRun> = line
+                .runs
+                .iter()
+                .map(|run| TextRun {
+                    len: run.len,
+                    font: Font {
+                        weight: if run.bold { FontWeight::BOLD } else { FontWeight::NORMAL },
+                        style: if run.italic {
+                            FontStyle::Italic
+                        } else {
+                            FontStyle::Normal
+                        },
+                        ..mono.clone()
+                    },
+                    color: rgb(run.foreground).into(),
+                    background_color: run.background.map(|background| rgb(background).into()),
+                    underline: run.underline.then(|| UnderlineStyle {
+                        thickness: px(1.),
+                        color: Some(rgb(run.foreground).into()),
+                        wavy: false,
+                    }),
+                    strikethrough: None,
+                })
+                .collect();
+            window
+                .text_system()
+                .shape_line(line.text.clone().into(), FONT_SIZE, &runs, Some(cell_width))
+        })
+        .collect();
+    // Backgrounds, such as the selection's, all go below the glyphs, which may reach into the next row.
+    let top = |index: usize| point(origin.x, origin.y + line_height * index as f32);
+    for (index, line) in shaped.iter().enumerate() {
+        line.paint_background(top(index), line_height, TextAlign::Left, None, window, cx)
+            .expect("painting a terminal row's background");
+    }
+    for (index, line) in shaped.iter().enumerate() {
+        line.paint(top(index), line_height, TextAlign::Left, None, window, cx)
             .expect("painting a terminal row");
     }
     if let Some((column, row)) = grid.cursor {
-        let at = point(origin.x + cell_width * f32::from(column), origin.y + line_height * f32::from(row));
+        let at = point(
+            origin.x + cell_width * f32::from(column),
+            origin.y + line_height * f32::from(row),
+        );
         let mut cursor: gpui::Hsla = rgb(grid.foreground).into();
         cursor.a = 0.6;
         window.paint_quad(fill(Bounds::new(at, size(cell_width, line_height)), cursor));

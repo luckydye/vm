@@ -8,7 +8,13 @@ use crate::{
     serve::{Host, Vm},
 };
 use gpui::{AppContext, AsyncApp, Context, Task, WeakEntity};
-use std::{collections::BTreeSet, env, process::{Command, Stdio}, time::Duration};
+use std::{
+    collections::BTreeSet,
+    env,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+    time::Duration,
+};
 
 /// How long the listing waits before asking again.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -28,6 +34,25 @@ impl Machine {
     pub fn short_name(&self) -> &str {
         &self.vm.name
     }
+
+    /// The host folders it was last started with, with the home as `~`.
+    pub fn folders(&self) -> String {
+        self.vm.mounts.iter().map(|mount| home_relative(&mount.host)).collect::<Vec<_>>().join(", ")
+    }
+}
+
+/// `path` with the home directory written as `~`.
+pub fn home_relative(path: &Path) -> String {
+    let home = env::var_os("HOME").map(PathBuf::from).expect("HOME is not set");
+    match path.strip_prefix(&home) {
+        Ok(rest) => Path::new("~").join(rest).display().to_string(),
+        Err(_) => path.display().to_string(),
+    }
+}
+
+/// The name of a folder, which names the machine opened on it and where it is mounted.
+pub fn folder_name(folder: &Path) -> String {
+    folder.file_name().expect("a chosen folder has a name").to_string_lossy().into_owned()
 }
 
 /// What a host offers, for the overview.
@@ -62,10 +87,12 @@ pub const PRESETS: [Preset; 3] = [
     Preset { label: "Large", cpus: 8, memory_mib: 16384 },
 ];
 
-/// A machine to create.
+/// A machine to create, or to start when it is already listed.
 pub struct NewMachine {
-    /// Random when empty.
+    /// Random when empty, or the folder's name when there is one.
     pub name: String,
+    /// A host folder mounted at `~/NAME` of the guest, NAME being the folder's name, as a project.
+    pub folder: Option<PathBuf>,
     /// `None` for this host.
     pub node: Option<String>,
     pub preset: Preset,
@@ -132,24 +159,45 @@ impl Machines {
         self.act(name, args, format!("Deleted {name}"), cx);
     }
 
-    pub fn create(&mut self, new: NewMachine, cx: &mut Context<Self>) {
-        let mut args = vec!["run".to_owned()];
-        if !new.name.is_empty() {
-            args.push(new.name);
+    /// The name a new machine gets, `None` for a random one.
+    pub fn new_name(new_name: &str, folder: Option<&Path>) -> Option<String> {
+        match (new_name.is_empty(), folder) {
+            (false, _) => Some(new_name.to_owned()),
+            (true, Some(folder)) => Some(folder_name(folder)),
+            (true, None) => None,
         }
+    }
+
+    pub fn create(&mut self, new: NewMachine, cx: &mut Context<Self>) {
+        let name = Self::new_name(&new.name, new.folder.as_deref());
+        // A folder's machine is started again rather than created twice, as `fp` does.
+        let existing = name.as_deref().is_some_and(|name| self.find(name).is_some());
+        let mut args = vec!["run".to_owned()];
+        args.extend(name);
         if let Some(node) = new.node {
             args.extend(["--node".to_owned(), node]);
         }
-        if new.persist {
-            args.push("--persist".to_owned());
+        if let Some(folder) = &new.folder {
+            args.extend(["--mount".to_owned(), format!("{}:{}", folder.display(), folder_name(folder))]);
         }
-        args.extend([
-            "--cpus".to_owned(),
-            new.preset.cpus.to_string(),
-            "--memory".to_owned(),
-            new.preset.memory_mib.to_string(),
-        ]);
-        self.act("", args, "Created {}".to_owned(), cx);
+        if !existing {
+            if new.persist {
+                args.push("--persist".to_owned());
+            }
+            args.extend([
+                "--cpus".to_owned(),
+                new.preset.cpus.to_string(),
+                "--memory".to_owned(),
+                new.preset.memory_mib.to_string(),
+            ]);
+        }
+        let done = if existing { "Started {}" } else { "Created {}" };
+        self.act("", args, done.to_owned(), cx);
+    }
+
+    pub fn fail(&mut self, text: String, cx: &mut Context<Self>) {
+        self.notice = Some(Notice { text, tone: Tone::Error });
+        cx.notify();
     }
 
     pub fn dismiss_notice(&mut self, cx: &mut Context<Self>) {

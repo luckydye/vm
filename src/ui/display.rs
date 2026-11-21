@@ -1,4 +1,4 @@
-//! A machine's screen, sound and clipboard, as the web UI has them.
+//! A machine's screen, sound and clipboard.
 //!
 //! The screen and sound come as the control socket's H.264 stream with Opus
 //! beside it, locally or through a node's `attach`, and play on this host.
