@@ -10,7 +10,7 @@ use crate::{
     suspend::Suspend,
 };
 use applevisor::{error::HypervisorError, prelude::*};
-use applevisor_sys::{HV_MEMORY_EXEC, HV_MEMORY_READ, HV_MEMORY_WRITE, hv_vm_map, hv_vm_protect, hv_vm_unmap};
+use applevisor_sys::{HV_MEMORY_EXEC, HV_MEMORY_READ, HV_MEMORY_WRITE, hv_vm_map, hv_vm_unmap};
 use std::{
     io,
     sync::{

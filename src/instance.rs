@@ -13,10 +13,7 @@ use std::{
     env,
     fs::{self, File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
-    os::{
-        fd::AsRawFd,
-        unix::{fs::MetadataExt, net::UnixListener, net::UnixStream},
-    },
+    os::unix::{fs::MetadataExt, net::UnixListener, net::UnixStream},
     path::{Path, PathBuf},
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
@@ -485,6 +482,7 @@ fn clone_file(source: &Path, destination: &Path) -> Result<(), String> {
 /// Copy-on-write reflink clone; takes milliseconds regardless of size.
 #[cfg(target_os = "linux")]
 fn clone_file(source: &Path, destination: &Path) -> Result<(), String> {
+    use std::os::fd::AsRawFd;
     let clone = || -> io::Result<()> {
         let source = File::open(source)?;
         let destination_file = File::create_new(destination)?;

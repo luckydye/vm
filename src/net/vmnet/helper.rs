@@ -26,7 +26,8 @@ pub struct Connection {
     pub socket: UnixDatagram,
     pub mac: [u8; 6],
     pub max_packet_size: u64,
-    pub process: Process,
+    /// Held only so dropping the connection stops the helper.
+    pub _process: Process,
 }
 
 pub struct Process {
@@ -77,7 +78,7 @@ pub fn connect(interface_id: &str) -> io::Result<Connection> {
         socket,
         mac,
         max_packet_size: info.vmnet_max_packet_size,
-        process,
+        _process: process,
     })
 }
 

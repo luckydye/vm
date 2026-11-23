@@ -210,25 +210,6 @@ struct ResourceDetachBacking {
 
 #[derive(IntoBytes, FromBytes, Immutable, Debug, Copy, Clone)]
 #[repr(C, packed)]
-struct CursorPos {
-    scanout_id: u32,
-    x: u32,
-    y: u32,
-    padding: u32,
-}
-
-#[derive(IntoBytes, FromBytes, Immutable, Debug, Copy, Clone)]
-#[repr(C, packed)]
-struct UpdateCursor {
-    pos: CursorPos,
-    resource_id: u32,
-    hot_x: u32,
-    hot_y: u32,
-    padding: u32,
-}
-
-#[derive(IntoBytes, FromBytes, Immutable, Debug, Copy, Clone)]
-#[repr(C, packed)]
 struct GetCapsetInfo {
     hdr: CtrlHeader,
     capset_index: u32,
@@ -394,7 +375,6 @@ const FLAG_FENCE: u32 = 1 << 0;
 const FLAG_RING_IDX: u32 = 1 << 1;
 
 struct Resource {
-    format: u32,
     width: u32,
     height: u32,
     backing: Vec<MemEntry>,
@@ -419,8 +399,6 @@ pub struct PresentRect {
 pub enum PresentSource<'a> {
     Pixels {
         data: &'a [u8],
-        width: u32,
-        height: u32,
         stride: u32,
     },
     NativeTexture(NativeTexture),
@@ -915,7 +893,6 @@ impl<'a> Gpu<'a> {
         self.resources.insert(
             req.resource_id,
             Resource {
-                format: req.format,
                 width: req.width,
                 height: req.height,
                 backing: Vec::new(),
@@ -1194,7 +1171,6 @@ impl<'a> Gpu<'a> {
         self.resources.insert(
             req.resource_id,
             Resource {
-                format: 0,
                 width: 0,
                 height: 0,
                 backing,
@@ -1231,7 +1207,6 @@ impl<'a> Gpu<'a> {
         self.resources.insert(
             val.resource_id,
             Resource {
-                format: val.format,
                 width: val.width,
                 height: val.height,
                 backing: Vec::new(),
@@ -1696,19 +1671,12 @@ impl<'a> Gpu<'a> {
             return false;
         };
 
-        let (width, height, stride) = blob_size
-            .map(|(width, height)| (width, height, width.saturating_mul(BYTES_PER_PIXEL as u32)))
-            .unwrap_or((
-                resource.width,
-                resource.height,
-                resource.width.saturating_mul(BYTES_PER_PIXEL as u32),
-            ));
+        let width = blob_size.map_or(resource.width, |(width, _)| width);
+        let stride = width.saturating_mul(BYTES_PER_PIXEL as u32);
 
         on_present(Presentation::Frame(PresentFrame {
             source: PresentSource::Pixels {
                 data: &resource.framebuffer,
-                width,
-                height,
                 stride,
             },
             source_rect,

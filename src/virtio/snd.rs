@@ -47,19 +47,9 @@ enum Status {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-#[repr(u32)]
-enum EventType {
-    JackConnected = 0x1000,
-    JackDisconnected,
-    PcmPeriodElapsed = 0x1100,
-    PcmXrun,
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[repr(u8)]
 enum Direction {
     Output = 0,
-    Input = 1,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, TryFromPrimitive)]
@@ -115,17 +105,8 @@ enum PcmRate {
 #[repr(u8)]
 enum ChmapPosition {
     None = 0,
-    Na,
-    Mono,
-    Fl,
-    Fr,
-    Rl,
-    Rr,
-    Fc,
-    Lfe,
-    Sl,
-    Sr,
-    Rc,
+    Fl = 3,
+    Fr = 4,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, TryFromPrimitive)]
@@ -211,24 +192,6 @@ struct ChmapInfo {
     direction: u8,
     channels: u8,
     positions: [u8; CHMAP_MAX_SIZE],
-}
-
-#[derive(IntoBytes, FromBytes, Immutable, Debug, Copy, Clone)]
-#[repr(C, packed)]
-struct JackInfo {
-    hdr: Info,
-    features: u32,
-    hda_reg_defconf: u32,
-    hda_reg_caps: u32,
-    connected: u8,
-    padding: [u8; 7],
-}
-
-#[derive(IntoBytes, FromBytes, Immutable, Debug, Copy, Clone)]
-#[repr(C, packed)]
-struct Event {
-    hdr: Hdr,
-    data: u32,
 }
 
 #[repr(C)]

@@ -306,7 +306,7 @@ extern "C" fn virgl_log_trampoline(level: c_int, message: *const c_char, _user_d
 }
 
 #[derive(Debug)]
-pub struct VirglError(pub c_int);
+pub struct VirglError(#[expect(dead_code, reason = "read only through Debug in error logs")] pub c_int);
 
 pub type VirglResult<T> = Result<T, VirglError>;
 
