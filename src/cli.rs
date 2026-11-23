@@ -1379,7 +1379,7 @@ fn run_session(target: &Target, session: Session, raw: bool, forward_stdin: bool
 }
 
 /// Ctrl+V as a control byte, a CSI u key and an xterm modifyOtherKeys key.
-const PASTE_KEYS: [&[u8]; 3] = [b"\x16", b"\x1b[118;5u", b"\x1b[27;5;118~"];
+pub(crate) const PASTE_KEYS: [&[u8]; 3] = [b"\x16", b"\x1b[118;5u", b"\x1b[27;5;118~"];
 
 /// With `paste`, Ctrl+V first puts the host clipboard into the guest clipboard,
 /// so programs like Claude Code can paste images. The terminal pastes text itself.
@@ -1406,7 +1406,7 @@ fn pump_stdin(writer: &Mutex<Wire>, paste: bool) {
 }
 
 /// The host clipboard for the guest clipboard; empty, which clears it, when it is too large.
-fn paste_frame() -> Frame {
+pub(crate) fn paste_frame() -> Frame {
     let mut frame = clipboard::read().into_frame(0);
     if frame.payload.len() > protocol::MAX_PAYLOAD {
         eprint!("vm: the clipboard is too large for the VM ({} bytes)\r\n", frame.payload.len());

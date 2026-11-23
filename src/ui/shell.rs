@@ -2,7 +2,7 @@
 //! terminal, as plain rows of styled text for the view to draw.
 
 use crate::{
-    clipboard,
+    cli, clipboard,
     node::{self, Target},
     protocol::{self, Frame, Request, Session, kind},
 };
@@ -77,6 +77,8 @@ pub struct Grid {
 enum Command {
     Input(Vec<u8>),
     Resize(u16, u16),
+    /// Puts the host clipboard into the guest's, before the Ctrl+V that follows.
+    Paste,
 }
 
 /// What subscribers of a [`Shell`] hear about.
@@ -202,6 +204,10 @@ impl Shell {
             .set_options_from_terminal(&self.terminal)
             .encode_to_vec(&self.key, &mut bytes)
             .expect("failed to encode a key");
+        // Programs like Claude Code read images from the guest clipboard on Ctrl+V.
+        if cli::PASTE_KEYS.contains(&bytes.as_slice()) {
+            let _ = self.writer.send(Command::Paste);
+        }
         self.input(bytes, cx);
     }
 
@@ -487,6 +493,7 @@ async fn read(
                 Command::Resize(cols, rows) => {
                     Frame::new(0, kind::RESIZE, [cols.to_le_bytes(), rows.to_le_bytes()].concat())
                 }
+                Command::Paste => cli::paste_frame(),
             };
             if protocol::write_frame(&mut writer, &frame).is_err() {
                 return;
