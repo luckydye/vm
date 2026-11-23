@@ -353,8 +353,11 @@ mouse reporting, such as Ghostty, Kitty or WezTerm."
             description: "\
 Opens a window listing the VMs of this machine and of every node in
 ~/.vm/nodes. It starts, stops, creates and deletes them like the CLI does,
-and shows the screen of the selected VM with mouse and keyboard. Ctrl+K
-(Cmd+K on macOS) searches the VMs and Ctrl+B (Cmd+B) hides the sidebar."
+and shows the screen of the selected VM with mouse and keyboard. The sidebar
+shows the selected VM's kind, CPU, memory, disk and display, plus a running
+VM's addresses and listening ports; click a port to open it in the browser
+or forward it to this computer's localhost. Ctrl+B (Cmd+B) hides the
+sidebar."
                 .into(),
             options: vec![],
             examples: &[("vm ui", "")],

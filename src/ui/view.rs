@@ -1,13 +1,15 @@
 //! The window of `vm ui`: a floating sidebar with the machines, and a main
 //! pane with the overview or the selected machine's screen and terminals,
 //! tiled side by side and stacked. Views render the state of [`Machines`],
-//! [`Display`], [`Shell`] and the [`layout`] and forward what the user does.
+//! [`Display`], [`Shell`], [`Ports`] and the [`layout`] and forward what the
+//! user does.
 
 use super::{
     ToggleSidebar,
     display::{self, Display},
     layout::{self, Axis, Node, Pane, Step},
     machines::{self, Machine, Machines, NewMachine, Notice, PRESETS, Preset, Tone},
+    ports::Ports,
     shell::{Shell, ShellEvent},
     shell_view,
     theme::*,
@@ -58,6 +60,8 @@ pub struct Workspace {
     selected: Option<String>,
     /// The selected machine's screen, while it runs.
     display: Option<Entity<Display>>,
+    /// The selected machine's addresses and ports, while it runs.
+    ports: Entity<Ports>,
     pages: BTreeMap<String, Page>,
     resizing: Option<Resizing>,
     /// Where each split of the shown page was laid out, by its path, for
@@ -82,9 +86,11 @@ pub struct Workspace {
 impl Workspace {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let machines = cx.new(Machines::new);
+        let ports = cx.new(Ports::new);
         let new_name = cx.new(|cx| InputState::new(window, cx).placeholder("Name, or leave empty for a random one"));
         let subscriptions = vec![
             cx.observe_in(&machines, window, |this, _, window, cx| this.follow_machines(window, cx)),
+            cx.observe_in(&ports, window, |_, _, _, cx| cx.notify()),
             cx.subscribe_in(&new_name, window, |this, _, event: &TextEvent, window, cx| {
                 match event {
                     TextEvent::PressEnter { .. } => this.create(window, cx),
@@ -97,6 +103,7 @@ impl Workspace {
             machines,
             selected: None,
             display: None,
+            ports,
             pages: BTreeMap::new(),
             resizing: None,
             splits: Rc::new(RefCell::new(HashMap::new())),
@@ -175,12 +182,28 @@ impl Workspace {
     fn follow_machines(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let machines = self.machines.read(cx);
         let running = |name: &str| machines.find(name).is_some_and(|machine| machine.vm.running);
+        // Forwards end with their machine, whether it stopped or is gone.
+        if machines.loaded {
+            let local_running: Vec<&str> = machines
+                .machines
+                .iter()
+                .filter(|machine| machine.node.is_none() && machine.vm.running)
+                .map(Machine::short_name)
+                .collect();
+            crate::serve::forward::retain(&local_running);
+        }
         // Terminals end with their machine.
         self.pages.retain(|name, _| running(name));
         if machines.loaded && self.selected.as_deref().is_some_and(|name| machines.find(name).is_none()) {
             self.selected = None;
         }
         let selected = self.selected.clone().filter(|name| running(name));
+        // The guest is asked for its ports only while the sidebar shows them,
+        // so hiding it does not keep the machine from suspending when idle.
+        let ports_machine = match self.sidebar_open {
+            true => selected.clone(),
+            false => None,
+        };
         if let Some(name) = &selected {
             self.pages.entry(name.clone()).or_insert_with(|| Page {
                 layout: Some(Node::Leaf(Pane::Screen)),
@@ -202,6 +225,7 @@ impl Workspace {
             (false, Some(_)) => self.display = None,
             _ => {}
         }
+        self.ports.update(cx, |ports, cx| ports.follow(ports_machine, cx));
         cx.notify();
     }
 
@@ -258,9 +282,9 @@ impl Workspace {
         .detach();
     }
 
-    fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
+    fn toggle_sidebar(&mut self, _: &ToggleSidebar, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_open = !self.sidebar_open;
-        cx.notify();
+        self.follow_machines(window, cx);
     }
 
     fn send(&self, event: InputEvent, cx: &mut Context<Self>) {
@@ -337,6 +361,14 @@ impl Workspace {
             .filter(|machine| !machine.vm.running)
             .map(|machine| self.render_machine_row(machine, cx))
             .collect();
+        // The selected machine's size, and the ports of it while it runs, at
+        // the foot of the sidebar.
+        let shown_machine = self
+            .selected
+            .as_deref()
+            .and_then(|name| shown.iter().find(|machine| machine.name == name))
+            .cloned();
+        let ports = shown_machine.as_ref().is_some_and(|machine| machine.vm.running);
 
         div()
             .w(SIDEBAR_WIDTH)
@@ -381,6 +413,50 @@ impl Workspace {
                         list.child(div().px_2p5().pt_3().text_color(rgb(FAINT)).child("No machines yet"))
                     }),
             )
+            .when(ports, |sidebar| sidebar.child(self.render_ports(cx)))
+            .children(shown_machine.as_ref().map(|machine| self.render_facts(machine)))
+    }
+
+    /// The selected machine's size, below its ports at the foot of the sidebar.
+    fn render_facts(&self, machine: &Machine) -> AnyElement {
+        let hardware = &machine.vm.hardware;
+        let memory = match hardware.memory_mib % 1024 {
+            0 => format!("{} GiB", hardware.memory_mib / 1024),
+            _ => format!("{:.1} GiB", hardware.memory_mib as f64 / 1024.),
+        };
+        let kind = match hardware.persist {
+            true => "Persistent",
+            false => "Ephemeral",
+        };
+        let facts = [
+            ("Name", machine.name.clone()),
+            ("Kind", kind.to_owned()),
+            ("CPU", format!("{} cores", hardware.cpus)),
+            ("Memory", memory),
+            ("Disk", format!("{} GiB", hardware.disk_gib)),
+            ("Display", format!("{}×{}", hardware.width, hardware.height)),
+        ];
+        div()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .border_t_1()
+            .border_color(rgb(DIVIDER))
+            .pt_2()
+            .pb_3()
+            .children(facts.into_iter().map(|(term, value)| {
+                div()
+                    .px_2p5()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .text_size(SMALL_TEXT_SIZE)
+                    .child(div().text_color(rgb(FAINT)).child(term))
+                    .child(div().text_color(rgb(MUTED)).truncate().child(value))
+            }))
+            .into_any_element()
     }
 
     fn render_machine_row(&self, machine: &Machine, cx: &mut Context<Self>) -> AnyElement {
@@ -750,6 +826,137 @@ impl Workspace {
         }
     }
 
+    /// The addresses and listening ports of the selected machine at the foot
+    /// of the sidebar, with a forward on this computer's loopback for each
+    /// port of a local one.
+    fn render_ports(&self, cx: &mut Context<Self>) -> AnyElement {
+        let ports = self.ports.read(cx);
+        let local = ports.local();
+        let pending = ports.pending.clone();
+        let (network, error) = (ports.network.as_ref(), ports.error.clone());
+        let address = network.map(|network| match network.addresses.as_slice() {
+            [] => "No IP address yet".to_owned(),
+            addresses => addresses.join(", "),
+        });
+        let rows: Vec<AnyElement> = network
+            .map(|network| {
+                network
+                    .ports
+                    .iter()
+                    .enumerate()
+                    .map(|(index, port)| {
+                        let number = port.port;
+                        let forwarded = port.forwarded;
+                        let busy = pending.contains(&number);
+                        let secondary = match forwarded {
+                            Some(local_port) if local => format!("localhost:{local_port}"),
+                            Some(_) => "forwarded on the node".to_owned(),
+                            None if port.loopback => "localhost only".to_owned(),
+                            None => match network.addresses.first() {
+                                Some(address) => format!("{address}:{number}"),
+                                None => "no IP address yet".to_owned(),
+                            },
+                        };
+                        let open = match forwarded {
+                            Some(local_port) if local => Some(format!("http://localhost:{local_port}")),
+                            None if !port.loopback && number != 22 => {
+                                network.addresses.first().map(|address| format!("http://{address}:{number}"))
+                            }
+                            _ => None,
+                        };
+                        let cell = div()
+                            .id(SharedString::from(format!("port-{number}")))
+                            .min_w_0()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .child(div().font_weight(gpui::FontWeight::MEDIUM).child(number.to_string()))
+                            .child(div().text_size(px(11.)).text_color(rgb(MUTED)).truncate().child(secondary));
+                        let mut row = div()
+                            .px_2p5()
+                            .py_1()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .when(index > 0, |row| row.border_t_1().border_color(rgb(DIVIDER)))
+                            .child(match open {
+                                Some(url) => cell
+                                    .cursor_pointer()
+                                    .hover(|cell| cell.bg(rgb(HOVER)))
+                                    .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url)))
+                                    .into_any_element(),
+                                None => cell.into_any_element(),
+                            });
+                        if local {
+                            let (label, icon) = match forwarded {
+                                Some(_) => ("Stop", IconName::Square),
+                                None => ("Forward", IconName::ExternalLink),
+                            };
+                            row = row.child(
+                                port_action(SharedString::from(format!("forward-{number}")), label, icon)
+                                    .when(busy, |button| button.opacity(0.5))
+                                    .when(!busy, |button| {
+                                        button.on_click(cx.listener(move |this, _, _, cx| {
+                                            this.ports.update(cx, |ports, cx| ports.toggle(number, cx));
+                                        }))
+                                    }),
+                            );
+                        }
+                        row.into_any_element()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        div()
+            .id("sidebar-ports")
+            .flex_shrink_1()
+            .min_h_0()
+            .max_h(px(300.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .border_t_1()
+            .border_color(rgb(DIVIDER))
+            .pt_2()
+            .pb_2()
+            .child(div().px_2p5().pb_1().text_size(LABEL_SIZE).text_color(rgb(FAINT)).child("Ports"))
+            .children(address.map(|address| {
+                div().px_2p5().text_size(px(11.)).text_color(rgb(MUTED)).truncate().child(address)
+            }))
+            .child(
+                div()
+                    .children(rows)
+                    .when(network.is_some_and(|network| network.ports.is_empty()), |list| {
+                        list.child(
+                            div()
+                                .px_2p5()
+                                .pt_1()
+                                .flex()
+                                .flex_col()
+                                .gap_0p5()
+                                .child(div().text_size(SMALL_TEXT_SIZE).text_color(rgb(MUTED)).child("No listening ports"))
+                                .child(div().text_size(px(11.)).text_color(rgb(FAINT)).child("Servers started inside the machine appear here.")),
+                        )
+                    })
+                    .when(network.is_none() && error.is_none(), |list| {
+                        list.child(
+                            div().px_2p5().pt_1().text_size(SMALL_TEXT_SIZE).text_color(rgb(MUTED)).child("Looking for ports…"),
+                        )
+                    })
+                    .when(network.is_some() && !local, |list| {
+                        list.child(div().px_2p5().pt_1().text_size(px(11.)).text_color(rgb(FAINT)).child(
+                            "Forwarding needs the machine on this computer; use vm ssh -L for a node.",
+                        ))
+                    })
+                    .when_some(error, |list, error| {
+                        list.child(div().px_2p5().pt_1().text_size(px(11.)).text_color(rgb(FAINT)).child(error))
+                    }),
+            )
+            .into_any_element()
+    }
+
     /// The windows of `node`, a split at `path` down from the page's root.
     fn render_node(&self, node: &Node, path: Vec<Step>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let (axis, ratio, first, second) = match node {
@@ -1092,7 +1299,12 @@ fn icon_button(
 }
 
 /// A bordered, fully rounded button.
-fn pill(id: &'static str, label: &'static str, busy: bool, icon: Option<IconName>) -> gpui::Stateful<gpui::Div> {
+fn pill(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<SharedString>,
+    busy: bool,
+    icon: Option<IconName>,
+) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .h(CONTROL_HEIGHT)
@@ -1108,7 +1320,7 @@ fn pill(id: &'static str, label: &'static str, busy: bool, icon: Option<IconName
         .when(!busy, |pill| pill.cursor_pointer().hover(|pill| pill.bg(rgb(HOVER))))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .children(icon.map(|icon| Icon::new(icon).size(px(12.))))
-        .child(label)
+        .child(label.into())
 }
 
 /// Options side by side in one rounded track, the selected one raised.
@@ -1171,7 +1383,11 @@ fn folder_label(folders: String) -> impl IntoElement {
 }
 
 /// A borderless button with an icon, for a secondary action inside a field.
-fn quiet_button(id: &'static str, label: &'static str, icon: IconName) -> gpui::Stateful<gpui::Div> {
+fn quiet_button(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<SharedString>,
+    icon: IconName,
+) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .flex_none()
@@ -1186,6 +1402,32 @@ fn quiet_button(id: &'static str, label: &'static str, icon: IconName) -> gpui::
         .cursor_pointer()
         .hover(|button| button.bg(rgb(HOVER)).text_color(rgb(TEXT)))
         .child(Icon::new(icon).size(px(12.)))
+        .child(label.into())
+}
+
+/// A small bordered button of a port row, so the action reads as one without
+/// waiting for the hover.
+fn port_action(
+    id: impl Into<gpui::ElementId>,
+    label: &'static str,
+    icon: IconName,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .flex_none()
+        .h(px(22.))
+        .px_2()
+        .flex()
+        .items_center()
+        .gap_1()
+        .rounded_full()
+        .border_1()
+        .border_color(rgb(BORDER))
+        .text_size(px(11.))
+        .text_color(rgb(MUTED))
+        .cursor_pointer()
+        .hover(|button| button.bg(rgb(HOVER)).text_color(rgb(TEXT)))
+        .child(Icon::new(icon).size(px(11.)))
         .child(label)
 }
 

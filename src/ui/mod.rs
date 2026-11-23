@@ -4,6 +4,7 @@
 mod display;
 mod layout;
 mod machines;
+mod ports;
 mod shell;
 mod shell_view;
 mod theme;
@@ -27,6 +28,9 @@ pub fn run() {
         cx.bind_keys([
             KeyBinding::new(sidebar, ToggleSidebar, context),
             KeyBinding::new(quit, Quit, context),
+            // gpui-component's Root moves focus on Tab; in a pane it belongs to the machine.
+            KeyBinding::new("tab", gpui::NoAction, Some("Pane")),
+            KeyBinding::new("shift-tab", gpui::NoAction, Some("Pane")),
         ]);
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.on_window_closed(|cx, _| {

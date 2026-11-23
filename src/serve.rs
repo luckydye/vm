@@ -16,7 +16,7 @@
 //!   as a client that left before the reply, or of a failed accept, which has
 //!   no `peer` or `requestid`
 
-mod forward;
+pub(crate) mod forward;
 pub mod tls;
 
 use crate::{
@@ -558,8 +558,12 @@ pub(crate) fn local_vms() -> Result<(Vec<Vm>, Host), String> {
     Ok((vms, host()))
 }
 
+/// Loopback ports of the guest's own services: the DNS resolver, and the
+/// agent's registry mirror and store (`REGISTRY_PORT`, `STORE_PORT` in `guest/varmint-agent`).
+const INTERNAL_PORTS: [u16; 3] = [53, 5100, 5101];
+
 /// Asks the guest of VM `name` for its addresses and listening TCP ports.
-fn network(name: &str) -> Result<Network, String> {
+pub(crate) fn network(name: &str) -> Result<Network, String> {
     let addresses = guest_output(name, &["ip", "-j", "-4", "addr", "show", "scope", "global"])?;
     let addresses: Vec<Value> = serde_json::from_str(&addresses).map_err(|error| format!("unreadable ip output: {error}"))?;
     let addresses = addresses
@@ -581,6 +585,7 @@ fn network(name: &str) -> Result<Network, String> {
                 forwarded: None,
             })
         })
+        .filter(|port| !(port.loopback && INTERNAL_PORTS.contains(&port.port)))
         .collect();
     ports.sort();
     // A port open on all addresses and on loopback counts once, as reachable.
