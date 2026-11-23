@@ -22,7 +22,7 @@ use std::{
     time::Duration,
 };
 
-const FPS: u32 = 30;
+const FPS: u32 = 60;
 
 /// How long the pane keeps a size before the guest is asked to take it, so
 /// dragging the window does not resize the guest on every step.
@@ -180,17 +180,39 @@ async fn stream(name: String, sink: PeriodSink, this: WeakEntity<Display>, cx: &
     }
     sink.start();
     let mut media = Media { reader, video: H264Decoder::new(), audio, sink, periods: 0 };
+    // Reading and decoding run ahead on their own thread, so the next frame
+    // decodes while this one is shown, and only the newest frame is shown.
+    let (sender, mut frames) = mpsc::channel::<Result<Decoded, String>>();
+    thread::spawn(move || {
+        loop {
+            let sent = match read_message(&mut media) {
+                Ok(Message::Video(decoded)) => sender.send(Ok(decoded)),
+                Ok(Message::Nothing) => continue,
+                Err(error) => {
+                    let _ = sender.send(Err(error));
+                    return;
+                }
+            };
+            // The display closed.
+            if sent.is_err() {
+                return;
+            }
+        }
+    });
     loop {
-        let (message, returned) = cx
+        let (received, returned) = cx
             .background_spawn(async move {
-                let message = read_message(&mut media);
-                (message, media)
+                let received = frames.recv().expect("the stream thread tells why it ended");
+                (received, frames)
             })
             .await;
-        media = returned;
-        let decoded = match message {
-            Ok(Message::Video(decoded)) => decoded,
-            Ok(Message::Nothing) => continue,
+        frames = returned;
+        let mut newest = received;
+        while let Ok(next) = frames.try_recv() {
+            newest = next;
+        }
+        let decoded = match newest {
+            Ok(decoded) => decoded,
             Err(error) => return error,
         };
         let screen = size(decoded.width, decoded.height);

@@ -5,7 +5,7 @@ use crate::{
     audio,
     clipboard::{self, Content},
     devices::{RuntimeEvent, RuntimeInputEvent},
-    display::{DisplayBuffer, H264Encoder},
+    display::{self, DisplayBuffer, H264Encoder},
     protocol::{self, Codec, Frame, InputEvent, Reply, Request, Session, kind, stream_kind},
     suspend::Suspend,
     telemetry, vmm,
@@ -37,6 +37,9 @@ const INPUT_EVENT_INTERVAL: Duration = Duration::from_millis(2);
 
 /// How often the audio of a stream checks whether the stream ended, while the guest is silent.
 const AUDIO_STOP_INTERVAL: Duration = Duration::from_millis(500);
+
+/// How often the video of a stream checks whether its client left, while the screen is still.
+const HANG_UP_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 
 pub struct Context<'a> {
     pub suspend: &'a Suspend,
@@ -405,27 +408,39 @@ fn stream_h264(writer: &UnixStream, fps: u32, audio: bool, context: &Context<'_>
     })
 }
 
+/// Sends a frame as soon as the guest presents one, at most `fps` a second,
+/// so a frame waits for the encoder rather than for the next tick.
 fn stream_video(writer: &Mutex<&UnixStream>, fps: u32, context: &Context<'_>) -> io::Result<()> {
     let fps = fps.clamp(1, 60);
     let interval = Duration::from_secs(1) / fps;
     let started = Instant::now();
     let mut last_sequence = None;
-    let mut settle_at = None;
+    let mut last_sent: Option<Instant> = None;
+    let mut settle_at: Option<Instant> = None;
     let mut encoder: Option<H264Encoder> = None;
     while !hung_up(&writer.lock().unwrap()) {
-        let tick = Instant::now();
+        if let Some(sent) = last_sent {
+            thread::sleep(interval.saturating_sub(sent.elapsed()));
+        }
         let (capture, changed) = {
             let display = context.display.lock().unwrap();
+            let wait = settle_at.map_or(HANG_UP_CHECK_INTERVAL, |at| {
+                at.saturating_duration_since(Instant::now()).min(HANG_UP_CHECK_INTERVAL)
+            });
+            let (display, _) = display::PRESENTED
+                .wait_timeout_while(display, wait, |display| last_sequence == Some(display.sequence()))
+                .unwrap();
             let sequence = display.sequence();
             if last_sequence != Some(sequence) {
                 last_sequence = Some(sequence);
                 (display.capture(), true)
-            } else if settle_at.is_some_and(|at| tick >= at) {
+            } else if settle_at.is_some_and(|at| Instant::now() >= at) {
                 (display.capture(), false)
             } else {
                 (None, false)
             }
         };
+        let tick = Instant::now();
         if let Some(capture) = capture {
             let size = capture.size();
             if encoder.as_ref().is_none_or(|encoder| encoder.size() != size) {
@@ -442,9 +457,9 @@ fn stream_video(writer: &Mutex<&UnixStream>, fps: u32, context: &Context<'_>) ->
                 message.extend_from_slice(&frame.data);
                 writer.lock().unwrap().write_all(&message)?;
             }
+            last_sent = Some(tick);
             settle_at = changed.then(|| tick + SETTLE_DELAY);
         }
-        thread::sleep(interval.saturating_sub(tick.elapsed()));
     }
     Ok(())
 }

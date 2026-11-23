@@ -19,7 +19,13 @@ pub use capture::Capture;
 pub use scanout::ScanoutPublisher;
 pub use video::H264Encoder;
 pub use video_decode::H264Decoder;
+use std::sync::Condvar;
 use zerocopy::IntoBytes;
+
+/// Signalled with the display's lock held whenever its sequence changes, so
+/// screen streams send a new frame at once rather than at their next tick.
+/// A VM process has one display.
+pub static PRESENTED: Condvar = Condvar::new();
 
 /// A decoded frame of a screen stream, in tightly packed BGRA rows.
 pub struct Decoded {
@@ -97,6 +103,7 @@ impl DisplayBuffer {
         self.dirty_rect = Some((0, 0, width, height));
         self.iosurface_id = None;
         self.sequence = self.sequence.wrapping_add(1);
+        PRESENTED.notify_all();
     }
 
     fn publish_pixels(&mut self, data: &[u8], stride: usize, source: Rect, damage: Rect) {
@@ -163,6 +170,7 @@ impl DisplayBuffer {
             None => dirty_rect,
         });
         self.sequence = self.sequence.wrapping_add(1);
+        PRESENTED.notify_all();
     }
 }
 
