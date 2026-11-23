@@ -25,8 +25,8 @@ use gpui::{
     ScrollEvent, SharedString, Subscription, Window, canvas, div, prelude::*, px, rgb, size,
 };
 use gpui_component::{
-    Icon, Sizable,
-    button::{Button, ButtonRounded},
+    Icon, Sizable, WindowExt,
+    button::{Button, ButtonRounded, ButtonVariant},
     input::{Input, InputEvent as TextEvent, InputState},
     menu::{DropdownMenu, PopupMenuItem},
     tooltip::Tooltip,
@@ -282,6 +282,24 @@ impl Workspace {
         .detach();
     }
 
+    /// Asks before deleting machine `name`, since its disk goes with it.
+    fn confirm_delete(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        let machines = self.machines.clone();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let (machines, name) = (machines.clone(), name.clone());
+            alert
+                .confirm()
+                .title(SharedString::from(format!("Delete {name}?")))
+                .description("The machine stops and its disk is deleted. This cannot be undone.")
+                .ok_text("Delete")
+                .ok_variant(ButtonVariant::Danger)
+                .on_ok(move |_, _, cx| {
+                    machines.update(cx, |machines, cx| machines.delete(&name, cx));
+                    true
+                })
+        });
+    }
+
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_open = !self.sidebar_open;
         self.follow_machines(window, cx);
@@ -532,7 +550,7 @@ impl Workspace {
                         })),
                     })
                     .child(pill("delete", "Delete", busy, Some(IconName::Delete)).text_color(rgb(DANGER)).on_click(
-                        cx.listener(move |this, _, _, cx| this.machines.update(cx, |machines, cx| machines.delete(&delete, cx))),
+                        cx.listener(move |this, _, window, cx| this.confirm_delete(delete.clone(), window, cx)),
                     ))
             })
     }
