@@ -271,7 +271,7 @@ class TcpStream(Stream):
 
     def connect(self):
         try:
-            self.socket = socket.create_connection(("127.0.0.1", self.port))
+            self.socket = self.open()
         except ConnectionRefusedError as error:
             if time.monotonic() < self.deadline:
                 self.retry_at = time.monotonic() + self.RETRY_INTERVAL
@@ -290,6 +290,13 @@ class TcpStream(Stream):
             self.early = b""
         if self.early_eof:
             self.eof()
+
+    def open(self):
+        """Servers that listen on `localhost` may bind only IPv6, so both loopbacks are tried."""
+        try:
+            return socket.create_connection(("127.0.0.1", self.port))
+        except ConnectionRefusedError:
+            return socket.create_connection(("::1", self.port))
 
     def fail(self, message):
         self.retry_at = None
