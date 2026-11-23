@@ -10,10 +10,11 @@ use serde::Deserialize;
 use std::{
     sync::{
         OnceLock,
+        atomic::{AtomicBool, Ordering},
         mpsc::{Sender, SyncSender, channel, sync_channel},
     },
     thread,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 const SCHEMA: &str = "
@@ -174,15 +175,26 @@ pub fn record(event: Event) {
     events.send(event).expect("telemetry thread exited");
 }
 
-/// Records why the VM stopped and waits until everything is written.
+/// Records why the VM stopped and waits until everything is written, though
+/// no longer than a moment, since telemetry must never delay a stop.
 pub fn stop(reason: &'static str) {
     let Some(events) = EVENTS.get() else {
         return;
     };
     let (flushed, done) = sync_channel(1);
     if events.send(Event::Stopped { reason, flushed }).is_ok() {
-        let _ = done.recv();
+        let _ = done.recv_timeout(Duration::from_secs(5));
     }
+}
+
+/// Records a crash without waiting for the writer, for the panic hook, which
+/// may run on the writer thread itself.
+pub fn crash() {
+    let Some(events) = EVENTS.get() else {
+        return;
+    };
+    let (flushed, _) = sync_channel(1);
+    let _ = events.send(Event::Stopped { reason: "crash", flushed });
 }
 
 /// Writes one event; returns the flush acknowledgement for `Stopped`.
@@ -206,17 +218,28 @@ fn write(connection: &mut Connection, vm_id: i64, event: Event) -> Option<SyncSe
             )
             .map(drop),
         Event::Stopped { reason, flushed } => {
-            connection
-                .execute(
-                    "UPDATE vms SET stopped_at = ?1, stop_reason = ?2 WHERE id = ?3",
-                    params![now(), reason, vm_id],
-                )
-                .expect("failed to record the VM stop in telemetry");
+            if let Err(error) = connection.execute(
+                "UPDATE vms SET stopped_at = ?1, stop_reason = ?2 WHERE id = ?3",
+                params![now(), reason, vm_id],
+            ) {
+                report(&error);
+            }
             return Some(flushed);
         }
     };
-    result.expect("failed to write telemetry");
+    if let Err(error) = result {
+        report(&error);
+    }
     None
+}
+
+/// Tells once that telemetry cannot be written, such as on a full disk, which
+/// must not disturb the VM.
+fn report(error: &rusqlite::Error) {
+    static REPORTED: AtomicBool = AtomicBool::new(false);
+    if !REPORTED.swap(true, Ordering::Relaxed) {
+        eprintln!("telemetry: failed to write: {error}");
+    }
 }
 
 fn write_report(connection: &mut Connection, vm_id: i64, report: &GuestReport) -> rusqlite::Result<()> {

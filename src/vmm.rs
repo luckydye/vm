@@ -129,7 +129,7 @@ pub fn run(
     let default_panic = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         default_panic(info);
-        telemetry::stop("crash");
+        telemetry::crash();
         unregister_ssh_host();
         std::process::exit(101);
     }));
