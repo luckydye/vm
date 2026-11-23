@@ -6,12 +6,13 @@ use crate::{
     node::{self, Target},
     protocol::{self, Frame, Request, Session, kind},
 };
-use gpui::{AppContext, AsyncApp, Context, EventEmitter, Keystroke, Task, WeakEntity};
+use gpui::{AppContext, AsyncApp, Context, EventEmitter, Keystroke, Modifiers, Task, WeakEntity};
 use libghostty_vt::{
     color::Rgb,
     fmt::Formatter,
     key::{self, Key},
     mode::Mode,
+    mouse,
     paste,
     point::{Coordinate, Point},
     render::{CellIterator, RenderState, RowIterator},
@@ -32,9 +33,11 @@ const SCROLLBACK_LINES: usize = 10_000;
 /// How soon a second click must follow for a double or triple click.
 const CLICK_INTERVAL: Duration = Duration::from_millis(500);
 
-/// A run of cells with the same look; `len` counts bytes of the line's text.
+/// A run of cells with the same look, starting at `column`; `len` counts bytes
+/// of the line's text.
 #[derive(Clone, PartialEq)]
 pub struct Run {
+    pub column: u16,
     pub len: usize,
     pub foreground: u32,
     pub background: Option<u32>,
@@ -43,11 +46,21 @@ pub struct Run {
     pub underline: bool,
 }
 
+/// A block element (U+2580 to U+259F) in a cell, left out of the line's text
+/// so the view can fill it exactly: the font's glyphs don't meet the cell's edges.
+#[derive(Clone)]
+pub struct Block {
+    pub column: u16,
+    pub character: char,
+    pub color: u32,
+}
+
 /// One row of the screen, a character per cell.
 #[derive(Clone)]
 pub struct Line {
     pub text: String,
     pub runs: Vec<Run>,
+    pub blocks: Vec<Block>,
 }
 
 /// What the view draws.
@@ -94,6 +107,8 @@ pub struct Shell {
     cells: CellIterator<'static>,
     keys: key::Encoder<'static>,
     key: key::Event<'static>,
+    mice: mouse::Encoder<'static>,
+    mouse_event: mouse::Event<'static>,
     /// Selecting with the mouse: clicks select from a cell, a word or a line.
     gesture: Gesture<'static>,
     press: PressEvent<'static>,
@@ -113,6 +128,10 @@ impl Shell {
         terminal
             .set_scrollback_max_lines(Some(SCROLLBACK_LINES))
             .and_then(|terminal| terminal.set_terminfo_name("xterm-256color"))
+            // Set in the terminal, not just painted, so programs asking for them get them too.
+            // libghostty only takes the background once the foreground is set as well.
+            .and_then(|terminal| terminal.set_default_fg_color(Some(Rgb { r: 0xff, g: 0xff, b: 0xff })))
+            .and_then(|terminal| terminal.set_default_bg_color(Some(Rgb { r: 0x0b, g: 0x0b, b: 0x0b })))
             .and_then(|terminal| {
                 // Answers to the queries of programs like vim and tmux.
                 terminal.on_pty_write(move |_, data: &[u8]| {
@@ -130,6 +149,8 @@ impl Shell {
             cells: CellIterator::new().expect("failed to create a cell iterator"),
             keys: key::Encoder::new().expect("failed to create a key encoder"),
             key: key::Event::new().expect("failed to create a key event"),
+            mice: mouse::Encoder::new().expect("failed to create a mouse encoder"),
+            mouse_event: mouse::Event::new().expect("failed to create a mouse event"),
             gesture: Gesture::new().expect("failed to create a selection gesture"),
             press: {
                 let mut press = PressEvent::new().expect("failed to create a selection event");
@@ -162,11 +183,7 @@ impl Shell {
             return;
         };
         let modifiers = &keystroke.modifiers;
-        let mut mods = key::Mods::empty();
-        mods.set(key::Mods::SHIFT, modifiers.shift);
-        mods.set(key::Mods::CTRL, modifiers.control);
-        mods.set(key::Mods::ALT, modifiers.alt);
-        mods.set(key::Mods::SUPER, modifiers.platform);
+        let mods = key_mods(modifiers);
         // Shift is already in the text of printable keys, as in 'A' for a.
         let consumed = match unshifted != '\0' && modifiers.shift {
             true => key::Mods::SHIFT,
@@ -250,11 +267,69 @@ impl Shell {
         Some(String::from_utf8_lossy(&text).into_owned()).filter(|text| !text.is_empty())
     }
 
+    /// Reports a mouse `action` of `button` at `position` to the shell's
+    /// program, when it tracks the mouse; `pressed` tells whether any button
+    /// is held. Returns whether it went to the program; with Shift held it
+    /// never does, so the mouse can still select, as in other terminals.
+    pub fn mouse(
+        &mut self,
+        action: mouse::Action,
+        button: Option<mouse::Button>,
+        pressed: bool,
+        position: (f32, f32),
+        cell: (f32, f32),
+        modifiers: &Modifiers,
+    ) -> bool {
+        if modifiers.shift || !self.terminal.is_mouse_tracking().expect("failed to read the mouse mode") {
+            return false;
+        }
+        // In whole pixels per cell, the size the terminal was given, and at
+        // the middle of the cell so rounding can't tip it into the next one.
+        let (width, height) = (cell.0.ceil(), cell.1.floor());
+        let Coordinate { x: column, y: row } = self.cell_under(position, cell);
+        self.mouse_event
+            .set_action(action)
+            .set_button(button)
+            .set_mods(key_mods(modifiers))
+            .set_position(mouse::Position {
+                x: (f32::from(column) + 0.5) * width,
+                y: (row as f32 + 0.5) * height,
+            });
+        let size = mouse::EncoderSize {
+            screen_width: u32::from(self.size.0) * width as u32,
+            screen_height: u32::from(self.size.1) * height as u32,
+            cell_width: width as u32,
+            cell_height: height as u32,
+            padding_top: 0,
+            padding_bottom: 0,
+            padding_right: 0,
+            padding_left: 0,
+        };
+        let mut bytes = Vec::new();
+        self.mice
+            .set_options_from_terminal(&self.terminal)
+            .set_any_button_pressed(pressed)
+            // Motion within a cell is reported once.
+            .set_track_last_cell(true)
+            .set_size(size)
+            .and_then(|mice| mice.encode_to_vec(&self.mouse_event, &mut bytes))
+            .expect("failed to encode a mouse event");
+        if !bytes.is_empty() {
+            // The reader tells why, should the session have ended.
+            let _ = self.writer.send(Command::Input(bytes));
+        }
+        true
+    }
+
     /// The viewport cell under `position`, clamped to the grid.
-    fn cell_at(&self, (x, y): (f32, f32), (width, height): (f32, f32)) -> Point {
+    fn cell_at(&self, position: (f32, f32), cell: (f32, f32)) -> Point {
+        Point::Viewport(self.cell_under(position, cell))
+    }
+
+    fn cell_under(&self, (x, y): (f32, f32), (width, height): (f32, f32)) -> Coordinate {
         let column = (x / width).floor().clamp(0., f32::from(self.size.0 - 1)) as u16;
         let row = (y / height).floor().clamp(0., f32::from(self.size.1 - 1)) as u32;
-        Point::Viewport(Coordinate { x: column, y: row })
+        Coordinate { x: column, y: row }
     }
 
     /// Scrolls the view through the scrollback by `lines`, up when negative.
@@ -309,8 +384,9 @@ impl Shell {
         let mut rows = self.rows.update(&snapshot).expect("failed to read the rows");
         let mut grapheme = String::new();
         while let Some(row) = rows.next() {
-            let mut line = Line { text: String::new(), runs: Vec::new() };
+            let mut line = Line { text: String::new(), runs: Vec::new(), blocks: Vec::new() };
             let mut cells = self.cells.update(row).expect("failed to read the cells");
+            let mut column = 0;
             while let Some(cell) = cells.next() {
                 grapheme.clear();
                 match cell.graphemes_len().expect("failed to read a cell") {
@@ -326,7 +402,14 @@ impl Shell {
                     background = Some(foreground);
                     foreground = swapped;
                 }
+                let mut characters = grapheme.chars();
+                if let (Some(character @ '\u{2580}'..='\u{259F}'), None) = (characters.next(), characters.next()) {
+                    line.blocks.push(Block { column, character, color: rgb(foreground) });
+                    grapheme.clear();
+                    grapheme.push(' ');
+                }
                 let run = Run {
+                    column,
                     len: grapheme.len(),
                     foreground: rgb(foreground),
                     background: background.map(rgb),
@@ -334,9 +417,16 @@ impl Shell {
                     italic: style.italic,
                     underline: style.underline != Underline::None,
                 };
+                column += 1;
+                // Only ASCII is sure to be in the monospace font at its cell
+                // width; anything else may come from a fallback font of another
+                // width, so it gets a run of its own, placed at its column.
+                let ascii = grapheme.is_ascii() && line.text[line.text.len() - line.runs.last().map_or(0, |last| last.len)..].is_ascii();
                 line.text.push_str(&grapheme);
                 match line.runs.last_mut() {
-                    Some(last) if Run { len: last.len, ..run.clone() } == *last => last.len += run.len,
+                    Some(last) if ascii && Run { column: last.column, len: last.len, ..run.clone() } == *last => {
+                        last.len += run.len
+                    }
                     _ => line.runs.push(run),
                 }
             }
@@ -344,6 +434,15 @@ impl Shell {
         }
         self.grid = grid;
     }
+}
+
+fn key_mods(modifiers: &Modifiers) -> key::Mods {
+    let mut mods = key::Mods::empty();
+    mods.set(key::Mods::SHIFT, modifiers.shift);
+    mods.set(key::Mods::CTRL, modifiers.control);
+    mods.set(key::Mods::ALT, modifiers.alt);
+    mods.set(key::Mods::SUPER, modifiers.platform);
+    mods
 }
 
 fn rgb(color: Rgb) -> u32 {

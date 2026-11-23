@@ -8,6 +8,7 @@ use gpui::{
     TextAlign, TextRun, UnderlineStyle, Window, canvas, div, fill, font, point, prelude::*, px, rgb, size,
 };
 use gpui_component::ActiveTheme;
+use libghostty_vt::mouse;
 use std::{cell::Cell, rc::Rc};
 
 const FONT_SIZE: Pixels = px(13.);
@@ -83,35 +84,67 @@ pub fn render(shell: Entity<Shell>, focus: &FocusHandle, window: &mut Window, cx
             }
             cx.stop_propagation();
         })
-        .on_scroll(move |event: &ScrollEvent, _, cx| {
-            let lines = match event.delta {
-                ScrollDelta::Lines(lines) => lines.y,
-                ScrollDelta::Pixels(pixels) => pixels.y / line_height,
-            };
-            let lines = -lines.round() as isize;
-            if lines != 0 {
-                scrolls.update(cx, |shell, cx| shell.scroll(lines, cx));
+        .on_scroll({
+            let wheeled = origin.clone();
+            move |event: &ScrollEvent, _, cx| {
+                let lines = match event.delta {
+                    ScrollDelta::Lines(lines) => lines.y,
+                    ScrollDelta::Pixels(pixels) => pixels.y / line_height,
+                };
+                let lines = -lines.round() as isize;
+                if lines == 0 {
+                    return;
+                }
+                // Programs tracking the mouse get the wheel as presses of buttons four and five.
+                let position = on_grid(&wheeled, event.position);
+                let button = if lines < 0 { mouse::Button::Four } else { mouse::Button::Five };
+                scrolls.update(cx, |shell, cx| {
+                    let reported = (0..lines.unsigned_abs()).all(|_| {
+                        shell.mouse(mouse::Action::Press, Some(button), false, position, cell, &event.modifiers)
+                    });
+                    if !reported {
+                        shell.scroll(lines, cx);
+                    }
+                });
             }
         })
-        .on_mouse_down(MouseButton::Left, {
+        .on_any_mouse_down({
             let focus = focus.clone();
             move |event: &MouseDownEvent, window, cx| {
                 focus.focus(window, cx);
                 let position = on_grid(&pressed, event.position);
-                presses.update(cx, |shell, cx| shell.select_press(position, cell, cx));
+                presses.update(cx, |shell, cx| {
+                    let button = mouse_button(event.button);
+                    let reported = button.is_some()
+                        && shell.mouse(mouse::Action::Press, button, true, position, cell, &event.modifiers);
+                    if !reported && event.button == MouseButton::Left {
+                        shell.select_press(position, cell, cx);
+                    }
+                });
             }
         })
         .on_mouse_move(move |event: &MouseMoveEvent, _, cx| {
-            if event.pressed_button == Some(MouseButton::Left) {
-                let position = on_grid(&dragged, event.position);
-                // Alt selects a rectangle, as in Ghostty.
-                let rectangle = event.modifiers.alt;
-                drags.update(cx, |shell, cx| shell.select_drag(position, cell, rectangle, cx));
-            }
+            let position = on_grid(&dragged, event.position);
+            let button = event.pressed_button.and_then(mouse_button);
+            let pressed = event.pressed_button.is_some();
+            drags.update(cx, |shell, cx| {
+                let reported = shell.mouse(mouse::Action::Motion, button, pressed, position, cell, &event.modifiers);
+                if !reported && event.pressed_button == Some(MouseButton::Left) {
+                    // Alt selects a rectangle, as in Ghostty.
+                    shell.select_drag(position, cell, event.modifiers.alt, cx);
+                }
+            });
         })
-        .on_mouse_up(MouseButton::Left, move |event: &MouseUpEvent, _, cx| {
+        .capture_any_mouse_up(move |event: &MouseUpEvent, _, cx| {
             let position = on_grid(&released, event.position);
-            releases.update(cx, |shell, _| shell.select_release(position, cell));
+            releases.update(cx, |shell, _| {
+                let button = mouse_button(event.button);
+                let reported = button.is_some()
+                    && shell.mouse(mouse::Action::Release, button, false, position, cell, &event.modifiers);
+                if !reported && event.button == MouseButton::Left {
+                    shell.select_release(position, cell);
+                }
+            });
         })
         .child(
             canvas(
@@ -122,7 +155,10 @@ pub fn render(shell: Entity<Shell>, focus: &FocusHandle, window: &mut Window, cx
                     resizes.update(cx, |shell, cx| shell.resize((columns, rows), cell, cx));
                 },
                 move |bounds, _, window, cx| {
-                    let origin = bounds.origin + point(PADDING, PADDING);
+                    // On whole device pixels, so rows' backgrounds meet without seams.
+                    let scale = window.scale_factor();
+                    let origin = (bounds.origin + point(PADDING, PADDING))
+                        .map(|value| px((f32::from(value) * scale).round() / scale));
                     laid_out.set(origin);
                     paint(&grid, origin, &mono, (cell_width, line_height), window, cx);
                 },
@@ -155,48 +191,68 @@ fn paint(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let shaped: Vec<_> = grid
-        .lines
-        .iter()
-        .map(|line| {
-            let runs: Vec<TextRun> = line
-                .runs
-                .iter()
-                .map(|run| TextRun {
-                    len: run.len,
-                    font: Font {
-                        weight: if run.bold { FontWeight::BOLD } else { FontWeight::NORMAL },
-                        style: if run.italic {
-                            FontStyle::Italic
-                        } else {
-                            FontStyle::Normal
-                        },
-                        ..mono.clone()
-                    },
-                    color: rgb(run.foreground).into(),
-                    background_color: run.background.map(|background| rgb(background).into()),
-                    underline: run.underline.then(|| UnderlineStyle {
-                        thickness: px(1.),
-                        color: Some(rgb(run.foreground).into()),
-                        wavy: false,
-                    }),
-                    strikethrough: None,
-                })
-                .collect();
-            window
-                .text_system()
-                .shape_line(line.text.clone().into(), FONT_SIZE, &runs, Some(cell_width))
-        })
-        .collect();
-    // Backgrounds, such as the selection's, all go below the glyphs, which may reach into the next row.
     let top = |index: usize| point(origin.x, origin.y + line_height * index as f32);
-    for (index, line) in shaped.iter().enumerate() {
-        line.paint_background(top(index), line_height, TextAlign::Left, None, window, cx)
-            .expect("painting a terminal row's background");
+    // Edges snap to device pixels so neighbouring cells meet without seams.
+    let scale = window.scale_factor();
+    let snap = |value: Pixels| px((f32::from(value) * scale).round() / scale);
+    // Each run is shaped on its own and placed at its column, so a glyph
+    // from a fallback font of another width can't shift the rest of the row.
+    let mut shaped = Vec::new();
+    for (row, line) in grid.lines.iter().enumerate() {
+        let mut start = 0;
+        for run in &line.runs {
+            let text = &line.text[start..start + run.len];
+            start += run.len;
+            let at = top(row) + point(cell_width * f32::from(run.column), px(0.));
+            // Backgrounds, such as the selection's, all go below the glyphs, which may reach into the next row.
+            if let Some(background) = run.background {
+                // ASCII runs hold a cell per byte, the others a single cell.
+                let cells = if text.is_ascii() { run.len } else { 1 };
+                let end = at + point(cell_width * cells as f32, line_height);
+                let corners = Bounds::from_corners(at.map(snap), end.map(snap));
+                window.paint_quad(fill(corners, rgb(background)));
+            }
+            if text.trim().is_empty() && !run.underline {
+                continue;
+            }
+            let font = Font {
+                weight: if run.bold { FontWeight::BOLD } else { FontWeight::NORMAL },
+                style: if run.italic { FontStyle::Italic } else { FontStyle::Normal },
+                ..mono.clone()
+            };
+            let style = TextRun {
+                len: run.len,
+                font,
+                color: rgb(run.foreground).into(),
+                background_color: None,
+                underline: run.underline.then(|| UnderlineStyle {
+                    thickness: px(1.),
+                    color: Some(rgb(run.foreground).into()),
+                    wavy: false,
+                }),
+                strikethrough: None,
+            };
+            let line = window
+                .text_system()
+                .shape_line(SharedString::from(text.to_owned()), FONT_SIZE, &[style], Some(cell_width));
+            shaped.push((at, line));
+        }
     }
-    for (index, line) in shaped.iter().enumerate() {
-        line.paint(top(index), line_height, TextAlign::Left, None, window, cx)
-            .expect("painting a terminal row");
+    for (row, line) in grid.lines.iter().enumerate() {
+        for block in &line.blocks {
+            let (rectangles, alpha) = block_shape(block.character);
+            let mut color: gpui::Hsla = rgb(block.color).into();
+            color.a = alpha;
+            let cell = top(row) + point(cell_width * f32::from(block.column), px(0.));
+            for [left, top, right, bottom] in rectangles {
+                let corner = |x: f32, y: f32| point(snap(cell.x + cell_width * x), snap(cell.y + line_height * y));
+                window.paint_quad(fill(Bounds::from_corners(corner(left, top), corner(right, bottom)), color));
+            }
+        }
+    }
+    for (at, line) in &shaped {
+        line.paint(*at, line_height, TextAlign::Left, None, window, cx)
+            .expect("painting a terminal run");
     }
     if let Some((column, row)) = grid.cursor {
         let at = point(
@@ -206,5 +262,55 @@ fn paint(
         let mut cursor: gpui::Hsla = rgb(grid.foreground).into();
         cursor.a = 0.6;
         window.paint_quad(fill(Bounds::new(at, size(cell_width, line_height)), cursor));
+    }
+}
+
+/// The button a program tracking the mouse knows `button` as, if any.
+fn mouse_button(button: MouseButton) -> Option<mouse::Button> {
+    match button {
+        MouseButton::Left => Some(mouse::Button::Left),
+        MouseButton::Right => Some(mouse::Button::Right),
+        MouseButton::Middle => Some(mouse::Button::Middle),
+        MouseButton::Navigate(_) => None,
+    }
+}
+
+/// The filled parts of a block element as `[left, top, right, bottom]`
+/// fractions of its cell, and the opacity they are filled with.
+fn block_shape(character: char) -> (Vec<[f32; 4]>, f32) {
+    const UPPER_LEFT: [f32; 4] = [0., 0., 0.5, 0.5];
+    const UPPER_RIGHT: [f32; 4] = [0.5, 0., 1., 0.5];
+    const LOWER_LEFT: [f32; 4] = [0., 0.5, 0.5, 1.];
+    const LOWER_RIGHT: [f32; 4] = [0.5, 0.5, 1., 1.];
+    let full = [0., 0., 1., 1.];
+    match character {
+        '▀' => (vec![[0., 0., 1., 0.5]], 1.),
+        // Lower one eighth up to the full block.
+        '▁'..='█' => {
+            let eighths = (character as u32 - 0x2580) as f32;
+            (vec![[0., 1. - eighths / 8., 1., 1.]], 1.)
+        }
+        // Left seven eighths down to one eighth.
+        '▉'..='▏' => {
+            let eighths = (0x2590 - character as u32) as f32;
+            (vec![[0., 0., eighths / 8., 1.]], 1.)
+        }
+        '▐' => (vec![[0.5, 0., 1., 1.]], 1.),
+        '░' => (vec![full], 0.25),
+        '▒' => (vec![full], 0.5),
+        '▓' => (vec![full], 0.75),
+        '▔' => (vec![[0., 0., 1., 0.125]], 1.),
+        '▕' => (vec![[0.875, 0., 1., 1.]], 1.),
+        '▖' => (vec![LOWER_LEFT], 1.),
+        '▗' => (vec![LOWER_RIGHT], 1.),
+        '▘' => (vec![UPPER_LEFT], 1.),
+        '▙' => (vec![UPPER_LEFT, LOWER_LEFT, LOWER_RIGHT], 1.),
+        '▚' => (vec![UPPER_LEFT, LOWER_RIGHT], 1.),
+        '▛' => (vec![UPPER_LEFT, UPPER_RIGHT, LOWER_LEFT], 1.),
+        '▜' => (vec![UPPER_LEFT, UPPER_RIGHT, LOWER_RIGHT], 1.),
+        '▝' => (vec![UPPER_RIGHT], 1.),
+        '▞' => (vec![UPPER_RIGHT, LOWER_LEFT], 1.),
+        '▟' => (vec![UPPER_RIGHT, LOWER_LEFT, LOWER_RIGHT], 1.),
+        _ => unreachable!("{character:?} is not a block element"),
     }
 }
