@@ -97,8 +97,23 @@ jobs:
           key: cargo-macos26-arm64-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
           restore-keys: cargo-macos26-arm64-
 
+      # Ghostty's zig build pulls packages from deps.files.ghostty.org. Keep
+      # them so builds do not depend on that mirror being reachable.
+      - name: Cache Zig packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/zig
+          key: zig-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mise.toml') }}
+          restore-keys: zig-${{ runner.os }}-${{ runner.arch }}-
+
       - name: Build CLI installer
-        run: make pkg
+        run: |
+          for attempt in 1 2 3; do
+            make pkg && exit 0
+            echo "make pkg failed (attempt $attempt of 3)" >&2
+            sleep $((attempt * 30))
+          done
+          exit 1
 
       - name: Upload CLI
         uses: actions/upload-artifact@v4
@@ -148,8 +163,23 @@ jobs:
           key: cargo-linux-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
           restore-keys: cargo-linux-${{ matrix.arch }}-
 
+      # Ghostty's zig build pulls packages from deps.files.ghostty.org. Keep
+      # them so builds do not depend on that mirror being reachable.
+      - name: Cache Zig packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/zig
+          key: zig-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mise.toml') }}
+          restore-keys: zig-${{ runner.os }}-${{ runner.arch }}-
+
       - name: Build CLI tarball
-        run: make tarball
+        run: |
+          for attempt in 1 2 3; do
+            make tarball && exit 0
+            echo "make tarball failed (attempt $attempt of 3)" >&2
+            sleep $((attempt * 30))
+          done
+          exit 1
 
       - name: Upload CLI
         uses: actions/upload-artifact@v4
