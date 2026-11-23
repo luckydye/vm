@@ -184,13 +184,17 @@ impl Workspace {
         let running = |name: &str| machines.find(name).is_some_and(|machine| machine.vm.running);
         // Forwards end with their machine, whether it stopped or is gone.
         if machines.loaded {
-            let local_running: Vec<&str> = machines
+            let local_running: Vec<String> = machines
                 .machines
                 .iter()
                 .filter(|machine| machine.node.is_none() && machine.vm.running)
-                .map(Machine::short_name)
+                .map(|machine| machine.short_name().to_owned())
                 .collect();
-            crate::serve::forward::retain(&local_running);
+            // Off the UI thread, as stopping a forward waits for its listener to close.
+            cx.background_spawn(async move {
+                crate::serve::forward::retain(&local_running.iter().map(String::as_str).collect::<Vec<_>>());
+            })
+            .detach();
         }
         // Terminals end with their machine.
         self.pages.retain(|name, _| running(name));

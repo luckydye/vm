@@ -22,6 +22,8 @@ const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 struct Forward {
     local_port: u16,
     stopped: Arc<AtomicBool>,
+    /// The accept loop, which owns the listener until it returns.
+    accepting: thread::JoinHandle<()>,
 }
 
 static FORWARDS: Mutex<BTreeMap<(String, u16), Forward>> = Mutex::new(BTreeMap::new());
@@ -39,17 +41,20 @@ pub fn start(name: &str, port: u16) -> Result<u16, String> {
     let local_port = listener.local_addr().map_err(|error| error.to_string())?.port();
     let stopped = Arc::new(AtomicBool::new(false));
     let (vm, flag) = (name.to_owned(), stopped.clone());
-    thread::Builder::new()
+    let accepting = thread::Builder::new()
         .name(format!("varmint-forward-{port}"))
         .spawn(move || accept(listener, &vm, port, &flag))
         .map_err(|error| format!("failed to start the forward: {error}"))?;
-    forwards.insert((name.to_owned(), port), Forward { local_port, stopped });
+    forwards.insert((name.to_owned(), port), Forward { local_port, stopped, accepting });
     Ok(local_port)
 }
 
+/// Stops the forward of `port` and returns once its local port is free again.
 pub fn stop(name: &str, port: u16) {
     let forward = FORWARDS.lock().unwrap().remove(&(name.to_owned(), port));
-    forward.inspect(close);
+    if let Some(forward) = forward {
+        close(forward);
+    }
 }
 
 /// Stops the forwards of VMs that are not in `running`.
@@ -59,7 +64,7 @@ pub fn retain(running: &[&str]) {
         let keys: Vec<_> = forwards.keys().filter(|(name, _)| !running.contains(&name.as_str())).cloned().collect();
         keys.iter().filter_map(|key| forwards.remove(key)).collect()
     };
-    gone.iter().for_each(close);
+    gone.into_iter().for_each(close);
 }
 
 /// The host port of each forwarded guest port of VM `name`.
@@ -73,10 +78,12 @@ pub fn ports(name: &str) -> BTreeMap<u16, u16> {
         .collect()
 }
 
-/// Ends the accept loop, which is blocked until the next connection.
-fn close(forward: &Forward) {
+/// Ends the accept loop, which is blocked until the next connection, and
+/// waits until it has dropped the listener, so its port can be bound again.
+fn close(forward: Forward) {
     forward.stopped.store(true, Ordering::Release);
-    let _ = TcpStream::connect(("127.0.0.1", forward.local_port));
+    TcpStream::connect(("127.0.0.1", forward.local_port)).expect("waking the forward's accept loop");
+    forward.accepting.join().expect("the forward's accept loop panicked");
 }
 
 fn accept(listener: TcpListener, name: &str, port: u16, stopped: &AtomicBool) {
