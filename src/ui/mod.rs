@@ -41,7 +41,7 @@ pub fn run() {
             titlebar: Some(TitlebarOptions {
                 title: Some("vm".into()),
                 appears_transparent: true,
-                traffic_light_position: Some(point(px(20.), px(20.))),
+                traffic_light_position: Some(point(px(14.), px(16.))),
             }),
             window_min_size: Some(size(px(720.), px(480.))),
             ..WindowOptions::default()

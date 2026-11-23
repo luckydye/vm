@@ -35,7 +35,7 @@ pub const SIDEBAR_WIDTH: Pixels = px(232.);
 /// Space between the window edge, the sidebar and the main pane.
 pub const GAP: Pixels = px(8.);
 /// Room for the traffic lights above the sidebar's content.
-pub const TITLEBAR_HEIGHT: Pixels = px(38.);
+pub const TITLEBAR_HEIGHT: Pixels = px(30.);
 
 pub const TEXT_SIZE: Pixels = px(13.);
 /// Secondary text: hardware, states, hints, pills.

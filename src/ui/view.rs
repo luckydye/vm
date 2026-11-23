@@ -415,13 +415,14 @@ impl Workspace {
         });
         drag_area()
             .h(TITLEBAR_HEIGHT)
+            .mb(GAP)
             .flex_none()
             .flex()
             .items_center()
             .gap_2()
             // Room for the traffic lights when the sidebar no longer holds them.
             .when(!self.sidebar_open, |bar| {
-                bar.pl(px(80.)).child(icon_button(
+                bar.pl(px(74.)).child(icon_button(
                     "show-sidebar",
                     IconName::PanelLeft,
                     cx.listener(|this, _, window, cx| this.toggle_sidebar(&ToggleSidebar, window, cx)),
