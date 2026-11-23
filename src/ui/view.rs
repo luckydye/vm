@@ -4,7 +4,7 @@
 //! [`Display`], [`Shell`] and the [`layout`] and forward what the user does.
 
 use super::{
-    FocusSearch, ToggleSidebar,
+    ToggleSidebar,
     display::{self, Display},
     layout::{self, Axis, Node, Pane, Step},
     machines::{self, Machine, Machines, NewMachine, Notice, PRESETS, Preset, Tone},
@@ -24,7 +24,9 @@ use gpui::{
 };
 use gpui_component::{
     Icon, Sizable,
+    button::{Button, ButtonRounded},
     input::{Input, InputEvent as TextEvent, InputState},
+    menu::{DropdownMenu, PopupMenuItem},
     tooltip::Tooltip,
 };
 use gpui_kit_assets::IconName;
@@ -62,7 +64,6 @@ pub struct Workspace {
     /// turning a dragged divider's position into a ratio.
     splits: Rc<RefCell<HashMap<Vec<Step>, Bounds<Pixels>>>>,
     sidebar_open: bool,
-    search: Entity<InputState>,
     new_name: Entity<InputState>,
     new_preset: Preset,
     new_persist: bool,
@@ -81,11 +82,9 @@ pub struct Workspace {
 impl Workspace {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let machines = cx.new(Machines::new);
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Quick Search"));
         let new_name = cx.new(|cx| InputState::new(window, cx).placeholder("Name, or leave empty for a random one"));
         let subscriptions = vec![
             cx.observe_in(&machines, window, |this, _, window, cx| this.follow_machines(window, cx)),
-            cx.subscribe(&search, |_, _, _: &TextEvent, cx| cx.notify()),
             cx.subscribe_in(&new_name, window, |this, _, event: &TextEvent, window, cx| {
                 match event {
                     TextEvent::PressEnter { .. } => this.create(window, cx),
@@ -102,7 +101,6 @@ impl Workspace {
             resizing: None,
             splits: Rc::new(RefCell::new(HashMap::new())),
             sidebar_open: true,
-            search,
             new_name,
             new_preset: PRESETS[1],
             new_persist: false,
@@ -260,12 +258,6 @@ impl Workspace {
         .detach();
     }
 
-    fn focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
-        self.sidebar_open = true;
-        self.search.update(cx, |input, cx| input.focus(window, cx));
-        cx.notify();
-    }
-
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_open = !self.sidebar_open;
         cx.notify();
@@ -288,7 +280,6 @@ impl Render for Workspace {
         div()
             .id("workspace")
             .key_context("Workspace")
-            .on_action(cx.listener(Self::focus_search))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| this.resize(event.position, cx)))
             .on_mouse_up(
@@ -335,13 +326,7 @@ impl Workspace {
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let machines = self.machines.read(cx);
         let loaded = machines.loaded;
-        let query = self.search.read(cx).value().to_lowercase();
-        let shown: Vec<Machine> = machines
-            .machines
-            .iter()
-            .filter(|machine| format!("{} {}", machine.name, machine.folders()).to_lowercase().contains(&query))
-            .cloned()
-            .collect();
+        let shown = machines.machines.clone();
         let running: Vec<AnyElement> = shown
             .iter()
             .filter(|machine| machine.vm.running)
@@ -371,21 +356,6 @@ impl Workspace {
             )))
             .child(
                 div()
-                    .h(CONTROL_HEIGHT)
-                    .mt_2()
-                    .px_2p5()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .rounded(ROW_RADIUS)
-                    .border_1()
-                    .border_color(rgb(BORDER))
-                    .child(Icon::new(IconName::Search).size(ICON_SIZE).text_color(rgb(MUTED)))
-                    .child(div().flex_1().child(Input::new(&self.search).appearance(false).small()))
-                    .child(div().text_size(SMALL_TEXT_SIZE).text_color(rgb(FAINT)).child(if cfg!(target_os = "macos") { "⌘K" } else { "Ctrl K" })),
-            )
-            .child(
-                div()
                     .pt_3()
                     .pb_1()
                     .flex()
@@ -408,10 +378,7 @@ impl Workspace {
                     .when(!running.is_empty(), |list| list.child(section_label("Running")).children(running))
                     .when(!stopped.is_empty(), |list| list.child(section_label("Stopped")).children(stopped))
                     .when(shown.is_empty() && loaded, |list| {
-                        list.child(div().px_2p5().pt_3().text_color(rgb(FAINT)).child(match query.is_empty() {
-                            true => "No machines yet",
-                            false => "No match",
-                        }))
+                        list.child(div().px_2p5().pt_3().text_color(rgb(FAINT)).child("No machines yet"))
                     }),
             )
     }
@@ -631,6 +598,7 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap_2()
+                    .when(hosts.len() > 1, |strip| strip.child(self.render_host_select(hosts, cx)))
                     .child(segmented(PRESETS.iter().map(|preset| {
                         let preset = *preset;
                         let specs = format!("{} CPUs · {} GiB memory", preset.cpus, preset.memory_mib / 1024);
@@ -641,18 +609,6 @@ impl Workspace {
                                 cx.notify();
                             }))
                     })))
-                    .when(hosts.len() > 1, |strip| {
-                        strip.child(segmented(hosts.into_iter().map(|node| {
-                            let selected = self.new_node == node;
-                            let label = node.clone().unwrap_or_else(|| "Local".to_owned());
-                            segment(SharedString::from(format!("host-{label}")), label, selected).on_click(cx.listener(
-                                move |this, _, _, cx| {
-                                    this.new_node = node.clone();
-                                    cx.notify();
-                                },
-                            ))
-                        })))
-                    })
                     .child(div().flex_1())
                     .child(choice("persist", "Keep after stop", self.new_persist).flex_none().on_click(cx.listener(
                         |this, _, _, cx| {
@@ -688,6 +644,42 @@ impl Workspace {
             )
             .into_any_element()
     }
+
+    /// The host a new machine runs on, picked from a dropdown.
+    fn render_host_select(&self, hosts: Vec<Option<String>>, cx: &mut Context<Self>) -> AnyElement {
+        let workspace = cx.entity().downgrade();
+        let selected = self.new_node.clone();
+        Button::new("host")
+            .outline()
+            .small()
+            .rounded(ButtonRounded::Size(CONTROL_HEIGHT))
+            .h(CONTROL_HEIGHT)
+            .icon(Icon::new(IconName::Cpu).size(ICON_SIZE))
+            .label(host_label(&selected))
+            .dropdown_caret(true)
+            .dropdown_menu(move |mut menu, _, _| {
+                for node in &hosts {
+                    let workspace = workspace.clone();
+                    let node = node.clone();
+                    menu = menu.item(PopupMenuItem::new(host_label(&node)).checked(selected == node).on_click(
+                        move |_, _, cx| {
+                            workspace
+                                .update(cx, |this, cx| {
+                                    this.new_node = node.clone();
+                                    cx.notify();
+                                })
+                                .expect("the workspace outlives its menus");
+                        },
+                    ));
+                }
+                menu
+            })
+            .into_any_element()
+    }
+}
+
+fn host_label(node: &Option<String>) -> String {
+    node.clone().unwrap_or_else(|| "Local".to_owned())
 }
 
 // The machine page.

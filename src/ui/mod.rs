@@ -12,7 +12,7 @@ mod view;
 use gpui::{App, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, actions, point, prelude::*, px, size};
 use gpui_component::Root;
 
-actions!(vm_ui, [FocusSearch, ToggleSidebar, Quit]);
+actions!(vm_ui, [ToggleSidebar, Quit]);
 
 pub fn run() {
     gpui_platform::application().with_assets(gpui_kit_assets::Assets).run(|cx: &mut App| {
@@ -20,12 +20,11 @@ pub fn run() {
         theme::apply(cx);
         // Ctrl keys belong to the machine while its screen or a terminal has
         // focus, so off macOS the window's shortcuts wait outside those panes.
-        let ([search, sidebar, quit], context) = match cfg!(target_os = "macos") {
-            true => (["cmd-k", "cmd-b", "cmd-q"], None),
-            false => (["ctrl-k", "ctrl-b", "ctrl-q"], Some("!Pane")),
+        let ([sidebar, quit], context) = match cfg!(target_os = "macos") {
+            true => (["cmd-b", "cmd-q"], None),
+            false => (["ctrl-b", "ctrl-q"], Some("!Pane")),
         };
         cx.bind_keys([
-            KeyBinding::new(search, FocusSearch, context),
             KeyBinding::new(sidebar, ToggleSidebar, context),
             KeyBinding::new(quit, Quit, context),
         ]);
