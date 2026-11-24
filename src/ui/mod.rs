@@ -17,6 +17,8 @@ actions!(vm_ui, [ToggleSidebar, Quit]);
 
 pub fn run() {
     gpui_platform::application().with_assets(gpui_kit_assets::Assets).run(|cx: &mut App| {
+        #[cfg(target_os = "macos")]
+        set_application_icon();
         gpui_component::init(cx);
         theme::apply(cx);
         // Ctrl keys belong to the machine while its screen or a terminal has
@@ -56,5 +58,21 @@ pub fn run() {
         })
         .expect("failed to open the window");
         cx.activate(true);
+    });
+}
+
+/// The Dock and Cmd-Tab icon of `vm ui`, which no app bundle supplies.
+#[cfg(target_os = "macos")]
+fn set_application_icon() {
+    use objc2::{AllocAnyThread, MainThreadMarker, rc::autoreleasepool};
+    use objc2_app_kit::{NSApplication, NSImage};
+    use objc2_foundation::NSData;
+
+    const ICON: &[u8] = include_bytes!("../../assets/icon.png");
+    let mtm = MainThreadMarker::new().expect("the ui runs on the main thread");
+    autoreleasepool(|_| {
+        let data = NSData::with_bytes(ICON);
+        let icon = NSImage::initWithData(NSImage::alloc(), &data).expect("the app icon is a valid PNG");
+        unsafe { NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&icon)) };
     });
 }

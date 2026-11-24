@@ -20,9 +20,9 @@ use crate::{
     virtio::input::keys::{BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, KEY_LEFTALT, KEY_LEFTCTRL, KEY_LEFTMETA, KEY_LEFTSHIFT},
 };
 use gpui::{
-    AnyElement, Bounds, Context, Entity, FocusHandle, Focusable, Hsla, KeyDownEvent, KeyUpEvent, Modifiers,
-    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, ScrollDelta,
-    ScrollEvent, SharedString, Subscription, Window, canvas, div, prelude::*, px, rgb, size,
+    AnyElement, Bounds, Context, Entity, FocusHandle, Focusable, Hsla, KeyDownEvent, KeyUpEvent, Keystroke,
+    Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions,
+    Pixels, ScrollDelta, ScrollEvent, SharedString, Subscription, Window, canvas, div, prelude::*, px, rgb, size,
 };
 use gpui_component::{
     Icon, Sizable, WindowExt,
@@ -38,6 +38,44 @@ use std::{
     path::PathBuf,
     rc::Rc,
 };
+
+/// What a key press sends the guest: a character through its US layout, or a
+/// named key that keeps the modifiers held.
+#[derive(Clone, Copy)]
+enum ScreenKey {
+    /// `shift` is the Shift the US layout needs for the character, and
+    /// `composed` says the host's Alt produced the character, as with @ on a
+    /// German layout, so Alt must not reach the guest around the key.
+    Char { code: u16, shift: bool, composed: bool },
+    Named(u16),
+}
+
+/// The key `keystroke` types. Other host layouts are translated through the
+/// guest's US layout by the character they type, so a German Shift+7 sends
+/// the key for "/", not for the host's physical Shift+7.
+fn screen_key(keystroke: &Keystroke) -> Option<ScreenKey> {
+    let character = keystroke
+        .key_char
+        .as_deref()
+        .filter(|text| text.chars().count() == 1)
+        .and_then(|text| text.chars().next());
+    if !keystroke.modifiers.control && !keystroke.modifiers.platform {
+        if let Some(character) = character {
+            if !character.is_control() && !character.is_whitespace() {
+                if let Some((code, shift)) = keymap::char_key(character) {
+                    // Alt that only composes the character, as AltGr does,
+                    // must stay off the key; Alt as a modifier is a shortcut.
+                    let composed = keystroke.modifiers.alt
+                        && keystroke.key_char.as_deref() != Some(keystroke.key.as_str());
+                    if !keystroke.modifiers.alt || composed {
+                        return Some(ScreenKey::Char { code, shift, composed });
+                    }
+                }
+            }
+        }
+    }
+    keymap::named_key(&keystroke.key).map(ScreenKey::Named)
+}
 
 /// The windows of a running machine, kept while another machine is shown.
 struct Page {
@@ -312,6 +350,47 @@ impl Workspace {
     fn send(&self, event: InputEvent, cx: &mut Context<Self>) {
         if let Some(display) = &self.display {
             display.read(cx).send(event);
+        }
+    }
+
+    /// Sends a key press or release. A character puts Shift and Alt into the
+    /// state its US key needs, and back again, since a host layout may need
+    /// Shift where the guest's does not.
+    fn press_key(&self, key: ScreenKey, down: bool, cx: &mut Context<Self>) {
+        let (code, shift, composed) = match key {
+            ScreenKey::Named(code) => return self.send(InputEvent::Key { code, down }, cx),
+            ScreenKey::Char { code, shift, composed } => (code, shift, composed),
+        };
+        if !down {
+            return self.send(InputEvent::Key { code, down: false }, cx);
+        }
+
+        let held = self.modifiers;
+        let alt = composed && held.alt;
+        let release_shift = held.shift && !shift;
+        let press_shift = !held.shift && shift;
+        let mut events = Vec::with_capacity(5);
+        if alt {
+            events.push(InputEvent::Key { code: KEY_LEFTALT, down: false });
+        }
+        if release_shift {
+            events.push(InputEvent::Key { code: KEY_LEFTSHIFT, down: false });
+        }
+        if press_shift {
+            events.push(InputEvent::Key { code: KEY_LEFTSHIFT, down: true });
+        }
+        events.push(InputEvent::Key { code, down: true });
+        if press_shift {
+            events.push(InputEvent::Key { code: KEY_LEFTSHIFT, down: false });
+        }
+        if release_shift {
+            events.push(InputEvent::Key { code: KEY_LEFTSHIFT, down: true });
+        }
+        if alt {
+            events.push(InputEvent::Key { code: KEY_LEFTALT, down: true });
+        }
+        for event in events {
+            self.send(event, cx);
         }
     }
 
@@ -1115,14 +1194,14 @@ impl Workspace {
                         display.read(cx).paste();
                     }
                 }
-                if let Some(code) = keymap::named_key(&event.keystroke.key) {
-                    this.send(InputEvent::Key { code, down: true }, cx);
+                if let Some(key) = screen_key(&event.keystroke) {
+                    this.press_key(key, true, cx);
                 }
                 cx.stop_propagation();
             }))
             .on_key_up(cx.listener(|this, event: &KeyUpEvent, _, cx| {
-                if let Some(code) = keymap::named_key(&event.keystroke.key) {
-                    this.send(InputEvent::Key { code, down: false }, cx);
+                if let Some(key) = screen_key(&event.keystroke) {
+                    this.press_key(key, false, cx);
                 }
             }))
             .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {

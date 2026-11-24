@@ -1,4 +1,4 @@
-//! US keyboard layout used by `vm type` and `vm key`.
+//! US keyboard layout that the screen and `vm type` and `vm key` translate to.
 
 use crate::virtio::input::keys::*;
 
