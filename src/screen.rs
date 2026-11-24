@@ -8,7 +8,7 @@
 use crate::{
     keymap,
     protocol::{self, InputEvent},
-    virtio::input::keys::{BTN_LEFT, BTN_MIDDLE, BTN_RIGHT},
+    virtio::input::keys::{BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, KEY_LEFTALT, KEY_LEFTSHIFT, KEY_RIGHTALT, KEY_RIGHTSHIFT},
 };
 use crossterm::terminal;
 use std::{
@@ -31,8 +31,9 @@ use std::{
 /// until the next one is fully received and only then gets deleted.
 const IMAGE_IDS: [u32; 2] = [1, 2];
 const PLACEMENT_ID: u32 = 1;
-/// Kitty keyboard flags: disambiguate keys, report releases, report all keys.
-const KEYBOARD_FLAGS: u32 = 1 | 2 | 8;
+/// Kitty keyboard flags: disambiguate keys, report releases, report all keys,
+/// and report the text each key typed.
+const KEYBOARD_FLAGS: u32 = 1 | 2 | 8 | 16;
 
 /// Where the last frame is on screen, for mapping mouse positions.
 #[derive(Clone, Copy)]
@@ -291,6 +292,8 @@ fn parse(buffer: &mut Vec<u8>) -> Vec<Sequence> {
 /// releases then go elsewhere and would leave them stuck in the guest.
 fn forward_input(input: &mut impl Write, paste: &mut impl FnMut() -> io::Result<()>, geometry: &Mutex<Option<Geometry>>) {
     let mut held = BTreeSet::new();
+    // Whether the guest's Caps Lock is on, to keep its Shift in step.
+    let mut caps = false;
     let mut buffer = Vec::new();
     let mut bytes = [0u8; 4096];
     // The terminal, even when stdin is a pipe that carried the VM name.
@@ -309,9 +312,9 @@ fn forward_input(input: &mut impl Write, paste: &mut impl FnMut() -> io::Result<
             }
             let events = match sequence.params.strip_prefix('<') {
                 Some(mouse) => mouse_events(mouse, sequence.final_byte, *geometry.lock().unwrap()),
-                None => match key_event(&sequence, &mut held) {
+                None => match key_event(&sequence, &mut held, &mut caps) {
                     KeyAction::Quit => break 'reading,
-                    KeyAction::Send(event) => vec![event],
+                    KeyAction::Send(events) => events,
                     KeyAction::Paste(event) => {
                         if paste().is_err() {
                             break 'reading;
@@ -342,15 +345,16 @@ fn release(held: &mut BTreeSet<u16>) -> Vec<InputEvent> {
 }
 
 enum KeyAction {
-    Send(InputEvent),
+    Send(Vec<InputEvent>),
     /// Ctrl+V, which pastes the host clipboard before the key goes to the guest.
     Paste(InputEvent),
     Quit,
     Ignore,
 }
 
-/// `CSI number[:alternates] ; modifiers[:event] final`, from the Kitty keyboard protocol.
-fn key_event(sequence: &Sequence, held: &mut BTreeSet<u16>) -> KeyAction {
+/// `CSI number[:alternates] ; modifiers[:event] ; text final`, from the Kitty
+/// keyboard protocol.
+fn key_event(sequence: &Sequence, held: &mut BTreeSet<u16>, caps: &mut bool) -> KeyAction {
     let mut fields = sequence.params.split(';');
     let number = fields
         .next()
@@ -360,6 +364,11 @@ fn key_event(sequence: &Sequence, held: &mut BTreeSet<u16>) -> KeyAction {
     let mut modifier_fields = fields.next().unwrap_or("1").split(':');
     let modifiers: u32 = modifier_fields.next().and_then(|value| value.parse().ok()).unwrap_or(1);
     let event: u32 = modifier_fields.next().and_then(|value| value.parse().ok()).unwrap_or(1);
+    let text = if sequence.final_byte == b'u' {
+        fields.next().and_then(text_character)
+    } else {
+        None
+    };
 
     let ctrl = (modifiers - 1) & 4 != 0;
     if sequence.final_byte == b'u' && number == u32::from(b']') && ctrl && event == 1 {
@@ -369,10 +378,52 @@ fn key_event(sequence: &Sequence, held: &mut BTreeSet<u16>) -> KeyAction {
     if event == 2 {
         return KeyAction::Ignore;
     }
+    let down = event != 3;
+    // The Caps Lock key still goes to the guest; remember what it did there.
+    if sequence.final_byte == b'u' && number == 57358 && down {
+        *caps = !*caps;
+    }
+
+    // The typed text is the character of another host layout, unlike the
+    // unshifted US code, so it maps to the guest's key for that character.
+    let alt: Vec<u16> = held.iter().copied().filter(|&code| code == KEY_LEFTALT || code == KEY_RIGHTALT).collect();
+    let shift = (modifiers - 1) & 1 != 0;
+    let key_character = char::from_u32(number);
+    let plain = match (shift, key_character) {
+        (true, Some(character)) if character.is_ascii_alphabetic() => Some(character.to_ascii_uppercase()),
+        _ => key_character,
+    };
+    let typed = text.filter(|&character| !ctrl && !character.is_control() && !character.is_whitespace());
+    if let Some(character) = typed {
+        // Alt that typed the character, as AltGr or Option does, must not
+        // reach the guest; when the text matches the key, Alt is a shortcut.
+        let shortcut = !alt.is_empty() && Some(character) == plain;
+        if let Some((code, shift)) = keymap::char_key(character).filter(|_| !shortcut) {
+            // Caps Lock inverts Shift for letters, both here and in the guest.
+            let shift = shift ^ (*caps && character.is_ascii_alphabetic());
+            if down {
+                let mut events = character_events(code, shift, alt, held);
+                // A pure text event, with key number 0, has no release of its own.
+                match number {
+                    0 => events.push(InputEvent::Key { code, down: false }),
+                    _ => {
+                        held.insert(code);
+                    }
+                }
+                return KeyAction::Send(events);
+            }
+            held.remove(&code);
+            return KeyAction::Send(vec![InputEvent::Key { code, down: false }]);
+        }
+        // Text outside the US layout would be a different key, so drop it.
+        if !shortcut {
+            return KeyAction::Ignore;
+        }
+    }
+
     let Some(code) = keymap::kitty_key(number, sequence.final_byte) else {
         return KeyAction::Ignore;
     };
-    let down = event != 3;
     if down {
         held.insert(code);
     } else {
@@ -381,8 +432,49 @@ fn key_event(sequence: &Sequence, held: &mut BTreeSet<u16>) -> KeyAction {
     let key = InputEvent::Key { code, down };
     match sequence.final_byte == b'u' && number == u32::from(b'v') && ctrl && down {
         true => KeyAction::Paste(key),
-        false => KeyAction::Send(key),
+        false => KeyAction::Send(vec![key]),
     }
+}
+
+/// The character of a `text-as-codepoints` field, when it is one code point.
+fn text_character(text: &str) -> Option<char> {
+    let mut points = text.split(':');
+    let character = char::from_u32(points.next()?.parse().ok()?)?;
+    points.next().is_none().then_some(character)
+}
+
+/// Presses `code`, first putting Shift and Alt into the state its US key needs
+/// and afterwards back, since a host layout may type the character with other
+/// modifiers. The keys in `alt` are held but did not type the character.
+fn character_events(code: u16, shift: bool, alt: Vec<u16>, held: &BTreeSet<u16>) -> Vec<InputEvent> {
+    let shifted: Vec<u16> = [KEY_LEFTSHIFT, KEY_RIGHTSHIFT].into_iter().filter(|code| held.contains(code)).collect();
+    let press_shift = shift && shifted.is_empty();
+    let release_shift = !shift && !shifted.is_empty();
+    let mut events = Vec::with_capacity(3 + alt.len() * 2 + shifted.len() * 2);
+    for code in &alt {
+        events.push(InputEvent::Key { code: *code, down: false });
+    }
+    if release_shift {
+        for code in &shifted {
+            events.push(InputEvent::Key { code: *code, down: false });
+        }
+    }
+    if press_shift {
+        events.push(InputEvent::Key { code: KEY_LEFTSHIFT, down: true });
+    }
+    events.push(InputEvent::Key { code, down: true });
+    if press_shift {
+        events.push(InputEvent::Key { code: KEY_LEFTSHIFT, down: false });
+    }
+    if release_shift {
+        for code in &shifted {
+            events.push(InputEvent::Key { code: *code, down: true });
+        }
+    }
+    for code in &alt {
+        events.push(InputEvent::Key { code: *code, down: true });
+    }
+    events
 }
 
 /// `CSI < button ; x ; y M|m` with x and y in terminal pixels.

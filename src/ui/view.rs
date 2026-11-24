@@ -65,8 +65,15 @@ fn screen_key(keystroke: &Keystroke) -> Option<ScreenKey> {
                 if let Some((code, shift)) = keymap::char_key(character) {
                     // Alt that only composes the character, as AltGr does,
                     // must stay off the key; Alt as a modifier is a shortcut.
+                    // Shift is already in `key` for symbols, but not letters.
                     let composed = keystroke.modifiers.alt
-                        && keystroke.key_char.as_deref() != Some(keystroke.key.as_str());
+                        && match keystroke.key_char.as_deref() {
+                            Some(character) if keystroke.modifiers.shift => {
+                                character != keystroke.key.to_ascii_uppercase().as_str()
+                            }
+                            Some(character) => character != keystroke.key.as_str(),
+                            None => false,
+                        };
                     if !keystroke.modifiers.alt || composed {
                         return Some(ScreenKey::Char { code, shift, composed });
                     }
