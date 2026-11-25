@@ -32,7 +32,7 @@ fn cell_size(font: &Font, window: &Window) -> (Pixels, Pixels) {
     (width, height)
 }
 
-pub fn render(shell: Entity<Shell>, focus: &FocusHandle, window: &mut Window, cx: &mut App) -> AnyElement {
+pub fn render(shell: Entity<Shell>, focus: &FocusHandle, palette: Palette, window: &mut Window, cx: &mut App) -> AnyElement {
     let state = shell.read(cx);
     let family = cx.theme().mono_font_family.clone();
     let mono = font(family);
@@ -173,10 +173,10 @@ pub fn render(shell: Entity<Shell>, focus: &FocusHandle, window: &mut Window, cx
                 .px_3()
                 .py_2()
                 .rounded(ROW_RADIUS)
-                .bg(rgb(CARD))
+                .bg(rgb(palette.card))
                 .border_1()
-                .border_color(rgb(BORDER))
-                .text_color(rgb(MUTED))
+                .border_color(rgb(palette.border))
+                .text_color(rgb(palette.muted))
                 .child(SharedString::from(ended))
         }))
         .into_any_element()

@@ -1,6 +1,7 @@
 //! A shell in a machine: a pty session in the guest, emulated with Ghostty's
 //! terminal, as plain rows of styled text for the view to draw.
 
+use super::theme::Palette;
 use crate::{
     cli, clipboard,
     node::{self, Target},
@@ -8,7 +9,8 @@ use crate::{
 };
 use gpui::{AppContext, AsyncApp, Context, EventEmitter, Keystroke, Modifiers, Task, WeakEntity};
 use libghostty_vt::{
-    color::Rgb,
+    color::{Palette as GhosttyPalette, PaletteIndex, Rgb},
+    error::Result,
     fmt::Formatter,
     key::{self, Key},
     mode::Mode,
@@ -122,8 +124,9 @@ pub struct Shell {
 }
 
 impl Shell {
-    /// Opens a login shell in machine `name` with `size` cells.
-    pub fn new(name: String, size: (u16, u16), cx: &mut Context<Self>) -> Self {
+    /// Opens a login shell in machine `name` with `size` cells, in `palette`'s
+    /// terminal colors.
+    pub fn new(name: String, size: (u16, u16), palette: Palette, cx: &mut Context<Self>) -> Self {
         let (writer, commands) = mpsc::channel();
         let replies = writer.clone();
         let mut terminal = Terminal::new(size.0, size.1).expect("failed to create a terminal");
@@ -131,9 +134,7 @@ impl Shell {
             .set_scrollback_max_lines(Some(SCROLLBACK_LINES))
             .and_then(|terminal| terminal.set_terminfo_name("xterm-256color"))
             // Set in the terminal, not just painted, so programs asking for them get them too.
-            // libghostty only takes the background once the foreground is set as well.
-            .and_then(|terminal| terminal.set_default_fg_color(Some(Rgb { r: 0xff, g: 0xff, b: 0xff })))
-            .and_then(|terminal| terminal.set_default_bg_color(Some(Rgb { r: 0x0b, g: 0x0b, b: 0x0b })))
+            .and_then(|terminal| set_colors(terminal, palette))
             .and_then(|terminal| {
                 // Answers to the queries of programs like vim and tmux.
                 terminal.on_pty_write(move |_, data: &[u8]| {
@@ -357,6 +358,14 @@ impl Shell {
         cx.notify();
     }
 
+    /// Repaints the terminal in the host's new appearance, keeping the programs
+    /// running in it.
+    pub fn set_palette(&mut self, palette: Palette, cx: &mut Context<Self>) {
+        set_colors(&mut self.terminal, palette).expect("failed to set the terminal colors");
+        self.refresh();
+        cx.notify();
+    }
+
     /// Writes input, and shows the bottom of the screen where it lands.
     fn input(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
         if bytes.is_empty() {
@@ -453,6 +462,33 @@ fn key_mods(modifiers: &Modifiers) -> key::Mods {
 
 fn rgb(color: Rgb) -> u32 {
     u32::from(color.r) << 16 | u32::from(color.g) << 8 | u32::from(color.b)
+}
+
+/// Sets the terminal's text, background and, where the appearance needs it,
+/// its ANSI palette. libghostty only takes the background once the foreground
+/// is set as well.
+fn set_colors<'a>(
+    terminal: &'a mut Terminal<'static, 'static>,
+    palette: Palette,
+) -> Result<&'a mut Terminal<'static, 'static>> {
+    let text = color(palette.terminal_text);
+    let background = color(palette.terminal);
+    terminal.set_default_fg_color(Some(text))?.set_default_bg_color(Some(background))?;
+    let colors = palette.ansi.map(|ansi| {
+        let mut base = GhosttyPalette::default();
+        for (index, hex) in ansi.into_iter().enumerate() {
+            base.set(PaletteIndex(index as u8), color(hex));
+        }
+        // Keep the conventional dark-to-light ramp, so 256-color dim text stays readable.
+        GhosttyPalette::generate(Some(&base), None, background, text, false)
+    });
+    terminal.set_default_color_palette(colors)?;
+    Ok(terminal)
+}
+
+/// The color of a `0xrrggbb` number.
+fn color(hex: u32) -> Rgb {
+    Rgb { r: (hex >> 16) as u8, g: (hex >> 8) as u8, b: hex as u8 }
 }
 
 /// Opens the session and feeds its output into the terminal until it ends,

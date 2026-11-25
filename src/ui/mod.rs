@@ -20,7 +20,7 @@ pub fn run() {
         #[cfg(target_os = "macos")]
         set_application_icon();
         gpui_component::init(cx);
-        theme::apply(cx);
+        theme::apply(cx.window_appearance(), cx);
         // Ctrl keys belong to the machine while its screen or a terminal has
         // focus, so off macOS the window's shortcuts wait outside those panes.
         let ([sidebar, quit], context) = match cfg!(target_os = "macos") {

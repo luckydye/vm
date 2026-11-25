@@ -12,7 +12,7 @@ use super::{
     ports::Ports,
     shell::{Shell, ShellEvent},
     shell_view,
-    theme::*,
+    theme::{self, *},
 };
 use crate::{
     keymap,
@@ -113,6 +113,8 @@ pub struct Workspace {
     /// turning a dragged divider's position into a ratio.
     splits: Rc<RefCell<HashMap<Vec<Step>, Bounds<Pixels>>>>,
     sidebar_open: bool,
+    /// The host's appearance, whose palette colors the window.
+    palette: Palette,
     new_name: Entity<InputState>,
     new_preset: Preset,
     new_persist: bool,
@@ -133,7 +135,14 @@ impl Workspace {
         let machines = cx.new(Machines::new);
         let ports = cx.new(Ports::new);
         let new_name = cx.new(|cx| InputState::new(window, cx).placeholder("Name, or leave empty for a random one"));
+        let appearance = {
+            let this = cx.entity().downgrade();
+            window.observe_window_appearance(move |window, cx| {
+                this.update(cx, |this, cx| this.follow_appearance(window, cx)).ok();
+            })
+        };
         let subscriptions = vec![
+            appearance,
             cx.observe_in(&machines, window, |this, _, window, cx| this.follow_machines(window, cx)),
             cx.observe_in(&ports, window, |_, _, _, cx| cx.notify()),
             cx.subscribe_in(&new_name, window, |this, _, event: &TextEvent, window, cx| {
@@ -153,6 +162,7 @@ impl Workspace {
             resizing: None,
             splits: Rc::new(RefCell::new(HashMap::new())),
             sidebar_open: true,
+            palette: Palette::of(window.appearance()),
             new_name,
             new_preset: PRESETS[1],
             new_persist: false,
@@ -180,7 +190,8 @@ impl Workspace {
     fn open_shell(&mut self, beside: Option<(Pane, Axis)>, window: &mut Window, cx: &mut Context<Self>) {
         let name = self.selected.clone().expect("a terminal opens in the selected machine");
         let machine = name.clone();
-        let shell = cx.new(move |cx| Shell::new(machine, (80, 24), cx));
+        let palette = self.palette;
+        let shell = cx.new(move |cx| Shell::new(machine, (80, 24), palette, cx));
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         let page = self.page();
@@ -354,6 +365,19 @@ impl Workspace {
         self.follow_machines(window, cx);
     }
 
+    /// Repaints the window and its terminals in the host's new appearance.
+    fn follow_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let palette = Palette::of(window.appearance());
+        self.palette = palette;
+        for page in self.pages.values() {
+            for (shell, _) in page.shells.values() {
+                shell.update(cx, |shell, cx| shell.set_palette(palette, cx));
+            }
+        }
+        theme::apply(window.appearance(), cx);
+        cx.notify();
+    }
+
     fn send(&self, event: InputEvent, cx: &mut Context<Self>) {
         if let Some(display) = &self.display {
             display.read(cx).send(event);
@@ -409,6 +433,7 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = self.palette;
         div()
             .id("workspace")
             .key_context("Workspace")
@@ -430,8 +455,8 @@ impl Render for Workspace {
             })
             .size_full()
             .flex()
-            .bg(rgb(WINDOW))
-            .text_color(rgb(TEXT))
+            .bg(rgb(palette.window))
+            .text_color(rgb(palette.text))
             .text_size(TEXT_SIZE)
             .p(GAP)
             .gap(GAP)
@@ -449,13 +474,14 @@ impl Render for Workspace {
                         None => self.render_overview(cx),
                     }),
             )
-            .children(self.machines.read(cx).notice.as_ref().map(|notice| render_notice(notice, &self.machines)))
+            .children(self.machines.read(cx).notice.as_ref().map(|notice| render_notice(notice, &self.machines, palette)))
     }
 }
 
 // The sidebar.
 impl Workspace {
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = self.palette;
         let machines = self.machines.read(cx);
         let loaded = machines.loaded;
         let shown = machines.machines.clone();
@@ -484,15 +510,16 @@ impl Workspace {
             .h_full()
             .flex()
             .flex_col()
-            .bg(rgb(PANEL))
+            .bg(rgb(palette.panel))
             .border_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(palette.border))
             .rounded(PANEL_RADIUS)
             .px_2()
             .child(drag_area().h(TITLEBAR_HEIGHT).flex().justify_end().items_center().child(icon_button(
                 "hide-sidebar",
                 IconName::PanelLeft,
                 cx.listener(|this, _, window, cx| this.toggle_sidebar(&ToggleSidebar, window, cx)),
+                palette,
             )))
             .child(
                 div()
@@ -507,6 +534,7 @@ impl Workspace {
                         "Overview",
                         self.selected.is_none(),
                         cx.listener(|this, _, window, cx| this.select(None, window, cx)),
+                        palette,
                     )),
             )
             .child(
@@ -515,10 +543,10 @@ impl Workspace {
                     .flex_1()
                     .overflow_y_scroll()
                     .pb_3()
-                    .when(!running.is_empty(), |list| list.child(section_label("Running")).children(running))
-                    .when(!stopped.is_empty(), |list| list.child(section_label("Stopped")).children(stopped))
+                    .when(!running.is_empty(), |list| list.child(section_label("Running", palette)).children(running))
+                    .when(!stopped.is_empty(), |list| list.child(section_label("Stopped", palette)).children(stopped))
                     .when(shown.is_empty() && loaded, |list| {
-                        list.child(div().px_2p5().pt_3().text_color(rgb(FAINT)).child("No machines yet"))
+                        list.child(div().px_2p5().pt_3().text_color(rgb(palette.faint)).child("No machines yet"))
                     }),
             )
             .when(ports, |sidebar| sidebar.child(self.render_ports(cx)))
@@ -527,6 +555,7 @@ impl Workspace {
 
     /// The selected machine's size, below its ports at the foot of the sidebar.
     fn render_facts(&self, machine: &Machine) -> AnyElement {
+        let palette = self.palette;
         let hardware = &machine.vm.hardware;
         let memory = match hardware.memory_mib % 1024 {
             0 => format!("{} GiB", hardware.memory_mib / 1024),
@@ -550,7 +579,7 @@ impl Workspace {
             .flex_col()
             .gap_0p5()
             .border_t_1()
-            .border_color(rgb(DIVIDER))
+            .border_color(rgb(palette.divider))
             .pt_2()
             .pb_3()
             .children(facts.into_iter().map(|(term, value)| {
@@ -561,13 +590,14 @@ impl Workspace {
                     .justify_between()
                     .gap_2()
                     .text_size(SMALL_TEXT_SIZE)
-                    .child(div().text_color(rgb(FAINT)).child(term))
-                    .child(div().text_color(rgb(MUTED)).truncate().child(value))
+                    .child(div().text_color(rgb(palette.faint)).child(term))
+                    .child(div().text_color(rgb(palette.muted)).truncate().child(value))
             }))
             .into_any_element()
     }
 
     fn render_machine_row(&self, machine: &Machine, cx: &mut Context<Self>) -> AnyElement {
+        let palette = self.palette;
         let name = machine.name.clone();
         let selected = self.selected.as_deref() == Some(name.as_str());
         div()
@@ -579,11 +609,11 @@ impl Workspace {
             .gap_2p5()
             .rounded(ROW_RADIUS)
             .cursor_pointer()
-            .when(selected, |row| row.bg(rgb(SELECTED)))
-            .when(!selected, |row| row.hover(|row| row.bg(rgb(HOVER))))
-            .child(status_dot(machine))
+            .when(selected, |row| row.bg(rgb(palette.selected)))
+            .when(!selected, |row| row.hover(|row| row.bg(rgb(palette.hover))))
+            .child(status_dot(machine, palette))
             .child(div().flex_1().min_w_0().truncate().child(machine.short_name().to_owned()))
-            .children(machine.node.clone().map(|node| div().text_color(rgb(FAINT)).child(node)))
+            .children(machine.node.clone().map(|node| div().text_color(rgb(palette.faint)).child(node)))
             .on_click(cx.listener(move |this, _, window, cx| this.select(Some(name.clone()), window, cx)))
             .into_any_element()
     }
@@ -591,6 +621,7 @@ impl Workspace {
     /// The strip above the main pane: drags the window, brings back the
     /// sidebar and holds the selected machine's actions.
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = self.palette;
         let machines = self.machines.read(cx);
         let machine = self.selected.as_deref().and_then(|name| machines.find(name)).cloned();
         let busy = machine.as_ref().is_some_and(|machine| machines.pending.contains(&machine.name));
@@ -610,6 +641,7 @@ impl Workspace {
                     "show-sidebar",
                     IconName::PanelLeft,
                     cx.listener(|this, _, window, cx| this.toggle_sidebar(&ToggleSidebar, window, cx)),
+                    palette,
                 ))
             })
             .when(self.sidebar_open, |bar| bar.pl_3())
@@ -617,31 +649,33 @@ impl Workspace {
                 let (start, stop, delete) = (machine.name.clone(), machine.name.clone(), machine.name.clone());
                 let folders = machine.folders();
                 bar.child(div().font_weight(gpui::FontWeight::MEDIUM).child(machine.name.clone()))
-                    .child(div().text_color(rgb(MUTED)).child(state_label(&machine)))
-                    .when(!folders.is_empty(), |bar| bar.child(folder_label(folders)))
+                    .child(div().text_color(rgb(palette.muted)).child(state_label(&machine)))
+                    .when(!folders.is_empty(), |bar| bar.child(folder_label(folders, palette)))
                     .child(div().flex_1())
                     .when(machine.vm.running, |bar| {
                         bar.when(screen_closed, |bar| {
-                            bar.child(pill("open-screen", "Screen", false, Some(IconName::Frame)).on_click(
+                            bar.child(pill("open-screen", "Screen", false, Some(IconName::Frame), palette).on_click(
                                 cx.listener(|this, _, window, cx| this.open_screen(window, cx)),
                             ))
                         })
-                        .child(pill("open-shell", "Terminal", false, Some(IconName::Plus)).on_click(
+                        .child(pill("open-shell", "Terminal", false, Some(IconName::Plus), palette).on_click(
                             cx.listener(|this, _, window, cx| this.open_shell(None, window, cx)),
                         ))
-                        .child(div().w(px(1.)).h(px(16.)).mx_1().bg(rgb(BORDER)))
+                        .child(div().w(px(1.)).h(px(16.)).mx_1().bg(rgb(palette.border)))
                     })
                     .child(match machine.vm.running {
-                        true => pill("stop", "Stop", busy, Some(IconName::Square)).on_click(cx.listener(move |this, _, _, cx| {
-                            this.machines.update(cx, |machines, cx| machines.stop(&stop, cx))
-                        })),
-                        false => pill("start", "Start", busy, Some(IconName::Play)).on_click(cx.listener(move |this, _, _, cx| {
-                            this.machines.update(cx, |machines, cx| machines.start(&start, cx))
-                        })),
+                        true => pill("stop", "Stop", busy, Some(IconName::Square), palette).on_click(cx.listener(
+                            move |this, _, _, cx| this.machines.update(cx, |machines, cx| machines.stop(&stop, cx)),
+                        )),
+                        false => pill("start", "Start", busy, Some(IconName::Play), palette).on_click(cx.listener(
+                            move |this, _, _, cx| this.machines.update(cx, |machines, cx| machines.start(&start, cx)),
+                        )),
                     })
-                    .child(pill("delete", "Delete", busy, Some(IconName::Delete)).text_color(rgb(DANGER)).on_click(
-                        cx.listener(move |this, _, window, cx| this.confirm_delete(delete.clone(), window, cx)),
-                    ))
+                    .child(
+                        pill("delete", "Delete", busy, Some(IconName::Delete), palette)
+                            .text_color(rgb(palette.danger))
+                            .on_click(cx.listener(move |this, _, window, cx| this.confirm_delete(delete.clone(), window, cx))),
+                    )
             })
     }
 }
@@ -649,6 +683,7 @@ impl Workspace {
 // The overview.
 impl Workspace {
     fn render_overview(&self, cx: &mut Context<Self>) -> AnyElement {
+        let palette = self.palette;
         let listed = self.machines.read(cx).machines.clone();
         let rows: Vec<AnyElement> =
             listed.iter().enumerate().map(|(index, machine)| self.render_overview_row(machine, (index, listed.len()), cx)).collect();
@@ -666,9 +701,9 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .gap_2p5()
-                    .child(heading("Machines"))
+                    .child(heading("Machines", palette))
                     .child(match empty {
-                        true => card()
+                        true => card(palette)
                             .p_6()
                             .flex()
                             .flex_col()
@@ -677,33 +712,33 @@ impl Workspace {
                                 true => "No machines",
                                 false => "Looking for machines…",
                             }))
-                            .child(div().text_color(rgb(MUTED)).child(
+                            .child(div().text_color(rgb(palette.muted)).child(
                                 "Each machine is a disposable Debian desktop that starts in about a second.",
                             ))
                             .into_any_element(),
-                        false => card().children(rows).into_any_element(),
+                        false => card(palette).children(rows).into_any_element(),
                     }),
             )
-            .child(div().flex().flex_col().gap_2p5().child(heading("New machine")).child(composer))
+            .child(div().flex().flex_col().gap_2p5().child(heading("New machine", palette)).child(composer))
             .when(!machines.hosts.is_empty(), |overview| {
                 overview.child(
                     div()
                         .flex()
                         .flex_col()
                         .gap_2p5()
-                        .child(heading("Hosts"))
-                        .child(card().children(machines.hosts.iter().enumerate().map(|(index, usage)| {
+                        .child(heading("Hosts", palette))
+                        .child(card(palette).children(machines.hosts.iter().enumerate().map(|(index, usage)| {
                             let used = usage.host.used_bytes as f64 / usage.host.memory_bytes as f64;
-                            row((index, machines.hosts.len()))
-                                .child(Icon::new(IconName::Cpu).size(ICON_SIZE).text_color(rgb(MUTED)))
+                            row((index, machines.hosts.len()), palette)
+                                .child(Icon::new(IconName::Cpu).size(ICON_SIZE).text_color(rgb(palette.muted)))
                                 .child(div().flex_1().child(usage.node.clone().unwrap_or_else(|| "This computer".to_owned())))
-                                .child(div().text_size(SMALL_TEXT_SIZE).text_color(rgb(MUTED)).child(format!(
+                                .child(div().text_size(SMALL_TEXT_SIZE).text_color(rgb(palette.muted)).child(format!(
                                     "{} CPUs · {} of {} memory",
                                     usage.host.cpus,
                                     gib(usage.host.used_bytes),
                                     gib(usage.host.memory_bytes)
                                 )))
-                                .child(meter(used))
+                                .child(meter(used, palette))
                         }))),
                 )
             }))
@@ -711,13 +746,14 @@ impl Workspace {
     }
 
     fn render_overview_row(&self, machine: &Machine, place: (usize, usize), cx: &mut Context<Self>) -> AnyElement {
+        let palette = self.palette;
         let name = machine.name.clone();
         let hardware = &machine.vm.hardware;
-        row(place)
+        row(place, palette)
             .id(SharedString::from(format!("overview-{name}")))
             .cursor_pointer()
-            .hover(|row| row.bg(rgb(HOVER)))
-            .child(status_dot(machine))
+            .hover(|row| row.bg(rgb(palette.hover)))
+            .child(status_dot(machine, palette))
             .child(
                 div()
                     .flex_1()
@@ -725,7 +761,7 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .child(div().font_weight(gpui::FontWeight::MEDIUM).truncate().child(name.clone()))
-                    .child(div().text_size(SMALL_TEXT_SIZE).text_color(rgb(MUTED)).truncate().child(format!(
+                    .child(div().text_size(SMALL_TEXT_SIZE).text_color(rgb(palette.muted)).truncate().child(format!(
                         "{}{} CPUs · {} GiB memory · {} GiB disk{}",
                         match machine.folders().as_str() {
                             "" => String::new(),
@@ -737,7 +773,7 @@ impl Workspace {
                         if hardware.persist { " · kept after stop" } else { "" }
                     ))),
             )
-            .child(div().text_size(SMALL_TEXT_SIZE).text_color(rgb(MUTED)).child(state_label(machine)))
+            .child(div().text_size(SMALL_TEXT_SIZE).text_color(rgb(palette.muted)).child(state_label(machine)))
             .on_click(cx.listener(move |this, _, window, cx| this.select(Some(name.clone()), window, cx)))
             .into_any_element()
     }
@@ -745,6 +781,7 @@ impl Workspace {
     /// The new machine form: the name and project folder over a strip with
     /// its size and host on the left and keeping it and creating it on the right.
     fn render_composer(&self, cx: &mut Context<Self>) -> AnyElement {
+        let palette = self.palette;
         let machines = self.machines.read(cx);
         let creating = machines.pending.contains("");
         let folder = self.new_folder.clone();
@@ -753,12 +790,12 @@ impl Workspace {
         // A folder lives on this host, so its machine does too.
         let nodes = if folder.is_some() { Vec::new() } else { machines.nodes.clone() };
         let hosts = std::iter::once(None).chain(nodes.into_iter().map(Some)).collect::<Vec<_>>();
-        card()
+        card(palette)
             .border_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(palette.border))
             .child(
                 div()
-                    .bg(rgb(WINDOW))
+                    .bg(rgb(palette.window))
                     .pl_3()
                     .pr_2()
                     .min_h(px(56.))
@@ -767,13 +804,17 @@ impl Workspace {
                     .gap_2()
                     .child(div().flex_1().min_w_0().child(Input::new(&self.new_name).appearance(false)))
                     .child(match &folder {
-                        None => quiet_button("choose-folder", "Open folder", IconName::FolderOpen)
+                        None => quiet_button("choose-folder", "Open folder", IconName::FolderOpen, palette)
                             .on_click(cx.listener(|this, _, _, cx| this.choose_folder(cx)))
                             .into_any_element(),
-                        Some(folder) => folder_chip(folder, cx.listener(|this, _, _, cx| {
-                            this.new_folder = None;
-                            cx.notify();
-                        })),
+                        Some(folder) => folder_chip(
+                            folder,
+                            cx.listener(|this, _, _, cx| {
+                                this.new_folder = None;
+                                cx.notify();
+                            }),
+                            palette,
+                        ),
                     }),
             )
             .child(
@@ -784,23 +825,33 @@ impl Workspace {
                     .items_center()
                     .gap_2()
                     .when(hosts.len() > 1, |strip| strip.child(self.render_host_select(hosts, cx)))
-                    .child(segmented(PRESETS.iter().map(|preset| {
-                        let preset = *preset;
-                        let specs = format!("{} CPUs · {} GiB memory", preset.cpus, preset.memory_mib / 1024);
-                        segment(SharedString::from(format!("preset-{}", preset.label)), preset.label, self.new_preset == preset)
+                    .child(segmented(
+                        PRESETS.iter().map(|preset| {
+                            let preset = *preset;
+                            let specs = format!("{} CPUs · {} GiB memory", preset.cpus, preset.memory_mib / 1024);
+                            segment(
+                                SharedString::from(format!("preset-{}", preset.label)),
+                                preset.label,
+                                self.new_preset == preset,
+                                palette,
+                            )
                             .tooltip(move |window, cx| Tooltip::new(specs.clone()).build(window, cx))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.new_preset = preset;
                                 cx.notify();
                             }))
-                    })))
+                        }),
+                        palette,
+                    ))
                     .child(div().flex_1())
-                    .child(choice("persist", "Keep after stop", self.new_persist).flex_none().on_click(cx.listener(
-                        |this, _, _, cx| {
-                            this.new_persist = !this.new_persist;
-                            cx.notify();
-                        },
-                    )))
+                    .child(
+                        choice("persist", "Keep after stop", self.new_persist, palette)
+                            .flex_none()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.new_persist = !this.new_persist;
+                                cx.notify();
+                            })),
+                    )
                     .child(
                         div()
                             .id("create")
@@ -812,8 +863,8 @@ impl Workspace {
                             .items_center()
                             .gap_1p5()
                             .rounded_full()
-                            .bg(rgb(TEXT))
-                            .text_color(rgb(WINDOW))
+                            .bg(rgb(palette.text))
+                            .text_color(rgb(palette.window))
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .when(creating, |button| button.opacity(0.5))
                             .when(!creating, |button| {
@@ -870,6 +921,7 @@ fn host_label(node: &Option<String>) -> String {
 // The machine page.
 impl Workspace {
     fn render_machine(&self, name: &str, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let palette = self.palette;
         let machines = self.machines.read(cx);
         let Some(machine) = machines.find(name) else {
             return div().flex_1().into_any_element();
@@ -888,7 +940,7 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(palette.muted))
                     .child("Open the screen or a terminal from the bar above.")
                     .into_any_element(),
             };
@@ -905,30 +957,32 @@ impl Workspace {
                 .items_center()
                 .justify_center()
                 .child(
-                    card()
+                    card(palette)
                         .p_6()
                         .w(px(360.))
                         .flex()
                         .flex_col()
                         .gap_3()
                         .child(div().font_weight(gpui::FontWeight::MEDIUM).child("This machine is stopped"))
-                        .child(div().text_color(rgb(MUTED)).child("Its disk is kept until you delete it."))
+                        .child(div().text_color(rgb(palette.muted)).child("Its disk is kept until you delete it."))
                         .children(machine.vm.mounts.iter().map(|mount| {
                             div()
                                 .text_size(SMALL_TEXT_SIZE)
                                 .flex()
                                 .items_center()
                                 .gap_1p5()
-                                .child(Icon::new(IconName::Folder).size(ICON_SIZE).text_color(rgb(MUTED)))
+                                .child(Icon::new(IconName::Folder).size(ICON_SIZE).text_color(rgb(palette.muted)))
                                 .child(div().truncate().child(format!(
                                     "{} at {}",
                                     machines::home_relative(&mount.host),
                                     mount.guest.replacen("/home/varmint", "~", 1)
                                 )))
                         }))
-                        .child(div().flex().child(pill("start-stopped", "Start", busy, Some(IconName::Play)).on_click(
-                            cx.listener(move |this, _, _, cx| this.machines.update(cx, |machines, cx| machines.start(&start, cx))),
-                        ))),
+                        .child(div().flex().child(
+                            pill("start-stopped", "Start", busy, Some(IconName::Play), palette).on_click(cx.listener(
+                                move |this, _, _, cx| this.machines.update(cx, |machines, cx| machines.start(&start, cx)),
+                            )),
+                        )),
                 )
                 .into_any_element();
         }
@@ -938,6 +992,7 @@ impl Workspace {
     /// of the sidebar, with a forward on this computer's loopback for each
     /// port of a local one.
     fn render_ports(&self, cx: &mut Context<Self>) -> AnyElement {
+        let palette = self.palette;
         let ports = self.ports.read(cx);
         let local = ports.local();
         let pending = ports.pending.clone();
@@ -980,18 +1035,18 @@ impl Workspace {
                             .flex_col()
                             .gap_0p5()
                             .child(div().font_weight(gpui::FontWeight::MEDIUM).child(number.to_string()))
-                            .child(div().text_size(px(11.)).text_color(rgb(MUTED)).truncate().child(secondary));
+                            .child(div().text_size(px(11.)).text_color(rgb(palette.muted)).truncate().child(secondary));
                         let mut row = div()
                             .px_2p5()
                             .py_1()
                             .flex()
                             .items_center()
                             .gap_2()
-                            .when(index > 0, |row| row.border_t_1().border_color(rgb(DIVIDER)))
+                            .when(index > 0, |row| row.border_t_1().border_color(rgb(palette.divider)))
                             .child(match open {
                                 Some(url) => cell
                                     .cursor_pointer()
-                                    .hover(|cell| cell.bg(rgb(HOVER)))
+                                    .hover(|cell| cell.bg(rgb(palette.hover)))
                                     .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url)))
                                     .into_any_element(),
                                 None => cell.into_any_element(),
@@ -1002,7 +1057,7 @@ impl Workspace {
                                 None => ("Forward", IconName::ExternalLink),
                             };
                             row = row.child(
-                                port_action(SharedString::from(format!("forward-{number}")), label, icon)
+                                port_action(SharedString::from(format!("forward-{number}")), label, icon, palette)
                                     .when(busy, |button| button.opacity(0.5))
                                     .when(!busy, |button| {
                                         button.on_click(cx.listener(move |this, _, _, cx| {
@@ -1026,12 +1081,12 @@ impl Workspace {
             .flex_col()
             .gap_1()
             .border_t_1()
-            .border_color(rgb(DIVIDER))
+            .border_color(rgb(palette.divider))
             .pt_2()
             .pb_2()
-            .child(div().px_2p5().pb_1().text_size(LABEL_SIZE).text_color(rgb(FAINT)).child("Ports"))
+            .child(div().px_2p5().pb_1().text_size(LABEL_SIZE).text_color(rgb(palette.faint)).child("Ports"))
             .children(address.map(|address| {
-                div().px_2p5().text_size(px(11.)).text_color(rgb(MUTED)).truncate().child(address)
+                div().px_2p5().text_size(px(11.)).text_color(rgb(palette.muted)).truncate().child(address)
             }))
             .child(
                 div()
@@ -1044,22 +1099,37 @@ impl Workspace {
                                 .flex()
                                 .flex_col()
                                 .gap_0p5()
-                                .child(div().text_size(SMALL_TEXT_SIZE).text_color(rgb(MUTED)).child("No listening ports"))
-                                .child(div().text_size(px(11.)).text_color(rgb(FAINT)).child("Servers started inside the machine appear here.")),
+                                .child(
+                                    div()
+                                        .text_size(SMALL_TEXT_SIZE)
+                                        .text_color(rgb(palette.muted))
+                                        .child("No listening ports"),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .text_color(rgb(palette.faint))
+                                        .child("Servers started inside the machine appear here."),
+                                ),
                         )
                     })
                     .when(network.is_none() && error.is_none(), |list| {
                         list.child(
-                            div().px_2p5().pt_1().text_size(SMALL_TEXT_SIZE).text_color(rgb(MUTED)).child("Looking for ports…"),
+                            div()
+                                .px_2p5()
+                                .pt_1()
+                                .text_size(SMALL_TEXT_SIZE)
+                                .text_color(rgb(palette.muted))
+                                .child("Looking for ports…"),
                         )
                     })
                     .when(network.is_some() && !local, |list| {
-                        list.child(div().px_2p5().pt_1().text_size(px(11.)).text_color(rgb(FAINT)).child(
+                        list.child(div().px_2p5().pt_1().text_size(px(11.)).text_color(rgb(palette.faint)).child(
                             "Forwarding needs the machine on this computer; use vm ssh -L for a node.",
                         ))
                     })
                     .when_some(error, |list, error| {
-                        list.child(div().px_2p5().pt_1().text_size(px(11.)).text_color(rgb(FAINT)).child(error))
+                        list.child(div().px_2p5().pt_1().text_size(px(11.)).text_color(rgb(palette.faint)).child(error))
                     }),
             )
             .into_any_element()
@@ -1114,6 +1184,7 @@ impl Workspace {
 
     /// A window with a bar naming it and splitting or closing it.
     fn render_pane(&self, pane: Pane, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let palette = self.palette;
         let page = &self.pages[self.selected.as_ref().expect("panes belong to the selected machine")];
         let (title, focus, content) = match pane {
             Pane::Screen => {
@@ -1127,7 +1198,7 @@ impl Workspace {
                 let (shell, focus) = page.shells[&id].clone();
                 let ended = shell.read(cx).ended.is_some();
                 let title = format!("Terminal {id}{}", if ended { " · ended" } else { "" });
-                (title, focus.clone(), shell_view::render(shell, &focus, window, cx))
+                (title, focus.clone(), shell_view::render(shell, &focus, palette, window, cx))
             }
         };
         let focused = focus.contains_focused(window, cx);
@@ -1140,6 +1211,7 @@ impl Workspace {
                 SharedString::from(format!("{action}-{key}")),
                 icon,
                 cx.listener(move |this, _, window, cx| on_click(this, window, cx)),
+                palette,
             )
         };
         div()
@@ -1148,8 +1220,8 @@ impl Workspace {
             .flex_col()
             .rounded(CARD_RADIUS)
             .border_1()
-            .border_color(rgb(if focused { FAINT } else { BORDER }))
-            .bg(rgb(CARD))
+            .border_color(rgb(if focused { palette.faint } else { palette.border }))
+            .bg(rgb(palette.card))
             .overflow_hidden()
             .child(
                 div()
@@ -1161,7 +1233,7 @@ impl Workspace {
                     .items_center()
                     .gap_0p5()
                     .text_size(SMALL_TEXT_SIZE)
-                    .text_color(rgb(if focused { TEXT } else { MUTED }))
+                    .text_color(rgb(if focused { palette.text } else { palette.muted }))
                     .child(div().flex_1().truncate().child(title))
                     .child(button(
                         "split-right",
@@ -1279,7 +1351,8 @@ impl Workspace {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .text_color(rgb(MUTED))
+                        // The screen pane stays black in both appearances.
+                        .text_color(rgb(DARK.muted))
                         .child(error.unwrap_or_else(|| "Connecting to the screen…".to_owned())),
                 )
             })
@@ -1301,11 +1374,11 @@ impl Focusable for Workspace {
     }
 }
 
-fn render_notice(notice: &Notice, machines: &Entity<Machines>) -> impl IntoElement {
+fn render_notice(notice: &Notice, machines: &Entity<Machines>, palette: Palette) -> impl IntoElement {
     let machines = machines.clone();
     let color: Hsla = match notice.tone {
-        Tone::Done => rgb(TEXT).into(),
-        Tone::Error => rgb(DANGER).into(),
+        Tone::Done => rgb(palette.text).into(),
+        Tone::Error => rgb(palette.danger).into(),
     };
     div()
         .absolute()
@@ -1321,13 +1394,13 @@ fn render_notice(notice: &Notice, machines: &Entity<Machines>) -> impl IntoEleme
                 .items_center()
                 .gap_3()
                 .rounded(CARD_RADIUS)
-                .bg(rgb(CARD))
+                .bg(rgb(palette.card))
                 .border_1()
-                .border_color(rgb(BORDER))
+                .border_color(rgb(palette.border))
                 .cursor_pointer()
                 .text_color(color)
                 .child(div().flex_1().child(notice.text.clone()))
-                .child(Icon::new(IconName::Close).size(px(12.)).text_color(rgb(MUTED)))
+                .child(Icon::new(IconName::Close).size(px(12.)).text_color(rgb(palette.muted)))
                 .on_click(move |_, _, cx| machines.update(cx, |machines, cx| machines.dismiss_notice(cx))),
         )
 }
@@ -1337,29 +1410,29 @@ fn drag_area() -> gpui::Div {
     div().on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
 }
 
-fn heading(text: &'static str) -> impl IntoElement {
-    div().pt_1().text_size(HEADING_SIZE).font_weight(gpui::FontWeight::MEDIUM).text_color(rgb(MUTED)).child(text)
+fn heading(text: &'static str, palette: Palette) -> impl IntoElement {
+    div().pt_1().text_size(HEADING_SIZE).font_weight(gpui::FontWeight::MEDIUM).text_color(rgb(palette.muted)).child(text)
 }
 
-fn section_label(text: &'static str) -> impl IntoElement {
-    div().px_2p5().pt_3().pb_1().text_size(LABEL_SIZE).text_color(rgb(FAINT)).child(text)
+fn section_label(text: &'static str, palette: Palette) -> impl IntoElement {
+    div().px_2p5().pt_3().pb_1().text_size(LABEL_SIZE).text_color(rgb(palette.faint)).child(text)
 }
 
-fn card() -> gpui::Div {
-    div().bg(rgb(CARD)).rounded(CARD_RADIUS).overflow_hidden().flex().flex_col()
+fn card(palette: Palette) -> gpui::Div {
+    div().bg(rgb(palette.card)).rounded(CARD_RADIUS).overflow_hidden().flex().flex_col()
 }
 
 /// The row at `index` of a card of `count` rows: all but the first get a
 /// divider above, and the outer ones round with the card, since cards clip
 /// their rows only to their rectangle.
-fn row((index, count): (usize, usize)) -> gpui::Div {
+fn row((index, count): (usize, usize), palette: Palette) -> gpui::Div {
     div()
         .px_4()
         .py_2p5()
         .flex()
         .items_center()
         .gap_3()
-        .when(index > 0, |row| row.border_t_1().border_color(rgb(DIVIDER)))
+        .when(index > 0, |row| row.border_t_1().border_color(rgb(palette.divider)))
         .when(index == 0, |row| row.rounded_t(CARD_RADIUS))
         .when(index + 1 == count, |row| row.rounded_b(CARD_RADIUS))
 }
@@ -1370,6 +1443,7 @@ fn nav_row(
     label: &'static str,
     selected: bool,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    palette: Palette,
 ) -> impl IntoElement {
     div()
         .id(id)
@@ -1380,9 +1454,9 @@ fn nav_row(
         .gap_2p5()
         .rounded(ROW_RADIUS)
         .cursor_pointer()
-        .when(selected, |row| row.bg(rgb(SELECTED)))
-        .when(!selected, |row| row.hover(|row| row.bg(rgb(HOVER))))
-        .child(Icon::new(icon).size(ICON_SIZE).text_color(rgb(TEXT)))
+        .when(selected, |row| row.bg(rgb(palette.selected)))
+        .when(!selected, |row| row.hover(|row| row.bg(rgb(palette.hover))))
+        .child(Icon::new(icon).size(ICON_SIZE).text_color(rgb(palette.text)))
         .child(label)
         .on_click(on_click)
 }
@@ -1391,6 +1465,7 @@ fn icon_button(
     id: impl Into<gpui::ElementId>,
     icon: IconName,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    palette: Palette,
 ) -> impl IntoElement {
     div()
         .id(id)
@@ -1400,8 +1475,8 @@ fn icon_button(
         .justify_center()
         .rounded(px(6.))
         .cursor_pointer()
-        .hover(|button| button.bg(rgb(HOVER)))
-        .child(Icon::new(icon).size(ICON_SIZE).text_color(rgb(MUTED)))
+        .hover(|button| button.bg(rgb(palette.hover)))
+        .child(Icon::new(icon).size(ICON_SIZE).text_color(rgb(palette.muted)))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(on_click)
 }
@@ -1412,6 +1487,7 @@ fn pill(
     label: impl Into<SharedString>,
     busy: bool,
     icon: Option<IconName>,
+    palette: Palette,
 ) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
@@ -1423,16 +1499,16 @@ fn pill(
         .rounded_full()
         .text_size(SMALL_TEXT_SIZE)
         .border_1()
-        .border_color(rgb(BORDER))
+        .border_color(rgb(palette.border))
         .when(busy, |pill| pill.opacity(0.5))
-        .when(!busy, |pill| pill.cursor_pointer().hover(|pill| pill.bg(rgb(HOVER))))
+        .when(!busy, |pill| pill.cursor_pointer().hover(|pill| pill.bg(rgb(palette.hover))))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .children(icon.map(|icon| Icon::new(icon).size(px(12.))))
         .child(label.into())
 }
 
 /// Options side by side in one rounded track, the selected one raised.
-fn segmented(segments: impl IntoIterator<Item = gpui::Stateful<gpui::Div>>) -> impl IntoElement {
+fn segmented(segments: impl IntoIterator<Item = gpui::Stateful<gpui::Div>>, palette: Palette) -> impl IntoElement {
     div()
         .flex_none()
         .flex()
@@ -1441,11 +1517,16 @@ fn segmented(segments: impl IntoIterator<Item = gpui::Stateful<gpui::Div>>) -> i
         .gap(px(2.))
         .rounded_full()
         .border_1()
-        .border_color(rgb(BORDER))
+        .border_color(rgb(palette.border))
         .children(segments)
 }
 
-fn segment(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>, selected: bool) -> gpui::Stateful<gpui::Div> {
+fn segment(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<SharedString>,
+    selected: bool,
+    palette: Palette,
+) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .h(CONTROL_HEIGHT - px(6.))
@@ -1455,13 +1536,18 @@ fn segment(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>, selec
         .rounded_full()
         .text_size(SMALL_TEXT_SIZE)
         .cursor_pointer()
-        .when(selected, |segment| segment.bg(rgb(SELECTED)))
-        .when(!selected, |segment| segment.text_color(rgb(MUTED)).hover(|segment| segment.bg(rgb(HOVER))))
+        .when(selected, |segment| segment.bg(rgb(palette.selected)))
+        .when(!selected, |segment| segment.text_color(rgb(palette.muted)).hover(|segment| segment.bg(rgb(palette.hover))))
         .child(label.into())
 }
 
 /// A pill that is one of several choices.
-fn choice(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>, selected: bool) -> gpui::Stateful<gpui::Div> {
+fn choice(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<SharedString>,
+    selected: bool,
+    palette: Palette,
+) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .h(CONTROL_HEIGHT)
@@ -1472,20 +1558,22 @@ fn choice(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>, select
         .text_size(SMALL_TEXT_SIZE)
         .border_1()
         .cursor_pointer()
-        .when(selected, |pill| pill.bg(rgb(SELECTED)).border_color(rgb(SELECTED)))
-        .when(!selected, |pill| pill.border_color(rgb(BORDER)).text_color(rgb(MUTED)).hover(|pill| pill.bg(rgb(HOVER))))
+        .when(selected, |pill| pill.bg(rgb(palette.selected)).border_color(rgb(palette.selected)))
+        .when(!selected, |pill| {
+            pill.border_color(rgb(palette.border)).text_color(rgb(palette.muted)).hover(|pill| pill.bg(rgb(palette.hover)))
+        })
         .child(label.into())
 }
 
 /// The folders a machine mounts, beside its name.
-fn folder_label(folders: String) -> impl IntoElement {
+fn folder_label(folders: String, palette: Palette) -> impl IntoElement {
     div()
         .min_w_0()
         .flex()
         .items_center()
         .gap_1()
         .text_size(SMALL_TEXT_SIZE)
-        .text_color(rgb(FAINT))
+        .text_color(rgb(palette.faint))
         .child(Icon::new(IconName::Folder).size(px(12.)))
         .child(div().truncate().child(folders))
 }
@@ -1495,6 +1583,7 @@ fn quiet_button(
     id: impl Into<gpui::ElementId>,
     label: impl Into<SharedString>,
     icon: IconName,
+    palette: Palette,
 ) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
@@ -1506,9 +1595,9 @@ fn quiet_button(
         .gap_1p5()
         .rounded_full()
         .text_size(SMALL_TEXT_SIZE)
-        .text_color(rgb(MUTED))
+        .text_color(rgb(palette.muted))
         .cursor_pointer()
-        .hover(|button| button.bg(rgb(HOVER)).text_color(rgb(TEXT)))
+        .hover(|button| button.bg(rgb(palette.hover)).text_color(rgb(palette.text)))
         .child(Icon::new(icon).size(px(12.)))
         .child(label.into())
 }
@@ -1519,6 +1608,7 @@ fn port_action(
     id: impl Into<gpui::ElementId>,
     label: &'static str,
     icon: IconName,
+    palette: Palette,
 ) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
@@ -1530,11 +1620,11 @@ fn port_action(
         .gap_1()
         .rounded_full()
         .border_1()
-        .border_color(rgb(BORDER))
+        .border_color(rgb(palette.border))
         .text_size(px(11.))
-        .text_color(rgb(MUTED))
+        .text_color(rgb(palette.muted))
         .cursor_pointer()
-        .hover(|button| button.bg(rgb(HOVER)).text_color(rgb(TEXT)))
+        .hover(|button| button.bg(rgb(palette.hover)).text_color(rgb(palette.text)))
         .child(Icon::new(icon).size(px(11.)))
         .child(label)
 }
@@ -1543,6 +1633,7 @@ fn port_action(
 fn folder_chip(
     folder: &std::path::Path,
     on_clear: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    palette: Palette,
 ) -> AnyElement {
     div()
         .flex_none()
@@ -1555,18 +1646,18 @@ fn folder_chip(
         .gap_1p5()
         .rounded_full()
         .text_size(SMALL_TEXT_SIZE)
-        .bg(rgb(SELECTED))
+        .bg(rgb(palette.selected))
         .child(Icon::new(IconName::Folder).size(px(12.)).flex_none())
         .child(div().min_w_0().truncate().child(machines::home_relative(folder)))
-        .child(icon_button("clear-folder", IconName::Close, on_clear))
+        .child(icon_button("clear-folder", IconName::Close, on_clear, palette))
         .into_any_element()
 }
 
-fn status_dot(machine: &Machine) -> impl IntoElement {
+fn status_dot(machine: &Machine, palette: Palette) -> impl IntoElement {
     let color = match machine.vm.suspended {
-        Some(true) => rgb(SUSPENDED),
-        Some(false) => rgb(RUNNING),
-        None => rgb(FAINT),
+        Some(true) => rgb(palette.suspended),
+        Some(false) => rgb(palette.running),
+        None => rgb(palette.faint),
     };
     div().size(px(6.)).flex_none().rounded_full().bg(color)
 }
@@ -1580,13 +1671,13 @@ fn state_label(machine: &Machine) -> &'static str {
 }
 
 /// How full something is, from 0 to 1.
-fn meter(fraction: f64) -> impl IntoElement {
+fn meter(fraction: f64, palette: Palette) -> impl IntoElement {
     div()
         .w(px(96.))
         .h(px(6.))
         .rounded_full()
-        .bg(rgb(SELECTED))
-        .child(div().h_full().rounded_full().bg(rgb(MUTED)).w(px(96. * fraction.clamp(0., 1.) as f32)))
+        .bg(rgb(palette.selected))
+        .child(div().h_full().rounded_full().bg(rgb(palette.muted)).w(px(96. * fraction.clamp(0., 1.) as f32)))
 }
 
 fn gib(bytes: u64) -> String {
