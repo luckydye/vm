@@ -19,7 +19,7 @@ vm-fdt = "0.3.0"
 zstd = "0.13"
 uuid = { version = "1", features = ["v4"] }
 gpui = { package = "gpui-pre", version = "=0.3.11" }
-gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11", features = ["font-kit"] }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11", features = ["font-kit", "wayland"] }
 gpui-component = "0.9.0"
 gpui-kit-assets = "0.9.0"
 # Frames for gpui images; gpui uses it without re-exporting it.
