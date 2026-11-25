@@ -1,12 +1,21 @@
 Copyright (c) 2026 David Grinberg
+Copyright (c) 2026 Tim Havlicek
 
 vm is free software: you can redistribute it and/or modify it
-under the terms of the GNU General Public License, version 3.
+under the terms of the GNU General Public License as published by
+the Free Software Foundation, version 3 of the License.
 
-vm is derived from varmint (https://github.com/kisasexypantera94/varmint),
-which is released under the same license:
+vm is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public
+License for more details.
 
-varmint is free software: you can redistribute it and/or modify it
-under the terms of the GNU General Public License, version 3.
+You should have received a copy of the GNU General Public License
+along with vm. If not, see <https://www.gnu.org/licenses/>.
+
+vm is derived from varmint
+(https://github.com/kisasexypantera94/varmint), Copyright (c) 2026
+David Grinberg, and is distributed under the same license. Changes
+made for vm are Copyright (c) 2026 Tim Havlicek.
 
 See COPYING for the full license text.

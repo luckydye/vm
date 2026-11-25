@@ -4,8 +4,6 @@
 
 <h1 align="center">vm</h1>
 
-<hr>
-
 <p align="center">
   <strong>Disposable Linux VMs for coding agents.</strong><br>
   A clean Linux machine in a second.
@@ -100,4 +98,4 @@ VMs are reflink clones, so `~/.vm` must be on APFS, Btrfs or XFS.
 
 ## License
 
-GPL-3.0-or-later. See [LICENSE](LICENSE).
+GPL-3.0-only. See [LICENSE](LICENSE).
