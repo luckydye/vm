@@ -11,9 +11,12 @@ use crate::{
     cli,
     display::{Decoded, H264Decoder},
     node::{self, Target},
-    protocol::{Codec, InputEvent, Request, stream_kind, write_json},
+    protocol::{Codec, InputEvent, Request, Session, kind, read_frame, stream_kind, write_json},
 };
-use gpui::{AppContext, AsyncApp, Bounds, Context, Pixels, Point, RenderImage, Size, Task, WeakEntity, point, size};
+use gpui::{
+    AppContext, AsyncApp, Bounds, Context, CursorStyle, Pixels, Point, RenderImage, Size, Task, WeakEntity, point,
+    size,
+};
 use image::{Frame, RgbaImage};
 use std::{
     io::{self, Read},
@@ -27,6 +30,9 @@ const FPS: u32 = 60;
 /// How long the pane keeps a size before the guest is asked to take it, so
 /// dragging the window does not resize the guest on every step.
 const RESIZE_DELAY: Duration = Duration::from_millis(300);
+
+/// The guest program that prints the pointer shape Hyprland shows.
+const CURSOR: &str = "/usr/local/libexec/varmint-cursor";
 
 /// What the input thread does, in the order it is asked.
 enum Command {
@@ -44,12 +50,15 @@ pub struct Display {
     pub screen: Size<u32>,
     /// Why the stream ended.
     pub error: Option<String>,
+    /// The pointer the guest shows over its screen, which the host draws.
+    pub cursor: CursorStyle,
     input: Option<mpsc::Sender<Command>>,
     /// The pane size last asked of the guest, in device pixels.
     requested: Option<Size<u32>>,
     /// Plays the sound while the display is open.
     _speakers: Option<Backend>,
     _stream: Option<Task<()>>,
+    _cursor: Option<Task<()>>,
     resize: Option<Task<()>>,
 }
 
@@ -76,12 +85,16 @@ impl Display {
             frame: None,
             screen: size(0, 0),
             error: None,
+            cursor: CursorStyle::Arrow,
             input: None,
             requested: None,
             _speakers: None,
             _stream: None,
+            _cursor: None,
             resize: None,
         };
+        let cursor_name = name.clone();
+        display._cursor = Some(cx.spawn(async move |this, cx| stream_cursor(cursor_name, this, cx).await));
         let (speakers, sink) = match Backend::new(true, Arc::new(audio::Listeners::default()), |_| {}) {
             Ok(opened) => opened,
             Err(error) => {
@@ -229,6 +242,79 @@ async fn stream(name: String, sink: PeriodSink, this: WeakEntity<Display>, cx: &
         if updated.is_err() {
             return "the display closed".to_owned();
         }
+    }
+}
+
+/// Sends the pointer shape the guest shows, so the host can draw it while the
+/// guest's own cursor is on the virtio-gpu cursor plane, which varmint does
+/// not render.
+async fn stream_cursor(name: String, this: WeakEntity<Display>, cx: &mut AsyncApp) {
+    let opened = cx
+        .background_spawn(async move {
+            let target = Target::resolve(&name)?;
+            node::request(&target, &Request::Open { session: Session::Exec { argv: vec![CURSOR.to_owned()] } })
+        })
+        .await;
+    let Ok(control) = opened else {
+        return;
+    };
+    let mut reader = control.reader;
+    let mut pending = String::new();
+    loop {
+        let (frame, returned) = cx
+            .background_spawn(async move {
+                let frame = read_frame(&mut reader);
+                (frame, reader)
+            })
+            .await;
+        reader = returned;
+        let frame = match frame {
+            Ok(Some(frame)) => frame,
+            _ => return,
+        };
+        match frame.kind {
+            kind::DATA => {
+                pending.push_str(&String::from_utf8_lossy(&frame.payload));
+                while let Some(end) = pending.find('\n') {
+                    let line: String = pending.drain(..=end).collect();
+                    let cursor = cursor_style(line.trim_end());
+                    this.update(cx, |this, cx| {
+                        if this.cursor != cursor {
+                            this.cursor = cursor;
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                }
+            }
+            kind::EXIT => return,
+            _ => {}
+        }
+    }
+}
+
+/// The host pointer for a cursor shape name from the guest.
+fn cursor_style(name: &str) -> CursorStyle {
+    match name {
+        "pointer" => CursorStyle::PointingHand,
+        "text" => CursorStyle::IBeam,
+        "vertical-text" => CursorStyle::IBeamCursorForVerticalLayout,
+        "crosshair" | "cell" => CursorStyle::Crosshair,
+        "grab" => CursorStyle::OpenHand,
+        "grabbing" => CursorStyle::ClosedHand,
+        "e-resize" => CursorStyle::ResizeRight,
+        "w-resize" => CursorStyle::ResizeLeft,
+        "n-resize" => CursorStyle::ResizeUp,
+        "s-resize" => CursorStyle::ResizeDown,
+        "ew-resize" | "col-resize" => CursorStyle::ResizeLeftRight,
+        "ns-resize" | "row-resize" => CursorStyle::ResizeUpDown,
+        "nesw-resize" | "ne-resize" | "sw-resize" => CursorStyle::ResizeUpLeftDownRight,
+        "nwse-resize" | "nw-resize" | "se-resize" => CursorStyle::ResizeUpRightDownLeft,
+        "not-allowed" | "no-drop" => CursorStyle::OperationNotAllowed,
+        "alias" => CursorStyle::DragLink,
+        "copy" => CursorStyle::DragCopy,
+        "context-menu" => CursorStyle::ContextualMenu,
+        _ => CursorStyle::Arrow,
     }
 }
 

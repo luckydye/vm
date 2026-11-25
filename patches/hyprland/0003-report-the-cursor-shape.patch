@@ -1,0 +1,32 @@
+diff --git a/src/render/Renderer.cpp b/src/render/Renderer.cpp
+--- a/src/render/Renderer.cpp
++++ b/src/render/Renderer.cpp
+@@ -4,7 +4,9 @@
+ #include <algorithm>
+ #include <aquamarine/output/Output.hpp>
+ #include <cmath>
++#include <cstdlib>
+ #include <filesystem>
++#include <fstream>
+ #include "../config/ConfigValue.hpp"
+ #include "../config/legacy/ConfigManager.hpp"
+ #include "../managers/CursorManager.hpp"
+@@ -2829,6 +2831,18 @@
+     };
+ 
+     const auto newShape = getShapeOrDefault(name);
++
++    // varmint: publish the shape so the host can draw the pointer.
++    if (const auto RUNTIME = getenv("XDG_RUNTIME_DIR"); RUNTIME) {
++        const auto PATH = std::string{RUNTIME} + "/varmint-cursor";
++        const auto TMP  = PATH + ".tmp";
++        {
++            std::ofstream file(TMP, std::ios::trunc);
++            file << CURSOR_SHAPE_NAMES[newShape] << '\n';
++        }
++        std::error_code error;
++        std::filesystem::rename(TMP, PATH, error);
++    }
+ 
+     if (newShape != m_lastCursorData.shape) {
+         m_lastCursorData.shapePrevious = m_lastCursorData.shape;

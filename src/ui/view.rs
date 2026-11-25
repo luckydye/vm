@@ -1311,7 +1311,7 @@ impl Workspace {
             .bg(gpui::black())
             .overflow_hidden()
             .relative()
-            .cursor(gpui::CursorStyle::Arrow)
+            .cursor(state.cursor)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                 // Ctrl+V first puts the host clipboard into the guest's, so it pastes that.
                 if event.keystroke.modifiers.control && event.keystroke.key == "v" && !event.is_held {

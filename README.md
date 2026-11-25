@@ -193,7 +193,7 @@ vm pull $vm                   # fetch the VM's branches into the current repo as
 `pull` fetches through git's `ext::` transport over `vm run` and works any time while the VM runs, so you push from the host with your own credentials.
 
 ## Screen and input
-`vm ui` opens a window with the VMs of this machine and every node. It starts, stops, creates and deletes them, and shows the selected VM's screen with mouse, keyboard, sound and clipboard. The sidebar shows the selected VM's kind, CPU, memory, disk and display, plus a running VM's addresses and listening ports; click a port to open it in the browser or forward it to this computer's localhost. ⌘B (Ctrl+B on Linux) hides the sidebar. Its light and dark themes follow the host's appearance, in its own chrome, its terminals and the VM's Hyprland desktop.
+`vm ui` opens a window with the VMs of this machine and every node. It starts, stops, creates and deletes them, and shows the selected VM's screen with mouse, keyboard, sound and clipboard. The sidebar shows the selected VM's kind, CPU, memory, disk and display, plus a running VM's addresses and listening ports; click a port to open it in the browser or forward it to this computer's localhost. ⌘B (Ctrl+B on Linux) hides the sidebar. Its light and dark themes follow the host's appearance, in its own chrome, its terminals and the VM's Hyprland desktop, and its pointer follows the shape the VM shows.
 
 From the CLI, coordinates are screenshot pixels:
 
