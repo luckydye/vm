@@ -6,6 +6,7 @@
 
 use super::{
     ToggleSidebar,
+    appearance,
     display::{self, Display},
     layout::{self, Axis, Node, Pane, Step},
     machines::{self, Machine, Machines, NewMachine, Notice, PRESETS, Preset, Tone},
@@ -25,7 +26,7 @@ use gpui::{
     Pixels, ScrollDelta, ScrollEvent, SharedString, Subscription, Window, canvas, div, prelude::*, px, rgb, size,
 };
 use gpui_component::{
-    Icon, Sizable, WindowExt,
+    Icon, Sizable, ThemeMode, WindowExt,
     button::{Button, ButtonRounded, ButtonVariant},
     input::{Input, InputEvent as TextEvent, InputState},
     menu::{DropdownMenu, PopupMenuItem},
@@ -34,7 +35,7 @@ use gpui_component::{
 use gpui_kit_assets::IconName;
 use std::{
     cell::{Cell, RefCell},
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     path::PathBuf,
     rc::Rc,
 };
@@ -115,6 +116,11 @@ pub struct Workspace {
     sidebar_open: bool,
     /// The host's appearance, whose palette colors the window.
     palette: Palette,
+    /// Whether that appearance is dark, for the guests' desktops. Shared with
+    /// the sends in flight, so a change while they run reaches them too.
+    dark: Rc<Cell<bool>>,
+    /// The running machines whose desktops were already given the appearance.
+    themed: HashSet<String>,
     new_name: Entity<InputState>,
     new_preset: Preset,
     new_persist: bool,
@@ -163,6 +169,8 @@ impl Workspace {
             splits: Rc::new(RefCell::new(HashMap::new())),
             sidebar_open: true,
             palette: Palette::of(window.appearance()),
+            dark: Rc::new(Cell::new(ThemeMode::from(window.appearance()).is_dark())),
+            themed: HashSet::new(),
             new_name,
             new_preset: PRESETS[1],
             new_persist: false,
@@ -236,16 +244,27 @@ impl Workspace {
     /// Keeps a page for each running machine, and the selected machine's
     /// screen open while its page shows it.
     fn follow_machines(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let machines = self.machines.read(cx);
-        let running = |name: &str| machines.find(name).is_some_and(|machine| machine.vm.running);
-        // Forwards end with their machine, whether it stopped or is gone.
-        if machines.loaded {
+        let (loaded, found, running, selected, local_running) = {
+            let machines = self.machines.read(cx);
+            let is_running = |name: &str| machines.find(name).is_some_and(|machine| machine.vm.running);
+            let running: HashSet<String> = machines
+                .machines
+                .iter()
+                .filter(|machine| machine.vm.running)
+                .map(|machine| machine.name.clone())
+                .collect();
             let local_running: Vec<String> = machines
                 .machines
                 .iter()
                 .filter(|machine| machine.node.is_none() && machine.vm.running)
                 .map(|machine| machine.short_name().to_owned())
                 .collect();
+            let found = self.selected.as_deref().is_some_and(|name| machines.find(name).is_some());
+            let selected = self.selected.clone().filter(|name| is_running(name));
+            (machines.loaded, found, running, selected, local_running)
+        };
+        // Forwards end with their machine, whether it stopped or is gone.
+        if loaded {
             // Off the UI thread, as stopping a forward waits for its listener to close.
             cx.background_spawn(async move {
                 crate::serve::forward::retain(&local_running.iter().map(String::as_str).collect::<Vec<_>>());
@@ -253,11 +272,10 @@ impl Workspace {
             .detach();
         }
         // Terminals end with their machine.
-        self.pages.retain(|name, _| running(name));
-        if machines.loaded && self.selected.as_deref().is_some_and(|name| machines.find(name).is_none()) {
+        self.pages.retain(|name, _| running.contains(name));
+        if loaded && self.selected.is_some() && !found {
             self.selected = None;
         }
-        let selected = self.selected.clone().filter(|name| running(name));
         // The guest is asked for its ports only while the sidebar shows them,
         // so hiding it does not keep the machine from suspending when idle.
         let ports_machine = match self.sidebar_open {
@@ -286,6 +304,7 @@ impl Workspace {
             _ => {}
         }
         self.ports.update(cx, |ports, cx| ports.follow(ports_machine, cx));
+        self.show_appearances(cx);
         cx.notify();
     }
 
@@ -365,17 +384,44 @@ impl Workspace {
         self.follow_machines(window, cx);
     }
 
-    /// Repaints the window and its terminals in the host's new appearance.
+    /// Repaints the window, its terminals and the guests' desktops in the
+    /// host's new appearance.
     fn follow_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let palette = Palette::of(window.appearance());
         self.palette = palette;
+        self.dark.set(ThemeMode::from(window.appearance()).is_dark());
         for page in self.pages.values() {
             for (shell, _) in page.shells.values() {
                 shell.update(cx, |shell, cx| shell.set_palette(palette, cx));
             }
         }
+        self.themed.clear();
+        self.show_appearances(cx);
         theme::apply(window.appearance(), cx);
         cx.notify();
+    }
+
+    /// Sends the host's appearance to each machine's desktop that does not
+    /// show it yet, such as one that just started.
+    fn show_appearances(&mut self, cx: &mut Context<Self>) {
+        let dark = self.dark.clone();
+        let running: Vec<String> = {
+            let machines = self.machines.read(cx);
+            machines
+                .machines
+                .iter()
+                .filter(|machine| machine.vm.suspended == Some(false))
+                .map(|machine| machine.name.clone())
+                .collect()
+        };
+        self.themed.retain(|name| running.contains(name));
+        for name in running {
+            if !self.themed.insert(name.clone()) {
+                continue;
+            }
+            let dark = dark.clone();
+            cx.spawn(async move |_, cx| appearance::show(name, dark, cx).await).detach();
+        }
     }
 
     fn send(&self, event: InputEvent, cx: &mut Context<Self>) {

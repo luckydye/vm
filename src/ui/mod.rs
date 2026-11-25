@@ -1,6 +1,7 @@
 //! `vm ui`: a window with the machines of this computer and of every node,
 //! their screens, and the actions of the CLI.
 
+mod appearance;
 mod display;
 mod layout;
 mod machines;

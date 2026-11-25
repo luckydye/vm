@@ -82,6 +82,7 @@ apt-get install -y --no-install-recommends \
     podman \
     podman-compose \
     podman-docker \
+    procps \
     pulseaudio \
     pulseaudio-utils \
     python3 \

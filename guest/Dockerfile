@@ -119,6 +119,7 @@ RUN install -Dm0755 /opt/varmint/source/build-image-container.sh /usr/local/bin/
     install -Dm0755 /opt/varmint/source/varmint-hyprctl /opt/varmint/rootfs/usr/local/bin/hyprctl && \
     install -Dm0755 /opt/varmint/source/varmint-agent /opt/varmint/rootfs/usr/local/libexec/varmint-agent && \
     install -Dm0755 /opt/varmint/source/varmint-clipboard-agent /opt/varmint/rootfs/usr/local/libexec/varmint-clipboard-agent && \
+    install -Dm0755 /opt/varmint/source/varmint-appearance /opt/varmint/rootfs/usr/local/libexec/varmint-appearance && \
     install -Dm0755 /opt/varmint/source/varmint-display-fit /opt/varmint/rootfs/usr/local/libexec/varmint-display-fit && \
     install -Dm0755 /opt/varmint/source/varmint-grow-root /opt/varmint/rootfs/usr/local/libexec/varmint-grow-root && \
     install -Dm0755 /opt/varmint/source/varmint-provision /opt/varmint/rootfs/usr/local/libexec/varmint-provision && \
@@ -135,6 +136,7 @@ RUN install -Dm0755 /opt/varmint/source/build-image-container.sh /usr/local/bin/
     install -Dm0644 /opt/varmint/source/varmint-reclaim.service /opt/varmint/rootfs/etc/systemd/system/varmint-reclaim.service && \
     install -Dm0644 /opt/varmint/source/varmint-reclaim.timer /opt/varmint/rootfs/etc/systemd/system/varmint-reclaim.timer && \
     install -Dm0644 /opt/varmint/source/hyprland.conf /opt/varmint/rootfs/etc/skel/.config/hypr/hyprland.conf && \
+    install -Dm0644 /opt/varmint/source/varmint-appearance.conf /opt/varmint/rootfs/etc/skel/.config/hypr/varmint-appearance.conf && \
     rm -rf /opt/varmint/source
 
 ENTRYPOINT ["/usr/local/bin/build-varmint-guest"]
