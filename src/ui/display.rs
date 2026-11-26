@@ -246,8 +246,7 @@ async fn stream(name: String, sink: PeriodSink, this: WeakEntity<Display>, cx: &
 }
 
 /// Sends the pointer shape the guest shows, so the host can draw it while the
-/// guest's own cursor is on the virtio-gpu cursor plane, which varmint does
-/// not render.
+/// guest keeps its own cursor out of the screen.
 async fn stream_cursor(name: String, this: WeakEntity<Display>, cx: &mut AsyncApp) {
     let opened = cx
         .background_spawn(async move {
