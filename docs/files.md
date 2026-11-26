@@ -10,7 +10,7 @@ vm run --mount ~/project:/work --mount ~/datasets:data:ro
 
 ## Seeds
 
-Seeds copy host files or directories into the VM at start, one way: changes in the VM never reach the host. A directory in a git work tree leaves out what `.gitignore` ignores but keeps `.git`. The contents of the `~/.vm/seeds` directory go into the guest home of every VM, with symlinks followed and file modes kept; pass `--seed HOST:GUEST` for one run. Commands in the guest's `~/bin` are on `PATH`, so a script in `~/.vm/seeds/bin` runs by name:
+Seeds copy host files or directories into the VM at start, one way: changes in the VM never reach the host. A directory is copied as it is. The contents of the `~/.vm/seeds` directory go into the guest home of every VM, with symlinks followed and file modes kept; pass `--seed HOST:GUEST` for one run. Commands in the guest's `~/bin` are on `PATH`, so a script in `~/.vm/seeds/bin` runs by name:
 
 ```sh
 mkdir -p ~/.vm/seeds/.claude ~/.vm/seeds/.ssh ~/.vm/seeds/bin

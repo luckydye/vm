@@ -54,7 +54,7 @@ vm=$(vm run --seed .:work)     # a copy of this directory at ~/work
 vm=$(vm run --mount .:work)    # the directory itself, shared at ~/work
 ```
 
-A seed is a one-way copy, so whatever runs in the VM cannot touch your files; it skips what `.gitignore` ignores but keeps `.git`. A mount is the live directory: edits and git commits land on the host as you make them. Seeds suit coding agents, mounts suit working in the VM yourself.
+A seed is a one-way copy, so whatever runs in the VM cannot touch your files; the directory is copied as it is. A mount is the live directory: edits and git commits land on the host as you make them. Seeds suit coding agents, mounts suit working in the VM yourself.
 
 **3. Run your tools.** The guest has Debian, [mise](https://mise.jdx.dev), Claude Code and OpenCode, passwordless `sudo` and podman:
 
