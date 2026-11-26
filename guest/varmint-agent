@@ -30,7 +30,7 @@ PORT = "/dev/virtio-ports/agent"
 USER = "varmint"
 # Variables from varmint run --env and varmint serve, for every session.
 ENVIRONMENT_FILE = "/run/varmint/environment"
-# Appends the environment briefing below the user's seeded agent instructions.
+# Writes every agent's global instructions from the user's and the VM's text.
 INSTRUCTIONS = "/usr/local/libexec/varmint-instructions"
 HOST_ENVIRONMENT = {}
 HEADER = struct.Struct("<IBI")
@@ -739,7 +739,7 @@ def copy_seeds(seeds, account):
 
 
 def compose_instructions(account):
-    """Appends the environment briefing below the user's agent instructions; returns errors."""
+    """Writes every agent's global instructions after the seeds are copied; returns errors."""
     result = subprocess.run(
         ["/usr/sbin/runuser", "-u", USER, "--", INSTRUCTIONS, account.pw_dir],
         stdout=subprocess.PIPE,

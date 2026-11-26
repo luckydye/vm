@@ -208,9 +208,9 @@ sudo -H -u varmint sh -c 'mkdir -p ~/.claude && cat > ~/.claude/settings.json' <
 }
 EOF_CLAUDE_SETTINGS
 # Every coding agent gets the same environment briefing, kept outside the home
-# directory so seeds cannot replace it. It is appended below whatever the user
-# seeded or wrote; seeds are copied before every start, and varmint-agent runs
-# this again afterwards.
+# directory so seeds cannot replace it. It is written below whatever the user
+# seeded or wrote in ~/.config/varmint/AGENTS.md; varmint-agent does this again
+# after copying the seeds.
 if [ "$arch" = arm64 ]; then
     echo '- x86-64 binaries run through FEX (`FEX`, `FEXBash`).' >> /usr/local/share/varmint/AGENTS.md
 fi
