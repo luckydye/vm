@@ -176,10 +176,16 @@ pub fn guest_position(position: Point<Pixels>, drawn: Bounds<Pixels>, screen: Si
 
 /// Shows frames and plays sound until the stream ends, and returns why it did.
 async fn stream(name: String, sink: PeriodSink, this: WeakEntity<Display>, cx: &mut AsyncApp) -> String {
-    let request = Request::Stream { fps: FPS, codec: Codec::H264, audio: true };
     let opened = cx
         .background_spawn(async move {
             let target = Target::resolve(&name)?;
+            // A client on this host takes the scanout as it is; a node's
+            // machine gets H.264 because the stream crosses a network.
+            let codec = match target.node() {
+                Some(_) => Codec::H264,
+                None => Codec::Bgra,
+            };
+            let request = Request::Stream { fps: FPS, codec, audio: true };
             let reader = node::request(&target, &request)?.reader;
             Ok::<_, String>((reader, open_input(&target)?, OpusDecoder::new()?))
         })
@@ -323,6 +329,15 @@ fn read_message(media: &mut Media) -> Result<Message, String> {
     let mut kind = [0u8];
     media.reader.read_exact(&mut kind).map_err(ended)?;
     match kind[0] {
+        stream_kind::RAW => {
+            let mut header = [0u8; 8];
+            media.reader.read_exact(&mut header).map_err(ended)?;
+            let width = u32::from_le_bytes(header[0..4].try_into().unwrap());
+            let height = u32::from_le_bytes(header[4..8].try_into().unwrap());
+            let mut bgra = vec![0; width as usize * height as usize * 4];
+            media.reader.read_exact(&mut bgra).map_err(ended)?;
+            Ok(Message::Video(Decoded { width, height, bgra }))
+        }
         stream_kind::VIDEO => {
             // Width and height, whether it is a keyframe, then the length.
             let mut header = [0u8; 13];

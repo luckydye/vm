@@ -41,6 +41,11 @@ const AUDIO_STOP_INTERVAL: Duration = Duration::from_millis(500);
 /// How often the video of a stream checks whether its client left, while the screen is still.
 const HANG_UP_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 
+/// Bytes a raw screen stream may queue in its socket. A frame is larger than
+/// this, so the writer waits for the client to take it instead of piling up
+/// frames that would arrive late.
+const RAW_QUEUE_BYTES: libc::c_int = 4 * 1024 * 1024;
+
 pub struct Context<'a> {
     pub suspend: &'a Suspend,
     pub display: &'a Mutex<DisplayBuffer>,
@@ -113,12 +118,20 @@ fn handle(connection: UnixStream, context: &Context<'_>) -> io::Result<()> {
             }
         }
         Request::Stream { fps, codec, audio } => {
-            protocol::set_socket_option(&writer, libc::SOL_SOCKET, libc::SO_SNDBUF, protocol::STREAM_QUEUE_BYTES)?;
+            let queue = match codec {
+                Codec::Bgra => RAW_QUEUE_BYTES,
+                Codec::Rgb | Codec::H264 => protocol::STREAM_QUEUE_BYTES,
+            };
+            protocol::set_socket_option(&writer, libc::SOL_SOCKET, libc::SO_SNDBUF, queue)?;
             match codec {
                 Codec::Rgb if audio => reply_error(&mut writer, "audio needs the h264 codec".to_owned()),
                 Codec::Rgb => {
                     protocol::write_json(&mut writer, &Reply::default())?;
                     stream(&mut writer, fps, context)
+                }
+                Codec::Bgra => {
+                    protocol::write_json(&mut writer, &Reply::default())?;
+                    stream_bgra(&writer, audio, context)
                 }
                 Codec::H264 => {
                     protocol::write_json(&mut writer, &Reply::default())?;
@@ -460,6 +473,52 @@ fn stream_video(writer: &Mutex<&UnixStream>, fps: u32, context: &Context<'_>) ->
             last_sent = Some(tick);
             settle_at = changed.then(|| tick + SETTLE_DELAY);
         }
+    }
+    Ok(())
+}
+
+/// Like `stream_h264`, with the scanout's BGRA pixels sent as they are, for a
+/// client on this host: no encode, no decode, and no wait for a frame tick.
+fn stream_bgra(writer: &UnixStream, audio: bool, context: &Context<'_>) -> io::Result<()> {
+    let writer = Mutex::new(writer);
+    let ended = AtomicBool::new(false);
+    thread::scope(|scope| {
+        let sound = audio.then(|| scope.spawn(|| stream_opus(&writer, &ended, context)));
+        let video = stream_bgra_frames(&writer, context);
+        ended.store(true, Ordering::Release);
+        video?;
+        sound.map_or(Ok(()), |sound| sound.join().expect("audio stream panicked"))
+    })
+}
+
+/// Sends the scanout as soon as the guest presents it, as a `RAW` message.
+fn stream_bgra_frames(writer: &Mutex<&UnixStream>, context: &Context<'_>) -> io::Result<()> {
+    let mut last_sequence = None;
+    let mut pixels = Vec::new();
+    while !hung_up(&writer.lock().unwrap()) {
+        let capture = {
+            let display = context.display.lock().unwrap();
+            let (display, _) = display::PRESENTED
+                .wait_timeout_while(display, HANG_UP_CHECK_INTERVAL, |display| last_sequence == Some(display.sequence()))
+                .unwrap();
+            if last_sequence == Some(display.sequence()) {
+                None
+            } else {
+                last_sequence = Some(display.sequence());
+                display.capture()
+            }
+        };
+        let Some(capture) = capture else { continue };
+        let (width, height) = capture.size();
+        pixels.resize(width * height * 4, 0);
+        capture.copy_bgra(&mut pixels, width * 4).map_err(io::Error::other)?;
+        let mut header = [0u8; 9];
+        header[0] = stream_kind::RAW;
+        header[1..5].copy_from_slice(&(width as u32).to_le_bytes());
+        header[5..9].copy_from_slice(&(height as u32).to_le_bytes());
+        let mut writer = writer.lock().unwrap();
+        writer.write_all(&header)?;
+        writer.write_all(&pixels)?;
     }
     Ok(())
 }

@@ -68,6 +68,9 @@ pub mod kind {
 pub mod stream_kind {
     pub const VIDEO: u8 = 0;
     pub const AUDIO: u8 = 1;
+    /// A frame the client draws itself: a little-endian u32 width and height,
+    /// then that many tightly packed BGRA pixels.
+    pub const RAW: u8 = 2;
 }
 
 const HEADER_LEN: usize = 9;
@@ -158,7 +161,8 @@ pub enum Request {
     Screenshot,
     /// A frame whenever the screen changes, at most `fps` per second, each
     /// starting with little-endian u32 width and height. See [`Codec`].
-    /// `audio` adds the guest's sound to H.264 streams.
+    /// `audio` adds the guest's sound to H.264 streams. A [`Codec::Bgra`]
+    /// stream sends every frame the guest presents instead of capping at `fps`.
     Stream {
         fps: u32,
         codec: Codec,
@@ -188,6 +192,10 @@ pub enum Request {
 pub enum Codec {
     /// Packed RGB rows, for local clients that draw pixels themselves.
     Rgb,
+    /// Packed BGRA rows in [`stream_kind::RAW`] messages, with the guest's
+    /// sound beside them: no codec between a client on this host and the
+    /// scanout, which already is BGRA.
+    Bgra,
     /// Messages that each start with a u8 [`stream_kind`]. Video follows with
     /// the size, a u8 that is 1 for keyframes, a little-endian u32 length and
     /// an H.264 access unit in Annex B form, the first one a keyframe with its
