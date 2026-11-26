@@ -33,7 +33,6 @@ impl Capture {
     }
 
     /// Copies the BGRA rows into `destination`, whose rows are `stride` bytes apart.
-    #[cfg(target_os = "macos")]
     pub fn copy_bgra(&self, destination: &mut [u8], stride: usize) -> Result<(), String> {
         let (width, height) = self.size();
         self.with_bgra(|bytes, source_stride| {
