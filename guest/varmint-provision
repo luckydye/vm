@@ -207,51 +207,14 @@ sudo -H -u varmint sh -c 'mkdir -p ~/.claude && cat > ~/.claude/settings.json' <
   "skipDangerousModePermissionPrompt": true
 }
 EOF_CLAUDE_SETTINGS
-# Every coding agent reads the same environment briefing, ~/AGENTS.md. Link
-# it as each agent's global instructions file, so it applies outside the home
-# directory too. Claude Code's user-level file is ~/.claude/CLAUDE.md, Codex
-# and OpenCode read AGENTS.md from their config directories.
-sudo -H -u varmint sh -c 'cat > ~/AGENTS.md' <<'EOF_AGENTS_MD'
-# Environment
-You run in a disposable Debian VM made by varmint on the user's computer.
-Nothing you do here can harm the host, so act without asking for permission.
-
-- The user can see the VM's screen: a Hyprland (Wayland) desktop. Programs
-  you start, like `chromium` or `foot`, open windows there, so you can show
-  the user things on screen. X11 programs run through Xwayland.
-- You can see the screen too: `grim /tmp/screen.png` takes a screenshot,
-  which you can then read. Look at it to check what you put on screen.
-- You can operate the desktop: `hyprctl clients` lists the windows and
-  `hyprctl dispatch` controls them. To click, move the cursor with
-  `hyprctl dispatch movecursor X Y` (layout pixels, as in `hyprctl
-  clients`), then `wlrctl pointer click left`. `wtype TEXT` types and
-  `wtype -k Escape` or `wtype -M ctrl w -m ctrl` press keys.
-- Use the screen to show the user the status of a task, or anything else
-  that is easier to follow there than in the terminal, when it helps them.
-- You are the user `varmint` with passwordless `sudo`. Install system
-  packages with `sudo apt-get install`, and tools with `mise`.
-- `wl-copy` and `wl-paste` use the guest clipboard; screenshots the user
-  pastes into you come through it.
-- Your credentials stay on the host: you cannot push. Commit your work to
-  branches in the repository; the user fetches them from the host and
-  reviews and pushes them there.
-- Other VMs and the user share data with you through an object store on
-  the host, at http://127.0.0.1:5101. `curl localhost:5101/` lists the
-  buckets this VM may use, `curl localhost:5101/BUCKET?prefix=P` their
-  objects, and `curl localhost:5101/BUCKET/KEY` reads one; write with
-  `curl -T FILE localhost:5101/BUCKET/KEY`, delete with `curl -X DELETE`.
-  Every write keeps the earlier versions (`?versions` lists them,
-  `?versionId=N` reads one), and the host logs every request.
-EOF_AGENTS_MD
-sudo -H -u varmint sh -c '
-    for file in .claude/CLAUDE.md .codex/AGENTS.md .config/opencode/AGENTS.md; do
-        mkdir -p "$HOME/$(dirname "$file")"
-        ln -sfn "$HOME/AGENTS.md" "$HOME/$file"
-    done
-'
+# Every coding agent gets the same environment briefing, kept outside the home
+# directory so seeds cannot replace it. It is appended below whatever the user
+# seeded or wrote; seeds are copied before every start, and varmint-agent runs
+# this again afterwards.
 if [ "$arch" = arm64 ]; then
-    sudo -H -u varmint sh -c 'echo "- x86-64 binaries run through FEX (\`FEX\`, \`FEXBash\`)." >> ~/AGENTS.md'
+    echo '- x86-64 binaries run through FEX (`FEX`, `FEXBash`).' >> /usr/local/share/varmint/AGENTS.md
 fi
+sudo -H -u varmint /usr/local/libexec/varmint-instructions /home/varmint
 
 cat > /etc/sudoers.d/varmint <<'EOF_SUDO'
 varmint ALL=(ALL) NOPASSWD:ALL

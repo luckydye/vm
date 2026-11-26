@@ -33,6 +33,7 @@ virt-customize --network -a "$work_image" \
     --run-command '[ "$(dpkg --print-architecture)" != arm64 ] || { test -x /usr/local/bin/FEX && test "$(readlink /usr/local/bin/FEXBash)" = FEX && test "$(readlink /usr/local/bin/FEXRootFSFetcher)" = FEX && test ! -e /home/varmint/.local/share/fex-emu/RootFS; }' \
     --run-command '[ "$(dpkg --print-architecture)" != amd64 ] || for initrd in /boot/initrd.img-*; do lsinitramfs "$initrd" | grep -q "/virtio_mmio.ko" || { echo "initramfs is missing virtio_mmio: $initrd" >&2; exit 1; }; done' \
     --run-command 'test -f /home/varmint/.config/hypr/hyprland.conf && test -f /home/varmint/.config/hypr/varmint-appearance.conf && test -x /usr/local/libexec/varmint-appearance && test -x /usr/local/libexec/varmint-cursor' \
+    --run-command 'test -f /usr/local/share/varmint/AGENTS.md && test -x /usr/local/libexec/varmint-instructions && grep -q "^<!-- varmint environment -->$" /home/varmint/.claude/CLAUDE.md && grep -q "^<!-- varmint environment -->$" /home/varmint/.codex/AGENTS.md && grep -q "^<!-- varmint environment -->$" /home/varmint/.config/opencode/AGENTS.md' \
     --run-command 'test -x /usr/lib/systemd/system-generators/zram-generator && test -f /etc/systemd/zram-generator.conf' \
     --run-command 'grep -q "^varmint:" /etc/subuid && grep -q "^varmint:" /etc/subgid' \
     --run-command 'systemctl enable varmint-grow-root.service varmint-reclaim.timer' \

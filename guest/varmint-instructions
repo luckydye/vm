@@ -1,0 +1,31 @@
+#!/bin/sh
+# Appends this VM's environment briefing to the global instruction files of
+# Claude Code, Codex and OpenCode, below whatever the user seeded or wrote
+# there. Seeds are copied before every start and carry no marker, so each run
+# drops the briefing it added last time and appends it again.
+set -eu
+
+home=${1:-$HOME}
+briefing=/usr/local/share/varmint/AGENTS.md
+marker='<!-- varmint environment -->'
+text=$(mktemp)
+trap 'rm -f "$text"' EXIT
+
+for file in .claude/CLAUDE.md .codex/AGENTS.md .config/opencode/AGENTS.md; do
+    target=$home/$file
+    mkdir -p "$(dirname "$target")"
+
+    # The user's text, without the briefing an earlier run appended.
+    if [ -e "$target" ]; then
+        awk -v marker="$marker" '$0 == marker { exit } { print }' "$target" > "$text"
+    else
+        : > "$text"
+    fi
+
+    cat "$text" > "$target"
+    if [ -s "$text" ]; then
+        printf '\n' >> "$target"
+    fi
+    printf '%s\n' "$marker" >> "$target"
+    cat "$briefing" >> "$target"
+done

@@ -34,4 +34,4 @@ vm run --mount .:work -- make -C work test
 
 ## State
 
-The guest user is `varmint` with passwordless `sudo`, and [mise](https://mise.jdx.dev) is preinstalled for tools. The environment briefing for coding agents is in `~/AGENTS.md`, linked as the global instructions file of Claude Code, Codex and OpenCode. State lives in `~/.vm` (override with `VM_HOME`), each VM in `~/.vm/vms/<name>` with its `vmm.log`; the logs of the newest 20 deleted VMs are kept in `~/.vm/logs`. Shutting down or rebooting the guest stops the VM.
+The guest user is `varmint` with passwordless `sudo`, and [mise](https://mise.jdx.dev) is preinstalled for tools. The environment briefing for coding agents is appended on every start to the global instructions file of Claude Code, Codex and OpenCode, below anything the user seeded or wrote there. State lives in `~/.vm` (override with `VM_HOME`), each VM in `~/.vm/vms/<name>` with its `vmm.log`; the logs of the newest 20 deleted VMs are kept in `~/.vm/logs`. Shutting down or rebooting the guest stops the VM.

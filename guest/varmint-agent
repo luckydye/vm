@@ -30,6 +30,8 @@ PORT = "/dev/virtio-ports/agent"
 USER = "varmint"
 # Variables from varmint run --env and varmint serve, for every session.
 ENVIRONMENT_FILE = "/run/varmint/environment"
+# Appends the environment briefing below the user's seeded agent instructions.
+INSTRUCTIONS = "/usr/local/libexec/varmint-instructions"
 HOST_ENVIRONMENT = {}
 HEADER = struct.Struct("<IBI")
 (OPEN, DATA, STDERR, EOF, EXIT, RESIZE, HELLO, SETUP, CLOSE, SETUP_DONE, TELEMETRY, REGISTRY_TOKEN,
@@ -736,6 +738,19 @@ def copy_seeds(seeds, account):
     return []
 
 
+def compose_instructions(account):
+    """Appends the environment briefing below the user's agent instructions; returns errors."""
+    result = subprocess.run(
+        ["/usr/sbin/runuser", "-u", USER, "--", INSTRUCTIONS, account.pw_dir],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if result.returncode != 0:
+        return [f"composing the agent instructions failed: {result.stdout.decode(errors='replace').strip()}"]
+    return []
+
+
 def setup(payload, link):
     """Applies host settings; returns the registry mirror or None and a list of error messages."""
     request = json.loads(payload)
@@ -776,6 +791,7 @@ def setup(payload, link):
     errors = [error for error in (mount(share, account) for share in request["mounts"]) if error]
     if request["seeds"] and not errors:
         errors += copy_seeds(request["seeds"], account)
+    errors += compose_instructions(account)
     registries = Registries(link, request["registries"]) if request["registries"] else None
     return registries, errors
 
