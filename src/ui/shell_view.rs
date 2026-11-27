@@ -1,7 +1,10 @@
 //! The pane of a [`Shell`]: its rows painted on a cell grid in the monospace
 //! font, with keys, pastes, scrolling and mouse selection going to the shell.
 
-use super::{shell::Shell, theme::*};
+use super::{
+    shell::{ImagePlacement, SelectionRect, Shell},
+    theme::*,
+};
 use gpui::{
     AnyElement, App, Bounds, ClipboardItem, Entity, ExternalPaths, FocusHandle, Font, FontStyle, FontWeight,
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollEvent,
@@ -120,6 +123,10 @@ pub fn render(
         .on_any_mouse_down({
             let focus = focus.clone();
             move |event: &MouseDownEvent, window, cx| {
+                // A file dragged over the pane is an active drag, not a click.
+                if cx.has_active_drag() {
+                    return;
+                }
                 focus.focus(window, cx);
                 let position = on_grid(&pressed, event.position);
                 presses.update(cx, |shell, cx| {
@@ -133,6 +140,10 @@ pub fn render(
             }
         })
         .on_mouse_move(move |event: &MouseMoveEvent, _, cx| {
+            // Dragging a file over the pane moves the pointer, but is no selection.
+            if cx.has_active_drag() {
+                return;
+            }
             let position = on_grid(&dragged, event.position);
             let button = event.pressed_button.and_then(mouse_button);
             let pressed = event.pressed_button.is_some();
@@ -145,6 +156,10 @@ pub fn render(
             });
         })
         .capture_any_mouse_up(move |event: &MouseUpEvent, _, cx| {
+            // The drop listener ends a file drag in the bubble phase.
+            if cx.has_active_drag() {
+                return;
+            }
             let position = on_grid(&released, event.position);
             releases.update(cx, |shell, _| {
                 let button = mouse_button(event.button);
@@ -204,6 +219,7 @@ fn paint(
     // Edges snap to device pixels so neighbouring cells meet without seams.
     let scale = window.scale_factor();
     let snap = |value: Pixels| px((f32::from(value) * scale).round() / scale);
+    paint_images(&grid.images, 0, origin, (cell_width, line_height), window);
     // Each run is shaped on its own and placed at its column, so a glyph
     // from a fallback font of another width can't shift the rest of the row.
     let mut shaped = Vec::new();
@@ -244,7 +260,7 @@ fn paint(
             let line = window
                 .text_system()
                 .shape_line(SharedString::from(text.to_owned()), FONT_SIZE, &[style], Some(cell_width));
-            shaped.push((at, line));
+            shaped.push((at, line, run.selected));
         }
     }
     for (row, line) in grid.lines.iter().enumerate() {
@@ -259,9 +275,18 @@ fn paint(
             }
         }
     }
-    for (at, line) in &shaped {
+    paint_images(&grid.images, 1, origin, (cell_width, line_height), window);
+    for (at, line, _) in &shaped {
         line.paint(*at, line_height, TextAlign::Left, None, window, cx)
             .expect("painting a terminal run");
+    }
+    paint_images(&grid.images, 2, origin, (cell_width, line_height), window);
+    paint_selections(&grid.selections, origin, (cell_width, line_height), window);
+    for (at, line, selected) in &shaped {
+        if *selected {
+            line.paint(*at, line_height, TextAlign::Left, None, window, cx)
+                .expect("painting a selected terminal run");
+        }
     }
     if let Some((column, row)) = grid.cursor {
         let at = point(
@@ -271,6 +296,50 @@ fn paint(
         let mut cursor: gpui::Hsla = rgb(grid.foreground).into();
         cursor.a = 0.6;
         window.paint_quad(fill(Bounds::new(at, size(cell_width, line_height)), cursor));
+    }
+}
+
+/// Paints the kitty images of one layer, at the cells and pixel offsets the
+/// terminal worked out.
+fn paint_images(
+    images: &[ImagePlacement],
+    layer: u8,
+    origin: gpui::Point<Pixels>,
+    (cell_width, line_height): (Pixels, Pixels),
+    window: &mut Window,
+) {
+    for image in images.iter().filter(|image| image.layer == layer) {
+        let at = point(
+            origin.x + cell_width * image.column as f32 + px(image.offset.0 as f32),
+            origin.y + line_height * image.row as f32 + px(image.offset.1 as f32),
+        );
+        let bounds = Bounds::new(at, size(px(image.size.0 as f32), px(image.size.1 as f32)));
+        window
+            .paint_image(bounds, bounds, Default::default(), image.image.clone(), 0, false)
+            .expect("painting a terminal image");
+    }
+}
+
+/// Paints selection backgrounds above the images, which would otherwise hide
+/// them.
+fn paint_selections(
+    selections: &[SelectionRect],
+    origin: gpui::Point<Pixels>,
+    (cell_width, line_height): (Pixels, Pixels),
+    window: &mut Window,
+) {
+    let scale = window.scale_factor();
+    let snap = |value: Pixels| px((f32::from(value) * scale).round() / scale);
+    for selection in selections {
+        let at = point(
+            origin.x + cell_width * f32::from(selection.column),
+            origin.y + line_height * f32::from(selection.row),
+        );
+        let end = at + point(cell_width * f32::from(selection.cells), line_height);
+        window.paint_quad(fill(
+            Bounds::from_corners(at.map(snap), end.map(snap)),
+            rgb(selection.color),
+        ));
     }
 }
 

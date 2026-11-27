@@ -14,10 +14,13 @@ mod view;
 
 use gpui::{App, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, actions, point, prelude::*, px, size};
 use gpui_component::Root;
+use libghostty_vt::kitty::graphics::{RustPngDecoder, set_png_decoder};
 
 actions!(vm_ui, [ToggleSidebar, Quit]);
 
 pub fn run() {
+    // SAFETY: no terminal exists yet, so no other thread is inside libghostty.
+    unsafe { set_png_decoder(Some(Box::new(RustPngDecoder::new()))) }.expect("failed to install the kitty PNG decoder");
     gpui_platform::application().with_assets(gpui_kit_assets::Assets).run(|cx: &mut App| {
         #[cfg(target_os = "macos")]
         set_application_icon();

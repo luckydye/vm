@@ -29,3 +29,7 @@ vm run --mount .:work --idle-suspend 0   # then open vm-NAME in OpenCode Desktop
 ## Clipboard
 
 Text copied in the guest goes to the host clipboard while an interactive session, `vm screen` or `vm ui` is open. Ctrl+V in any of them first puts the host clipboard into the guest clipboard, its image if it has one and its text otherwise, so you can paste screenshots into Claude Code. The host clipboard reaches the guest only this way.
+
+## Images
+
+Terminals in `vm ui` support the kitty graphics protocol, so `mcat`, `icat` and programs that draw with it show images inline. PNG, RGB, RGBA, grayscale and gray-alpha images work, placed at a cell or with Unicode placeholder cells.

@@ -7,30 +7,38 @@ use crate::{
     node::{self, Target},
     protocol::{self, Frame, Request, Session, kind},
 };
-use gpui::{AppContext, AsyncApp, Context, EventEmitter, Keystroke, Modifiers, Task, WeakEntity};
+use gpui::{AppContext, AsyncApp, Context, EventEmitter, Keystroke, Modifiers, RenderImage, Task, WeakEntity};
+use image::{Frame as ImageFrame, RgbaImage};
 use libghostty_vt::{
     color::{Palette as GhosttyPalette, PaletteIndex, Rgb},
     error::Result,
     fmt::Formatter,
     key::{self, Key},
+    kitty::graphics::{self, ImageFormat},
     mode::Mode,
     mouse,
     paste,
     point::{Coordinate, Point},
-    render::{CellIterator, RenderState, RowIterator},
+    render::{CellIterator, ImageIterator, ImageLayer, ImageProtocol, RenderState, RowIterator, Snapshot},
     selection::gesture::{DragEvent, Geometry, Gesture, PressEvent, ReleaseEvent},
     style::Underline,
     terminal::{ScrollViewport, Terminal},
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap, HashSet},
     io::BufReader,
-    sync::mpsc,
+    sync::{Arc, mpsc},
     thread,
     time::{Duration, Instant},
 };
 
 const SCROLLBACK_LINES: usize = 10_000;
+
+/// Bytes the terminal may keep for kitty graphics images.
+const KITTY_IMAGE_STORAGE: u64 = 256 * 1024 * 1024;
+
+/// Bytes one kitty graphics command may buffer while it arrives.
+const KITTY_PROTOCOL_BYTES: usize = 64 * 1024 * 1024;
 
 /// How soon a second click must follow for a double or triple click.
 const CLICK_INTERVAL: Duration = Duration::from_millis(500);
@@ -46,6 +54,8 @@ pub struct Run {
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
+    /// Selected cells, which the view paints again above images.
+    pub selected: bool,
 }
 
 /// A block element (U+2580 to U+259F) in a cell, left out of the line's text
@@ -65,10 +75,159 @@ pub struct Line {
     pub blocks: Vec<Block>,
 }
 
+/// A run of selected cells in one row, above the images the view draws.
+#[derive(Clone)]
+pub struct SelectionRect {
+    pub column: u16,
+    pub row: u16,
+    pub cells: u16,
+    pub color: u32,
+}
+
+/// Where a kitty graphics image goes and what part of it shows, in terminal
+/// pixels.
+#[derive(Clone)]
+pub struct ImagePlacement {
+    pub image: Arc<RenderImage>,
+    pub column: i32,
+    pub row: i32,
+    pub offset: (u32, u32),
+    pub size: (u32, u32),
+    /// 0 below cell backgrounds, 1 below text, 2 above text.
+    pub layer: u8,
+    pub z: i32,
+}
+
+/// The pixels and source rectangle a texture was made from.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct ImageKey {
+    id: u32,
+    generation: u64,
+    source: (u32, u32, u32, u32),
+}
+
+/// Watches the shell's output for kitty graphics commands that display an
+/// image, whose cursor ends on the image's last row. Inline image tools such as
+/// `mcat` leave the next prompt there, so the view puts a line break before the
+/// output that follows unless that output already starts one.
+#[derive(Default)]
+struct ImageOutput {
+    state: OutputState,
+    /// The control data of the kitty command being read.
+    control: Vec<u8>,
+    /// Whether the current command displays an image.
+    display: bool,
+    /// Whether more chunks of this command follow.
+    more: bool,
+    /// Whether a chunked command that displays an image is still arriving.
+    chunked: bool,
+    /// Whether the last output ended with such a command.
+    pending: bool,
+}
+
+#[derive(Default, PartialEq)]
+enum OutputState {
+    #[default]
+    Outside,
+    Escape,
+    Apc,
+    ApcFirst,
+    ApcEscape,
+    Kitty,
+    KittyPayload,
+    KittyEscape,
+}
+
+impl ImageOutput {
+    /// Reads one byte as it goes to the terminal, and returns whether it ends a
+    /// kitty command that displays an image.
+    fn step(&mut self, byte: u8) -> bool {
+        match self.state {
+            OutputState::Outside => {
+                if byte == 0x1b {
+                    self.state = OutputState::Escape;
+                }
+            }
+            OutputState::Escape => match byte {
+                b'_' => self.state = OutputState::ApcFirst,
+                0x1b => {}
+                _ => self.state = OutputState::Outside,
+            },
+            OutputState::ApcFirst => match byte {
+                b'G' => {
+                    self.control.clear();
+                    self.display = false;
+                    self.more = false;
+                    self.state = OutputState::Kitty;
+                }
+                0x1b => self.state = OutputState::ApcEscape,
+                _ => self.state = OutputState::Apc,
+            },
+            OutputState::Apc => {
+                if byte == 0x1b {
+                    self.state = OutputState::ApcEscape;
+                }
+            }
+            OutputState::ApcEscape => match byte {
+                b'\\' => self.state = OutputState::Outside,
+                0x1b => {}
+                _ => self.state = OutputState::Apc,
+            },
+            OutputState::Kitty => match byte {
+                b';' => {
+                    let (display, more) = parse_image_control(&self.control);
+                    self.display = display;
+                    self.more = more;
+                    self.state = OutputState::KittyPayload;
+                }
+                0x1b => self.state = OutputState::KittyEscape,
+                _ if self.control.len() < 256 => self.control.push(byte),
+                _ => {}
+            },
+            OutputState::KittyPayload => {
+                if byte == 0x1b {
+                    self.state = OutputState::KittyEscape;
+                }
+            }
+            OutputState::KittyEscape => match byte {
+                b'\\' => {
+                    self.state = OutputState::Outside;
+                    if self.display {
+                        self.chunked = true;
+                    }
+                    if !self.more && self.chunked {
+                        self.chunked = false;
+                        return true;
+                    }
+                }
+                0x1b => {}
+                _ => self.state = OutputState::KittyPayload,
+            },
+        }
+        false
+    }
+}
+
+/// The `a` and `m` fields of a kitty graphics command's control data.
+fn parse_image_control(control: &[u8]) -> (bool, bool) {
+    let mut display = false;
+    let mut more = false;
+    for field in control.split(|byte| *byte == b',') {
+        match field {
+            b"a=T" | b"a=p" => display = true,
+            b"m=1" => more = true,
+            _ => {}
+        }
+    }
+    (display, more)
+}
+
 /// What the view draws.
 #[derive(Clone, Default)]
 pub struct Grid {
     pub lines: Vec<Line>,
+    pub images: Vec<ImagePlacement>,
+    pub selections: Vec<SelectionRect>,
     /// Column and row of the cursor while it shows.
     pub cursor: Option<(u16, u16)>,
     pub background: u32,
@@ -105,10 +264,21 @@ pub struct Shell {
     pub ended: Option<String>,
     /// The size in cells.
     pub size: (u16, u16),
+    /// The size of one cell in pixels, as the terminal knows it.
+    cell: (u32, u32),
     terminal: Terminal<'static, 'static>,
     render: RenderState<'static>,
     rows: RowIterator<'static>,
     cells: CellIterator<'static>,
+    kitty: ImageIterator<'static>,
+    /// Kitty images on screen, and the textures they draw.
+    placements: Vec<ImagePlacement>,
+    textures: HashMap<ImageKey, Arc<RenderImage>>,
+    /// Textures no longer on screen, freed once there is a context.
+    discarded: Vec<Arc<RenderImage>>,
+    /// The image list version the placements above came from.
+    placements_generation: Option<u64>,
+    image_output: ImageOutput,
     keys: key::Encoder<'static>,
     key: key::Event<'static>,
     mice: mouse::Encoder<'static>,
@@ -135,6 +305,8 @@ impl Shell {
             .and_then(|terminal| terminal.set_terminfo_name("xterm-256color"))
             // Set in the terminal, not just painted, so programs asking for them get them too.
             .and_then(|terminal| set_colors(terminal, palette))
+            .and_then(|terminal| terminal.set_kitty_image_storage_limit(KITTY_IMAGE_STORAGE))
+            .and_then(|terminal| terminal.set_apc_max_bytes_kitty(Some(KITTY_PROTOCOL_BYTES)))
             .and_then(|terminal| {
                 // Answers to the queries of programs like vim and tmux.
                 terminal.on_pty_write(move |_, data: &[u8]| {
@@ -146,10 +318,17 @@ impl Shell {
             grid: Grid::default(),
             ended: None,
             size,
+            cell: (0, 0),
             terminal,
             render: RenderState::new().expect("failed to create a render state"),
             rows: RowIterator::new().expect("failed to create a row iterator"),
             cells: CellIterator::new().expect("failed to create a cell iterator"),
+            kitty: ImageIterator::new().expect("failed to create an image iterator"),
+            placements: Vec::new(),
+            textures: HashMap::new(),
+            discarded: Vec::new(),
+            placements_generation: None,
+            image_output: ImageOutput::default(),
             keys: key::Encoder::new().expect("failed to create a key encoder"),
             key: key::Event::new().expect("failed to create a key event"),
             mice: mouse::Encoder::new().expect("failed to create a mouse encoder"),
@@ -176,7 +355,7 @@ impl Shell {
                 .ok();
             }),
         };
-        shell.refresh();
+        shell.refresh(cx);
         shell
     }
 
@@ -234,7 +413,7 @@ impl Shell {
             .and_then(|press| press.apply(&mut self.gesture, &self.terminal, grid_ref))
             .expect("failed to start a selection");
         self.terminal.set_selection(selection.as_ref()).expect("failed to select");
-        self.refresh();
+        self.refresh(cx);
         cx.notify();
     }
 
@@ -257,7 +436,7 @@ impl Shell {
             .and_then(|drag| drag.apply(&mut self.gesture, &self.terminal, grid_ref, geometry))
             .expect("failed to extend the selection");
         self.terminal.set_selection(selection.as_ref()).expect("failed to select");
-        self.refresh();
+        self.refresh(cx);
         cx.notify();
     }
 
@@ -342,19 +521,20 @@ impl Shell {
     /// Scrolls the view through the scrollback by `lines`, up when negative.
     pub fn scroll(&mut self, lines: isize, cx: &mut Context<Self>) {
         self.terminal.scroll_viewport(ScrollViewport::Delta(lines));
-        self.refresh();
+        self.refresh(cx);
         cx.notify();
     }
 
     /// Takes the size of a pane of `size` cells of `cell` pixels.
     pub fn resize(&mut self, size: (u16, u16), cell: (u32, u32), cx: &mut Context<Self>) {
-        if size == self.size || size.0 == 0 || size.1 == 0 {
+        if (size == self.size && cell == self.cell) || size.0 == 0 || size.1 == 0 {
             return;
         }
         self.size = size;
+        self.cell = cell;
         self.terminal.resize(size.0, size.1, cell.0, cell.1).expect("failed to resize the terminal");
         let _ = self.writer.send(Command::Resize(size.0, size.1));
-        self.refresh();
+        self.refresh(cx);
         cx.notify();
     }
 
@@ -362,7 +542,7 @@ impl Shell {
     /// running in it.
     pub fn set_palette(&mut self, palette: Palette, cx: &mut Context<Self>) {
         set_colors(&mut self.terminal, palette).expect("failed to set the terminal colors");
-        self.refresh();
+        self.refresh(cx);
         cx.notify();
     }
 
@@ -375,33 +555,75 @@ impl Shell {
         let _ = self.writer.send(Command::Input(bytes));
         self.terminal.set_selection(None).expect("failed to clear the selection");
         self.terminal.scroll_viewport(ScrollViewport::Bottom);
-        self.refresh();
+        self.refresh(cx);
         cx.notify();
     }
 
     fn output(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
-        self.terminal.vt_write(bytes);
-        self.refresh();
+        if bytes.is_empty() {
+            return;
+        }
+        let alternate = self.alternate_screen();
+        let mut output = Vec::with_capacity(bytes.len() + 2);
+        for &byte in bytes {
+            // Inline image tools leave the cursor on an image's last row; start
+            // what follows below it unless it begins a line itself.
+            if self.image_output.pending {
+                self.image_output.pending = false;
+                if !alternate && !matches!(byte, b'\r' | b'\n') {
+                    output.extend_from_slice(b"\r\n");
+                }
+            }
+            if self.image_output.step(byte) {
+                self.image_output.pending = true;
+            }
+            output.push(byte);
+        }
+        self.terminal.vt_write(&output);
+        self.refresh(cx);
         cx.notify();
     }
 
+    fn alternate_screen(&self) -> bool {
+        [Mode::ALT_SCREEN, Mode::ALT_SCREEN_LEGACY, Mode::ALT_SCREEN_SAVE]
+            .into_iter()
+            .any(|mode| self.terminal.mode(mode).unwrap_or(false))
+    }
+
     /// Reads the terminal's screen into the grid.
-    fn refresh(&mut self) {
+    fn refresh(&mut self, cx: &mut Context<Self>) {
         let snapshot = self.render.update(&self.terminal).expect("failed to read the terminal");
+        let generation = snapshot
+            .image_placements_generation()
+            .expect("failed to read the image generation");
+        if self.placements_generation != Some(generation) {
+            self.placements_generation = Some(generation);
+            self.placements = read_placements(
+                &self.terminal,
+                &snapshot,
+                &mut self.kitty,
+                &mut self.textures,
+                &mut self.discarded,
+            );
+        }
         let colors = snapshot.colors().expect("failed to read the terminal colors");
         let cursor = snapshot.cursor().expect("failed to read the cursor");
         let mut grid = Grid {
             lines: Vec::new(),
+            images: self.placements.clone(),
+            selections: Vec::new(),
             cursor: cursor.viewport.filter(|_| cursor.visible).map(|viewport| (viewport.x, viewport.y)),
             background: rgb(colors.background),
             foreground: rgb(colors.foreground),
         };
         let mut rows = self.rows.update(&snapshot).expect("failed to read the rows");
         let mut grapheme = String::new();
+        let mut row_at = 0;
         while let Some(row) = rows.next() {
             let mut line = Line { text: String::new(), runs: Vec::new(), blocks: Vec::new() };
             let mut cells = self.cells.update(row).expect("failed to read the cells");
             let mut column = 0;
+            let mut selection: Option<(u16, u32)> = None;
             while let Some(cell) = cells.next() {
                 grapheme.clear();
                 match cell.graphemes_len().expect("failed to read a cell") {
@@ -411,11 +633,35 @@ impl Shell {
                 let mut foreground = cell.fg_color().expect("failed to read a cell").unwrap_or(colors.foreground);
                 let mut background = cell.bg_color().expect("failed to read a cell");
                 let style = cell.style().expect("failed to read a cell");
+                let selected = cell.is_selected().expect("failed to read a cell");
                 // Selected cells show in reverse video, like inverse ones.
-                if style.inverse != cell.is_selected().expect("failed to read a cell") {
+                if style.inverse != selected {
                     let swapped = background.unwrap_or(colors.background);
                     background = Some(foreground);
                     foreground = swapped;
+                }
+                let selection_color = rgb(background.unwrap_or(colors.background));
+                if selected {
+                    match selection {
+                        Some((_, color)) if color == selection_color => {}
+                        Some((start, color)) => {
+                            grid.selections.push(SelectionRect {
+                                column: start,
+                                row: row_at,
+                                cells: column - start,
+                                color,
+                            });
+                            selection = Some((column, selection_color));
+                        }
+                        None => selection = Some((column, selection_color)),
+                    }
+                } else if let Some((start, color)) = selection.take() {
+                    grid.selections.push(SelectionRect {
+                        column: start,
+                        row: row_at,
+                        cells: column - start,
+                        color,
+                    });
                 }
                 let mut characters = grapheme.chars();
                 if let (Some(character @ '\u{2580}'..='\u{259F}'), None) = (characters.next(), characters.next()) {
@@ -431,6 +677,7 @@ impl Shell {
                     bold: style.bold,
                     italic: style.italic,
                     underline: style.underline != Underline::None,
+                    selected,
                 };
                 column += 1;
                 // Only ASCII is sure to be in the monospace font at its cell
@@ -445,10 +692,153 @@ impl Shell {
                     _ => line.runs.push(run),
                 }
             }
+            if let Some((start, color)) = selection.take() {
+                grid.selections.push(SelectionRect {
+                    column: start,
+                    row: row_at,
+                    cells: column - start,
+                    color,
+                });
+            }
             grid.lines.push(line);
+            row_at += 1;
         }
         self.grid = grid;
+        for image in self.discarded.drain(..) {
+            cx.drop_image(image, None);
+        }
     }
+}
+
+/// Reads the kitty images on screen from `snapshot`, cropping each to the part
+/// it shows and keeping a texture per image generation.
+fn read_placements(
+    terminal: &Terminal<'static, 'static>,
+    snapshot: &Snapshot<'static, '_>,
+    kitty: &mut ImageIterator<'static>,
+    textures: &mut HashMap<ImageKey, Arc<RenderImage>>,
+    discarded: &mut Vec<Arc<RenderImage>>,
+) -> Vec<ImagePlacement> {
+    let Some(graphics) = terminal.kitty_graphics().expect("failed to read the kitty graphics") else {
+        discarded.extend(textures.drain().map(|(_, image)| image));
+        return Vec::new();
+    };
+    let mut placements = kitty.update(snapshot).expect("failed to read the images");
+    let mut used = HashSet::new();
+    let mut images = Vec::new();
+    while let Some(placement) = placements.next() {
+        if !matches!(placement.protocol(), Ok(ImageProtocol::Kitty)) {
+            continue;
+        }
+        let id = placement.image_id().expect("failed to read an image");
+        let Some(image) = graphics.image(id) else {
+            continue;
+        };
+        let source = (
+            placement.source_x().expect("failed to read an image"),
+            placement.source_y().expect("failed to read an image"),
+            placement.source_width().expect("failed to read an image"),
+            placement.source_height().expect("failed to read an image"),
+        );
+        if source.2 == 0 || source.3 == 0 {
+            continue;
+        }
+        let key = ImageKey {
+            id,
+            generation: placement.image_generation().expect("failed to read an image"),
+            source,
+        };
+        let texture = match textures.get(&key) {
+            Some(texture) => texture.clone(),
+            None => {
+                let Some(texture) = texture(&image, source) else {
+                    continue;
+                };
+                textures.insert(key, texture.clone());
+                texture
+            }
+        };
+        used.insert(key);
+        let layer = match placement.layer().expect("failed to read an image") {
+            ImageLayer::BelowBackground => 0,
+            ImageLayer::BelowText => 1,
+            ImageLayer::AboveText => 2,
+        };
+        images.push(ImagePlacement {
+            image: texture,
+            column: placement.viewport_col().expect("failed to read an image"),
+            row: placement.viewport_row().expect("failed to read an image"),
+            offset: (
+                placement.cell_offset_x().expect("failed to read an image"),
+                placement.cell_offset_y().expect("failed to read an image"),
+            ),
+            size: (
+                placement.pixel_width().expect("failed to read an image"),
+                placement.pixel_height().expect("failed to read an image"),
+            ),
+            layer,
+            z: placement.z().expect("failed to read an image"),
+        });
+    }
+    textures.retain(|key, image| {
+        if used.contains(key) {
+            true
+        } else {
+            discarded.push(image.clone());
+            false
+        }
+    });
+    images.sort_by_key(|image| (image.layer, image.z));
+    images
+}
+
+/// Crops the part of `image` at `source` into a texture, in the BGRA bytes
+/// gpui images carry.
+fn texture(image: &graphics::Image<'_>, source: (u32, u32, u32, u32)) -> Option<Arc<RenderImage>> {
+    let (source_x, source_y, width, height) = source;
+    let image_width = image.width().ok()?;
+    let image_height = image.height().ok()?;
+    if source_x.checked_add(width)? > image_width || source_y.checked_add(height)? > image_height {
+        return None;
+    }
+    let format = image.format().ok()?;
+    let channels = match format {
+        ImageFormat::Rgb => 3,
+        ImageFormat::Rgba => 4,
+        ImageFormat::Gray => 1,
+        ImageFormat::GrayAlpha => 2,
+        _ => return None,
+    };
+    let data = image.data().ok().flatten()?;
+    if data.len() < image_width as usize * image_height as usize * channels {
+        return None;
+    }
+    let mut pixels = vec![0; width as usize * height as usize * 4];
+    for y in 0..height as usize {
+        for x in 0..width as usize {
+            let source = ((source_y as usize + y) * image_width as usize + source_x as usize + x) * channels;
+            let [red, green, blue, alpha] = match format {
+                ImageFormat::Rgb => [data[source], data[source + 1], data[source + 2], 255],
+                ImageFormat::Rgba => [data[source], data[source + 1], data[source + 2], data[source + 3]],
+                ImageFormat::Gray => {
+                    let gray = data[source];
+                    [gray, gray, gray, 255]
+                }
+                ImageFormat::GrayAlpha => {
+                    let gray = data[source];
+                    [gray, gray, gray, data[source + 1]]
+                }
+                _ => unreachable!("a known format was matched above"),
+            };
+            let target = (y * width as usize + x) * 4;
+            pixels[target] = blue;
+            pixels[target + 1] = green;
+            pixels[target + 2] = red;
+            pixels[target + 3] = alpha;
+        }
+    }
+    let buffer = RgbaImage::from_raw(width, height, pixels)?;
+    Some(Arc::new(RenderImage::new([ImageFrame::new(buffer)])))
 }
 
 fn key_mods(modifiers: &Modifiers) -> key::Mods {
