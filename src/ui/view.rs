@@ -925,28 +925,20 @@ impl Workspace {
             Some(_) => IconName::Network,
             None => IconName::Cpu,
         };
-        let cards: Vec<AnyElement> = machines
-            .iter()
+        let (running, stopped): (Vec<_>, Vec<_>) =
+            machines.iter().copied().partition(|(machine, _)| machine.vm.running);
+        let running: Vec<AnyElement> = running
+            .into_iter()
             .map(|(machine, leaving)| {
                 let card = self.render_overview_card(machine, cx);
-                match leaving {
-                    Some(animation) => card
-                        .with_animation(
-                            SharedString::from(format!("leaving-{}-{animation}", machine.name)),
-                            Animation::new(CARD_FADE).with_easing(ease_out_quint()),
-                            |card, delta| card.opacity(1.0 - delta),
-                        )
-                        .into_any_element(),
-                    None => {
-                        let appearance = self.appearances.get(&machine.name).copied().unwrap_or_default();
-                        card.with_animation(
-                            SharedString::from(format!("entering-{}-{appearance}", machine.name)),
-                            Animation::new(CARD_FADE).with_easing(ease_out_quint()),
-                            |card, delta| card.opacity(delta),
-                        )
-                        .into_any_element()
-                    }
-                }
+                self.animate_overview_card(machine, leaving, card)
+            })
+            .collect();
+        let stopped: Vec<AnyElement> = stopped
+            .into_iter()
+            .map(|(machine, leaving)| {
+                let card = self.render_overview_stopped(machine, cx);
+                self.animate_overview_card(machine, leaving, card)
             })
             .collect();
         div()
@@ -973,11 +965,43 @@ impl Workspace {
                     .pl(px(12.))
                     .pt(px(8.))
                     .flex()
-                    .flex_wrap()
+                    .flex_col()
                     .gap_4()
-                    .children(cards),
+                    .when(!running.is_empty(), |column| {
+                        column.child(div().flex().flex_wrap().gap_4().children(running))
+                    })
+                    .when(!stopped.is_empty(), |column| {
+                        column.child(div().flex().flex_wrap().gap_4().children(stopped))
+                    }),
             )
             .into_any_element()
+    }
+
+    /// Fades a card in once its machine appeared, or out while it leaves.
+    fn animate_overview_card(
+        &self,
+        machine: &Machine,
+        leaving: Option<u64>,
+        card: gpui::Stateful<gpui::Div>,
+    ) -> AnyElement {
+        match leaving {
+            Some(animation) => card
+                .with_animation(
+                    SharedString::from(format!("leaving-{}-{animation}", machine.name)),
+                    Animation::new(CARD_FADE).with_easing(ease_out_quint()),
+                    |card, delta| card.opacity(1.0 - delta),
+                )
+                .into_any_element(),
+            None => {
+                let appearance = self.appearances.get(&machine.name).copied().unwrap_or_default();
+                card.with_animation(
+                    SharedString::from(format!("entering-{}-{appearance}", machine.name)),
+                    Animation::new(CARD_FADE).with_easing(ease_out_quint()),
+                    |card, delta| card.opacity(delta),
+                )
+                .into_any_element()
+            }
+        }
     }
 
     /// One machine of the overview: its latest screen over its name, folder and
@@ -997,13 +1021,7 @@ impl Workspace {
             }
             None => hardware.width as f32 / hardware.height as f32,
         };
-        let specs = format!(
-            "{} CPUs · {} GiB · {} GiB disk{}",
-            hardware.cpus,
-            hardware.memory_mib / 1024,
-            hardware.disk_gib,
-            if hardware.persist { " · kept" } else { "" }
-        );
+        let specs = machine_specs(machine);
         div()
             .id(SharedString::from(format!("overview-{name}")))
             .w(px(280.))
@@ -1054,19 +1072,56 @@ impl Workspace {
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .child(machine.short_name().to_owned()),
                     )
-                    .when(!folders.is_empty(), |body| {
-                        body.child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .text_size(SMALL_TEXT_SIZE)
-                                .text_color(rgb(palette.muted))
-                                .child(Icon::new(IconName::Folder).size(px(11.)).flex_none().text_color(rgb(palette.faint)))
-                                .child(div().flex_1().min_w_0().truncate().child(folders)),
-                        )
-                    })
+                    .when(!folders.is_empty(), |body| body.child(folder_line(&folders, palette)))
                     .child(div().text_size(SMALL_TEXT_SIZE).text_color(rgb(palette.faint)).truncate().child(specs)),
+            )
+            .on_click(cx.listener(move |this, _, window, cx| this.select(Some(name.clone()), window, cx)))
+    }
+
+    /// A stopped machine has no screen to show, so its name, folder and size
+    /// sit in a compact card under the running machines.
+    fn render_overview_stopped(&self, machine: &Machine, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let palette = self.palette;
+        let name = machine.name.clone();
+        let folders = machine.folders();
+        div()
+            .id(SharedString::from(format!("overview-{name}")))
+            .w(px(280.))
+            .flex_none()
+            .min_w(px(0.))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .px_3()
+            .py_2p5()
+            .rounded(CARD_RADIUS)
+            .border_1()
+            .border_color(rgb(palette.border))
+            .bg(rgb(palette.card))
+            .cursor_pointer()
+            .hover(|card| card.border_color(rgb(palette.faint)).bg(rgb(palette.hover)))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .child(machine.short_name().to_owned()),
+                    )
+                    .child(state_chip(machine, palette)),
+            )
+            .when(!folders.is_empty(), |card| card.child(folder_line(&folders, palette)))
+            .child(
+                div()
+                    .text_size(SMALL_TEXT_SIZE)
+                    .text_color(rgb(palette.faint))
+                    .truncate()
+                    .child(machine_specs(machine)),
             )
             .on_click(cx.listener(move |this, _, window, cx| this.select(Some(name.clone()), window, cx)))
     }
@@ -1999,6 +2054,30 @@ fn folder_chip(
         .child(div().min_w_0().truncate().child(machines::home_relative(folder)))
         .child(icon_button("clear-folder", IconName::Close, on_clear, palette))
         .into_any_element()
+}
+
+/// The CPUs, memory and disk of a machine, as the overview writes them.
+fn machine_specs(machine: &Machine) -> String {
+    let hardware = &machine.vm.hardware;
+    format!(
+        "{} CPUs · {} GiB · {} GiB disk{}",
+        hardware.cpus,
+        hardware.memory_mib / 1024,
+        hardware.disk_gib,
+        if hardware.persist { " · kept" } else { "" }
+    )
+}
+
+/// The folders a machine mounts, under a small folder icon.
+fn folder_line(folders: &str, palette: Palette) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .text_size(SMALL_TEXT_SIZE)
+        .text_color(rgb(palette.muted))
+        .child(Icon::new(IconName::Folder).size(px(11.)).flex_none().text_color(rgb(palette.faint)))
+        .child(div().flex_1().min_w_0().truncate().child(folders.to_owned()))
 }
 
 /// A machine's state over its screen, dark enough to read over any guest.
