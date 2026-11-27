@@ -85,6 +85,7 @@ pub fn main() {
         "serve" => serve_command(args),
         "ui" => ui_command(args),
         "store" => store_command(args),
+        "mcp" => mcp_command(args),
         "__vmm" => vmm_process(args),
         _ => user_command(command, args),
     }
@@ -1690,6 +1691,13 @@ fn scroll(args: &[String]) {
     let value = parse(args.get(1), "scroll amount");
     let horizontal = args[2..].iter().any(|arg| arg == "--horizontal");
     send_input(&resolve(name), vec![InputEvent::Scroll { value, horizontal }]);
+}
+
+fn mcp_command(args: &[String]) {
+    if !args.is_empty() {
+        usage_error("mcp");
+    }
+    crate::mcp::serve();
 }
 
 fn ui_command(args: &[String]) {

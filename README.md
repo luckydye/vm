@@ -91,7 +91,7 @@ Files dragged onto a pane from the host are uploaded to `/tmp/files` in the gues
 
 * [Getting started](docs/getting-started.md): install, first VM, seeds, mounts, getting work back.
 * [VMs](docs/vms.md), [shells](docs/shells.md), [files](docs/files.md)
-* [Shared store](docs/store.md), [your own commands](docs/commands.md)
+* [Shared store](docs/store.md), [your own commands](docs/commands.md), [agents over MCP](docs/mcp.md)
 * [Screen and input](docs/screen.md)
 * [Nodes](docs/nodes.md) and [remote provisioning](docs/serve.md)
 * [Telemetry](docs/telemetry.md)

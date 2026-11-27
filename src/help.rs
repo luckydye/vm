@@ -285,6 +285,31 @@ may use every bucket and are logged as host:
             ],
         },
         Command {
+            name: "mcp",
+            group: "Access",
+            usage: "vm mcp",
+            summary: "Let agents manage VMs over the Model Context Protocol",
+            description: "\
+Serves the Model Context Protocol on stdin and stdout, for agents such as
+Claude Code or OpenCode to start VMs, run commands in them, look at their
+screens and stop them. Register it as a stdio server with the command
+`vm mcp`. It speaks the 2026-07-28 revision and, for clients that open with
+initialize, 2025-11-25 and the revisions before it.
+
+The tools are list, run, exec, stop, save, screenshot, click, move, type,
+key and scroll. Each works like the command of the same name and reaches
+nodes from ~/.vm/nodes; exec runs a bash command in an existing VM and returns
+its exit code, stdout and stderr. run waits for the network unless told not
+to, and relative mount paths are under the directory the agent started vm
+mcp in. A cancelled call kills its command; a VM that `run` already created
+keeps running."
+                .into(),
+            options: vec![],
+            examples: &[
+                ("claude mcp add vm -- vm mcp", "add it to Claude Code"),
+            ],
+        },
+        Command {
             name: "proxy",
             group: "Access",
             usage: "vm proxy NAME PORT",

@@ -12,6 +12,7 @@ mod hypervisor;
 mod instance;
 mod keymap;
 mod machine;
+mod mcp;
 mod memory;
 mod net;
 mod node;

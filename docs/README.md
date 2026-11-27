@@ -6,6 +6,7 @@
 * [Files](files.md): mounts, seeds, environment, private registries.
 * [Shared store](store.md): buckets, versions, audit log.
 * [Your own commands](commands.md): commands in `~/.vm/commands`.
+* [Agents over MCP](mcp.md): `vm mcp` and its tools.
 * [Screen and input](screen.md): `vm ui`, CLI input, graphics stack.
 * [Nodes](nodes.md): one pool across machines.
 * [Remote provisioning](serve.md): the `vm serve` protocol and `attach`.
