@@ -82,8 +82,9 @@ fn handle(connection: UnixStream, context: &Context<'_>) -> io::Result<()> {
             return Err(error);
         }
     };
-    // Asking for usage, as `vm ls` and node load balancing do, is not activity.
-    let _client = (!matches!(request, Request::Usage)).then(|| {
+    // Reading what a VM takes or shows, as `vm ls`, node load balancing and the
+    // overview's previews do, is not activity.
+    let _client = (!matches!(request, Request::Usage | Request::Screenshot)).then(|| {
         context.agent.sync_time();
         context.suspend.client()
     });

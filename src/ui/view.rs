@@ -14,6 +14,7 @@ use super::{
     shell::{Shell, ShellEvent},
     shell_view,
     theme::{self, *},
+    thumbnails::Thumbnails,
     upload,
 };
 use crate::{
@@ -24,8 +25,8 @@ use crate::{
 use gpui::{
     AnyElement, Bounds, Context, Entity, ExternalPaths, FocusHandle, Focusable, Hsla, KeyDownEvent, KeyUpEvent,
     Keystroke, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    PathPromptOptions, Pixels, ScrollDelta, ScrollEvent, SharedString, Subscription, Window, canvas, div, prelude::*,
-    px, rgb, size,
+    ObjectFit, PathPromptOptions, Pixels, ScrollDelta, ScrollEvent, SharedString, Subscription, Window, canvas, div,
+    img, prelude::*, px, rgb, rgba, size,
 };
 use gpui_component::{
     Icon, Sizable, ThemeMode, WindowExt,
@@ -104,6 +105,8 @@ struct Resizing {
 
 pub struct Workspace {
     machines: Entity<Machines>,
+    /// The overview's screen previews of the running machines.
+    thumbnails: Entity<Thumbnails>,
     /// The machine shown in the main pane.
     selected: Option<String>,
     /// The selected machine's screen, while it runs.
@@ -141,6 +144,7 @@ pub struct Workspace {
 impl Workspace {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let machines = cx.new(Machines::new);
+        let thumbnails = cx.new(Thumbnails::new);
         let ports = cx.new(Ports::new);
         let new_name = cx.new(|cx| InputState::new(window, cx).placeholder("Name, or leave empty for a random one"));
         let appearance = {
@@ -152,6 +156,7 @@ impl Workspace {
         let subscriptions = vec![
             appearance,
             cx.observe_in(&machines, window, |this, _, window, cx| this.follow_machines(window, cx)),
+            cx.observe_in(&thumbnails, window, |_, _, _, cx| cx.notify()),
             cx.observe_in(&ports, window, |_, _, _, cx| cx.notify()),
             cx.subscribe_in(&new_name, window, |this, _, event: &TextEvent, window, cx| {
                 match event {
@@ -163,6 +168,7 @@ impl Workspace {
         ];
         Self {
             machines,
+            thumbnails,
             selected: None,
             display: None,
             ports,
@@ -277,6 +283,14 @@ impl Workspace {
         self.pages.retain(|name, _| running.contains(name));
         if loaded && self.selected.is_some() && !found {
             self.selected = None;
+        }
+        // Previews refresh only while the overview shows them.
+        match self.selected.is_none() {
+            true => {
+                let previewed = running.iter().cloned().collect::<Vec<_>>();
+                self.thumbnails.update(cx, |thumbnails, cx| thumbnails.follow(&previewed, cx));
+            }
+            false => self.thumbnails.update(cx, |thumbnails, _| thumbnails.pause()),
         }
         // The guest is asked for its ports only while the sidebar shows them,
         // so hiding it does not keep the machine from suspending when idle.
@@ -733,11 +747,10 @@ impl Workspace {
     fn render_overview(&self, cx: &mut Context<Self>) -> AnyElement {
         let palette = self.palette;
         let listed = self.machines.read(cx).machines.clone();
-        let rows: Vec<AnyElement> =
-            listed.iter().enumerate().map(|(index, machine)| self.render_overview_row(machine, (index, listed.len()), cx)).collect();
+        let cards: Vec<AnyElement> = listed.iter().map(|machine| self.render_overview_card(machine, cx)).collect();
         let composer = self.render_composer(cx);
         let machines = self.machines.read(cx);
-        let empty = rows.is_empty();
+        let empty = cards.is_empty();
         div()
             .id("overview")
             .flex_1()
@@ -752,19 +765,21 @@ impl Workspace {
                     .child(heading("Machines", palette))
                     .child(match empty {
                         true => card(palette)
-                            .p_6()
+                            .p_8()
                             .flex()
                             .flex_col()
-                            .gap_1()
+                            .items_center()
+                            .gap_2()
+                            .child(Icon::new(IconName::Monitor).size(px(28.)).text_color(rgb(palette.faint)))
                             .child(div().font_weight(gpui::FontWeight::MEDIUM).child(match machines.loaded {
                                 true => "No machines",
                                 false => "Looking for machines…",
                             }))
-                            .child(div().text_color(rgb(palette.muted)).child(
+                            .child(div().text_color(rgb(palette.muted)).text_center().child(
                                 "Each machine is a disposable Debian desktop that starts in about a second.",
                             ))
                             .into_any_element(),
-                        false => card(palette).children(rows).into_any_element(),
+                        false => div().flex().flex_wrap().gap_4().children(cards).into_any_element(),
                     }),
             )
             .child(div().flex().flex_col().gap_2p5().child(heading("New machine", palette)).child(composer))
@@ -793,35 +808,78 @@ impl Workspace {
             .into_any_element()
     }
 
-    fn render_overview_row(&self, machine: &Machine, place: (usize, usize), cx: &mut Context<Self>) -> AnyElement {
+    /// One machine of the overview: its latest screen over its name, folder and
+    /// size, which opens the machine when clicked.
+    fn render_overview_card(&self, machine: &Machine, cx: &mut Context<Self>) -> AnyElement {
         let palette = self.palette;
         let name = machine.name.clone();
         let hardware = &machine.vm.hardware;
-        row(place, palette)
+        let folders = machine.folders();
+        let specs = format!(
+            "{} CPUs · {} GiB · {} GiB disk{}",
+            hardware.cpus,
+            hardware.memory_mib / 1024,
+            hardware.disk_gib,
+            if hardware.persist { " · kept" } else { "" }
+        );
+        div()
             .id(SharedString::from(format!("overview-{name}")))
+            .flex_basis(px(248.))
+            .flex_grow_1()
+            .max_w(px(400.))
+            .min_w(px(0.))
+            .flex()
+            .flex_col()
+            .rounded(CARD_RADIUS)
+            .overflow_hidden()
+            .border_1()
+            .border_color(rgb(palette.border))
+            .bg(rgb(palette.card))
             .cursor_pointer()
-            .hover(|row| row.bg(rgb(palette.hover)))
-            .child(status_dot(machine, palette))
+            .hover(|card| card.border_color(rgb(palette.faint)).bg(rgb(palette.hover)))
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
+                    .relative()
+                    .w_full()
+                    .aspect_ratio(16. / 9.)
+                    .border_b_1()
+                    .border_color(rgb(palette.border))
+                    .bg(rgb(palette.window))
+                    .child(match self.thumbnails.read(cx).frames.get(&machine.name) {
+                        Some(frame) => img(frame.clone()).size_full().object_fit(ObjectFit::Cover).into_any_element(),
+                        None => div()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(Icon::new(IconName::Monitor).size(px(28.)).text_color(rgb(palette.faint)))
+                            .into_any_element(),
+                    })
+                    .child(div().absolute().top(px(8.)).left(px(8.)).child(state_chip(machine, palette))),
+            )
+            .child(
+                div()
+                    .px_3()
+                    .pt_2p5()
+                    .pb_3()
                     .flex()
                     .flex_col()
-                    .child(div().font_weight(gpui::FontWeight::MEDIUM).truncate().child(name.clone()))
-                    .child(div().text_size(SMALL_TEXT_SIZE).text_color(rgb(palette.muted)).truncate().child(format!(
-                        "{}{} CPUs · {} GiB memory · {} GiB disk{}",
-                        match machine.folders().as_str() {
-                            "" => String::new(),
-                            folders => format!("{folders} · "),
-                        },
-                        hardware.cpus,
-                        hardware.memory_mib / 1024,
-                        hardware.disk_gib,
-                        if hardware.persist { " · kept after stop" } else { "" }
-                    ))),
+                    .gap_1()
+                    .child(div().min_w_0().truncate().font_weight(gpui::FontWeight::MEDIUM).child(name.clone()))
+                    .when(!folders.is_empty(), |body| {
+                        body.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .text_size(SMALL_TEXT_SIZE)
+                                .text_color(rgb(palette.muted))
+                                .child(Icon::new(IconName::Folder).size(px(11.)).flex_none().text_color(rgb(palette.faint)))
+                                .child(div().flex_1().min_w_0().truncate().child(folders)),
+                        )
+                    })
+                    .child(div().text_size(SMALL_TEXT_SIZE).text_color(rgb(palette.faint)).truncate().child(specs)),
             )
-            .child(div().text_size(SMALL_TEXT_SIZE).text_color(rgb(palette.muted)).child(state_label(machine)))
             .on_click(cx.listener(move |this, _, window, cx| this.select(Some(name.clone()), window, cx)))
             .into_any_element()
     }
@@ -1748,6 +1806,24 @@ fn folder_chip(
         .child(div().min_w_0().truncate().child(machines::home_relative(folder)))
         .child(icon_button("clear-folder", IconName::Close, on_clear, palette))
         .into_any_element()
+}
+
+/// A machine's state over its screen, dark enough to read over any guest.
+fn state_chip(machine: &Machine, palette: Palette) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .gap_1p5()
+        .h(px(20.))
+        .px_2()
+        .rounded_full()
+        .border_1()
+        .border_color(rgba(0xffffff1a))
+        .bg(rgba(0x0b0b0bcc))
+        .text_size(LABEL_SIZE)
+        .text_color(rgb(0xf5f5f4))
+        .child(status_dot(machine, palette))
+        .child(state_label(machine))
 }
 
 fn status_dot(machine: &Machine, palette: Palette) -> impl IntoElement {

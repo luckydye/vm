@@ -9,6 +9,7 @@ mod ports;
 mod shell;
 mod shell_view;
 mod theme;
+mod thumbnails;
 mod upload;
 mod view;
 
