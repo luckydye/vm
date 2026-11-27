@@ -14,6 +14,7 @@ use super::{
     shell::{Shell, ShellEvent},
     shell_view,
     theme::{self, *},
+    upload,
 };
 use crate::{
     keymap,
@@ -21,9 +22,10 @@ use crate::{
     virtio::input::keys::{BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, KEY_LEFTALT, KEY_LEFTCTRL, KEY_LEFTMETA, KEY_LEFTSHIFT},
 };
 use gpui::{
-    AnyElement, Bounds, Context, Entity, FocusHandle, Focusable, Hsla, KeyDownEvent, KeyUpEvent, Keystroke,
-    Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions,
-    Pixels, ScrollDelta, ScrollEvent, SharedString, Subscription, Window, canvas, div, prelude::*, px, rgb, size,
+    AnyElement, Bounds, Context, Entity, ExternalPaths, FocusHandle, Focusable, Hsla, KeyDownEvent, KeyUpEvent,
+    Keystroke, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    PathPromptOptions, Pixels, ScrollDelta, ScrollEvent, SharedString, Subscription, Window, canvas, div, prelude::*,
+    px, rgb, size,
 };
 use gpui_component::{
     Icon, Sizable, ThemeMode, WindowExt,
@@ -1244,7 +1246,10 @@ impl Workspace {
                 let (shell, focus) = page.shells[&id].clone();
                 let ended = shell.read(cx).ended.is_some();
                 let title = format!("Terminal {id}{}", if ended { " · ended" } else { "" });
-                (title, focus.clone(), shell_view::render(shell, &focus, palette, window, cx))
+                let on_drop = cx.listener(move |this, paths: &ExternalPaths, _, cx| {
+                    this.drop_files(pane, paths.paths().to_vec(), cx);
+                });
+                (title, focus.clone(), shell_view::render(shell, &focus, palette, on_drop, window, cx))
             }
         };
         let focused = focus.contains_focused(window, cx);
@@ -1267,6 +1272,7 @@ impl Workspace {
             .rounded(CARD_RADIUS)
             .border_1()
             .border_color(rgb(if focused { palette.faint } else { palette.border }))
+            .drag_over::<ExternalPaths>(|style, _, _, _| style.border_color(rgb(palette.text)))
             .bg(rgb(palette.card))
             .overflow_hidden()
             .child(
@@ -1312,6 +1318,9 @@ impl Workspace {
             .overflow_hidden()
             .relative()
             .cursor(state.cursor)
+            .on_drop::<ExternalPaths>(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                this.drop_files(Pane::Screen, paths.paths().to_vec(), cx);
+            }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                 // Ctrl+V first puts the host clipboard into the guest's, so it pastes that.
                 if event.keystroke.modifiers.control && event.keystroke.key == "v" && !event.is_held {
@@ -1411,6 +1420,48 @@ impl Workspace {
         }
         self.send(InputEvent::Button { button, down }, cx);
         cx.stop_propagation();
+    }
+
+    /// Uploads files dropped on `pane` into the guest, then puts their guest
+    /// paths where they were dropped.
+    fn drop_files(&mut self, pane: Pane, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let Some(machine) = self.selected.clone() else {
+            return;
+        };
+        if paths.is_empty() {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_spawn(async move { upload::upload(&machine, &paths) }).await;
+            this.update(cx, |this, cx| match result {
+                Ok(paths) => this.place_paths(pane, &paths, cx),
+                Err(error) => this.machines.update(cx, |machines, cx| machines.fail(error, cx)),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Puts the guest paths of a drop into `pane`: typed into a terminal, or
+    /// pasted into the program the screen's keyboard goes to.
+    fn place_paths(&mut self, pane: Pane, paths: &[String], cx: &mut Context<Self>) {
+        let text = paths.iter().map(|path| upload::shell_quote(path)).collect::<Vec<_>>().join(" ");
+        match pane {
+            Pane::Shell(id) => {
+                let Some(name) = self.selected.as_ref() else {
+                    return;
+                };
+                let Some((shell, _)) = self.pages.get(name).and_then(|page| page.shells.get(&id)) else {
+                    return;
+                };
+                shell.update(cx, |shell, cx| shell.paste(&format!("{text} "), cx));
+            }
+            Pane::Screen => {
+                if let Some(display) = &self.display {
+                    display.read(cx).paste_text(text);
+                }
+            }
+        }
     }
 }
 

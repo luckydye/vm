@@ -20,6 +20,10 @@ ssh-keygen -t ed25519 -N "" -f ~/.vm/seeds/.ssh/id_ed25519   # a key just for th
 cp ~/bin/lg ~/.vm/seeds/bin/                                 # a host command, available in every VM
 ```
 
+## Dropping files
+
+Files dragged from the host onto a terminal or the screen in `vm ui` are uploaded to `/tmp/files` in the guest. A terminal gets their paths inserted at the prompt, shell-quoted; the screen puts them on the guest clipboard and pastes them into the focused program. Directories are not copied this way; mount them instead.
+
 ## Environment
 
 Environment variables are copied from your shell with `--env NAME`; `CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_API_KEY` always are when set. Values are never passed as arguments, so `ps` and shell history do not show them. They are set in `run` and `ssh` sessions, and programs in the VM can read them:

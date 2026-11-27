@@ -8,10 +8,12 @@
 
 use crate::{
     audio::{self, Backend, OpusDecoder, PeriodSink},
+    clipboard::Content,
     cli,
     display::{Decoded, H264Decoder},
     node::{self, Target},
     protocol::{Codec, InputEvent, Request, Session, kind, read_frame, stream_kind, write_json},
+    virtio::input::keys::{KEY_LEFTCTRL, KEY_V},
 };
 use gpui::{
     AppContext, AsyncApp, Bounds, Context, CursorStyle, Pixels, Point, RenderImage, Size, Task, WeakEntity, point,
@@ -39,6 +41,8 @@ enum Command {
     Event(InputEvent),
     /// Puts the host clipboard into the guest's before the events after it.
     Paste,
+    /// Puts `content` into the guest clipboard before the events after it.
+    Clipboard(Content),
 }
 
 pub struct Display {
@@ -121,6 +125,20 @@ impl Display {
     /// Puts the host clipboard into the guest's, before the input that follows.
     pub fn paste(&self) {
         self.command(Command::Paste);
+    }
+
+    /// Puts `text` into the guest clipboard and pastes it into the focused
+    /// program, as a drop of a host file does.
+    pub fn paste_text(&self, text: String) {
+        self.command(Command::Clipboard(Content::Text(text.into_bytes())));
+        for (code, down) in [
+            (KEY_LEFTCTRL, true),
+            (KEY_V, true),
+            (KEY_V, false),
+            (KEY_LEFTCTRL, false),
+        ] {
+            self.send(InputEvent::Key { code, down });
+        }
     }
 
     fn command(&self, command: Command) {
@@ -372,7 +390,8 @@ fn open_input(target: &Target) -> Result<mpsc::Sender<Command>, String> {
         for command in receiver {
             let written = match command {
                 Command::Event(event) => write_json(&mut writer, &event),
-                Command::Paste => paste(),
+                Command::Paste => paste(cli::paste_content()),
+                Command::Clipboard(content) => paste(content),
             };
             if written.is_err() {
                 return;

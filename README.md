@@ -85,6 +85,8 @@ VMs are reflink clones, so `~/.vm` must be on APFS, Btrfs or XFS.
 | `Ctrl+V` | `vm ui`, `vm screen`, shells | Paste the host clipboard into the guest |
 | `Ctrl+]` | `vm screen` | Detach |
 
+Files dragged onto a pane from the host are uploaded to `/tmp/files` in the guest. A terminal gets their paths as if typed, and the screen pastes them into the focused program.
+
 ## Docs
 
 * [Getting started](docs/getting-started.md): install, first VM, seeds, mounts, getting work back.

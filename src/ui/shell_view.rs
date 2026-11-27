@@ -3,9 +3,10 @@
 
 use super::{shell::Shell, theme::*};
 use gpui::{
-    AnyElement, App, Bounds, ClipboardItem, Entity, FocusHandle, Font, FontStyle, FontWeight, KeyDownEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollEvent, SharedString,
-    TextAlign, TextRun, UnderlineStyle, Window, canvas, div, fill, font, point, prelude::*, px, rgb, size,
+    AnyElement, App, Bounds, ClipboardItem, Entity, ExternalPaths, FocusHandle, Font, FontStyle, FontWeight,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollEvent,
+    SharedString, TextAlign, TextRun, UnderlineStyle, Window, canvas, div, fill, font, point, prelude::*, px, rgb,
+    size,
 };
 use gpui_component::ActiveTheme;
 use libghostty_vt::mouse;
@@ -32,7 +33,14 @@ fn cell_size(font: &Font, window: &Window) -> (Pixels, Pixels) {
     (width, height)
 }
 
-pub fn render(shell: Entity<Shell>, focus: &FocusHandle, palette: Palette, window: &mut Window, cx: &mut App) -> AnyElement {
+pub fn render(
+    shell: Entity<Shell>,
+    focus: &FocusHandle,
+    palette: Palette,
+    on_drop: impl Fn(&ExternalPaths, &mut Window, &mut App) + 'static,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
     let state = shell.read(cx);
     let family = cx.theme().mono_font_family.clone();
     let mono = font(family);
@@ -59,6 +67,7 @@ pub fn render(shell: Entity<Shell>, focus: &FocusHandle, palette: Palette, windo
         .overflow_hidden()
         .relative()
         .cursor(gpui::CursorStyle::IBeam)
+        .on_drop::<ExternalPaths>(on_drop)
         .on_key_down(move |event: &KeyDownEvent, _, cx| {
             let keystroke = &event.keystroke;
             let modifiers = &keystroke.modifiers;

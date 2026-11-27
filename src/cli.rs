@@ -1415,9 +1415,16 @@ pub(crate) fn paste_frame() -> Frame {
     frame
 }
 
+/// The host clipboard as a paste, for a client with a clipboard link.
+pub(crate) fn paste_content() -> clipboard::Content {
+    clipboard::Content::from_frame(paste_frame()).expect("the host clipboard is a paste")
+}
+
 /// Puts the text copied in the guest on the host clipboard, and returns a paste
-/// that puts the host clipboard into the guest clipboard and returns once it is there.
-pub(crate) fn clipboard_link(target: &Target) -> Result<impl FnMut() -> io::Result<()> + Send + 'static, String> {
+/// that puts its content into the guest clipboard and returns once it is there.
+pub(crate) fn clipboard_link(
+    target: &Target,
+) -> Result<impl FnMut(clipboard::Content) -> io::Result<()> + Send + 'static, String> {
     let control = node::request(target, &Request::Clipboard)?;
     let mut reader = control.reader;
     let mut writer = control.writer;
@@ -1431,8 +1438,8 @@ pub(crate) fn clipboard_link(target: &Target) -> Result<impl FnMut() -> io::Resu
             }
         }
     });
-    Ok(move || {
-        protocol::write_frame(&mut writer, &paste_frame())?;
+    Ok(move |content| {
+        protocol::write_frame(&mut writer, &content.into_frame(0))?;
         let error = answered
             .recv()
             .map_err(|_| io::Error::other("the clipboard connection to the VM closed"))?;
@@ -1510,7 +1517,9 @@ fn screen_command(args: &[String]) {
             .map(drop)
             .map_err(io::Error::other)
     };
-    let error = screen::run(frames.reader, input.writer, clipboard_link(&target).unwrap_or_else(|error| fail(error)), resize).unwrap_err();
+    let mut paste = clipboard_link(&target).unwrap_or_else(|error| fail(error));
+    let paste = move || paste(paste_content());
+    let error = screen::run(frames.reader, input.writer, paste, resize).unwrap_err();
     fail(format!("VM {}: {error}", target.qualified_name()))
 }
 

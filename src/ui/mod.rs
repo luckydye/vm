@@ -9,6 +9,7 @@ mod ports;
 mod shell;
 mod shell_view;
 mod theme;
+mod upload;
 mod view;
 
 use gpui::{App, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, actions, point, prelude::*, px, size};
