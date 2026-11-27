@@ -62,6 +62,9 @@ pub mod kind {
     pub const CLIPBOARD_PASTED: u8 = 17;
     /// The host's current time as a little-endian u64 of milliseconds since the Unix epoch.
     pub const TIME: u8 = 18;
+    /// A pty's pixel size for the program that asks: cols, rows, width and
+    /// height, each a little-endian u16.
+    pub const RESIZE_PIXELS: u8 = 19;
 }
 
 /// The kinds of messages in an H.264 [`Request::Stream`].
@@ -221,6 +224,9 @@ pub enum Session {
         argv: Vec<String>,
         cols: u16,
         rows: u16,
+        /// The pty's size in pixels, which programs use to size images.
+        pixel_width: u16,
+        pixel_height: u16,
         /// TERM and the variables that tell programs which terminal emulator they run in.
         terminal: BTreeMap<String, String>,
     },

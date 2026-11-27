@@ -35,7 +35,7 @@ INSTRUCTIONS = "/usr/local/libexec/varmint-instructions"
 HOST_ENVIRONMENT = {}
 HEADER = struct.Struct("<IBI")
 (OPEN, DATA, STDERR, EOF, EXIT, RESIZE, HELLO, SETUP, CLOSE, SETUP_DONE, TELEMETRY, REGISTRY_TOKEN,
- STORE, STORE_DATA, CLIPBOARD_IMAGE, CLIPBOARD_TEXT, CLIPBOARD_PASTED, TIME) = range(1, 19)
+ STORE, STORE_DATA, CLIPBOARD_IMAGE, CLIPBOARD_TEXT, CLIPBOARD_PASTED, TIME, RESIZE_PIXELS) = range(1, 20)
 REGISTRY_PORT = 5100
 STORE_PORT = 5101
 # Bytes per frame of a store request's body, store::CHUNK.
@@ -192,7 +192,9 @@ class PtyStream(Stream):
         pid, master = pty.fork()
         if pid == 0:
             try:
-                fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", request["rows"], request["cols"], 0, 0))
+                fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack(
+                    "HHHH", request["rows"], request["cols"],
+                    request.get("pixel_height", 0), request.get("pixel_width", 0)))
                 become(account)
                 os.execvpe(argv[0], argv, user_environment(account, request["terminal"]))
             finally:
@@ -206,8 +208,12 @@ class PtyStream(Stream):
         self.write(b"\x04")
 
     def resize(self, payload):
-        cols, rows = struct.unpack("<HH", payload)
-        fcntl.ioctl(self.input, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+        if len(payload) == 4:
+            cols, rows = struct.unpack("<HH", payload)
+            xpixel = ypixel = 0
+        else:
+            cols, rows, xpixel, ypixel = struct.unpack("<HHHH", payload)
+        fcntl.ioctl(self.input, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, xpixel, ypixel))
 
     def on_exit(self):
         # Background jobs may keep the pty open; once the shell is gone, send what
@@ -861,7 +867,7 @@ def main():
                     streams[stream_id].write(payload)
                 elif kind == EOF:
                     streams[stream_id].eof()
-                elif kind == RESIZE:
+                elif kind in (RESIZE, RESIZE_PIXELS):
                     streams[stream_id].resize(payload)
                 elif kind == CLOSE:
                     streams.pop(stream_id).kill()

@@ -237,7 +237,12 @@ pub struct Grid {
 /// What the writer thread sends to the guest, in order.
 enum Command {
     Input(Vec<u8>),
-    Resize(u16, u16),
+    Resize {
+        cols: u16,
+        rows: u16,
+        pixel_width: u16,
+        pixel_height: u16,
+    },
     /// Puts the host clipboard into the guest's, before the Ctrl+V that follows.
     Paste,
 }
@@ -533,7 +538,12 @@ impl Shell {
         self.size = size;
         self.cell = cell;
         self.terminal.resize(size.0, size.1, cell.0, cell.1).expect("failed to resize the terminal");
-        let _ = self.writer.send(Command::Resize(size.0, size.1));
+        let _ = self.writer.send(Command::Resize {
+            cols: size.0,
+            rows: size.1,
+            pixel_width: size.0.saturating_mul(cell.0 as u16),
+            pixel_height: size.1.saturating_mul(cell.1 as u16),
+        });
         self.refresh(cx);
         cx.notify();
     }
@@ -894,6 +904,8 @@ async fn read(
         argv: Vec::new(),
         cols: size.0,
         rows: size.1,
+        pixel_width: 0,
+        pixel_height: 0,
         terminal: BTreeMap::from([
             ("TERM".to_owned(), "xterm-256color".to_owned()),
             ("COLORTERM".to_owned(), "truecolor".to_owned()),
@@ -914,14 +926,24 @@ async fn read(
     let mut writer = control.writer;
     thread::spawn(move || {
         for command in commands {
-            let frame = match command {
-                Command::Input(bytes) => Frame::new(0, kind::DATA, bytes),
-                Command::Resize(cols, rows) => {
-                    Frame::new(0, kind::RESIZE, [cols.to_le_bytes(), rows.to_le_bytes()].concat())
+            let written = match command {
+                Command::Input(bytes) => protocol::write_frame(&mut writer, &Frame::new(0, kind::DATA, bytes)),
+                Command::Resize { cols, rows, pixel_width, pixel_height } => {
+                    let resize = [cols.to_le_bytes(), rows.to_le_bytes()].concat();
+                    let pixels = [
+                        cols.to_le_bytes(),
+                        rows.to_le_bytes(),
+                        pixel_width.to_le_bytes(),
+                        pixel_height.to_le_bytes(),
+                    ]
+                    .concat();
+                    protocol::write_frame(&mut writer, &Frame::new(0, kind::RESIZE, resize)).and_then(|()| {
+                        protocol::write_frame(&mut writer, &Frame::new(0, kind::RESIZE_PIXELS, pixels))
+                    })
                 }
-                Command::Paste => cli::paste_frame(),
+                Command::Paste => protocol::write_frame(&mut writer, &cli::paste_frame()),
             };
-            if protocol::write_frame(&mut writer, &frame).is_err() {
+            if written.is_err() {
                 return;
             }
         }

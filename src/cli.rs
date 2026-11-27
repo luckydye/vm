@@ -1207,11 +1207,19 @@ fn nodes_command(args: &[String]) {
 }
 
 fn pty_session(argv: Vec<String>, interactive: bool) -> Session {
-    let (cols, rows) = if interactive { terminal::size().unwrap_or_else(|error| fail(error)) } else { (80, 24) };
+    let (cols, rows, pixel_width, pixel_height) = match interactive {
+        true => match terminal::window_size() {
+            Ok(window) => (window.columns, window.rows, window.width, window.height),
+            Err(error) => fail(error),
+        },
+        false => (80, 24, 0, 0),
+    };
     Session::Pty {
         argv,
         cols,
         rows,
+        pixel_width,
+        pixel_height,
         terminal: terminal_environment(),
     }
 }
@@ -1453,12 +1461,21 @@ pub(crate) fn clipboard_link(
 /// Sends the terminal size to the guest pty whenever the window changes.
 fn forward_resizes(writer: Arc<Mutex<Wire>>) {
     screen::on_window_change(move || {
-        let Ok((cols, rows)) = terminal::size() else {
+        let Ok(window) = terminal::window_size() else {
             return;
         };
-        let mut payload = cols.to_le_bytes().to_vec();
-        payload.extend_from_slice(&rows.to_le_bytes());
-        let _ = protocol::write_frame(&mut *writer.lock().unwrap(), &Frame::new(0, kind::RESIZE, payload));
+        let resize = [window.columns.to_le_bytes(), window.rows.to_le_bytes()].concat();
+        let pixels = [
+            window.columns.to_le_bytes(),
+            window.rows.to_le_bytes(),
+            window.width.to_le_bytes(),
+            window.height.to_le_bytes(),
+        ]
+        .concat();
+        let mut writer = writer.lock().unwrap();
+        if protocol::write_frame(&mut *writer, &Frame::new(0, kind::RESIZE, resize)).is_ok() {
+            let _ = protocol::write_frame(&mut *writer, &Frame::new(0, kind::RESIZE_PIXELS, pixels));
+        }
     });
 }
 
