@@ -863,7 +863,7 @@ impl Workspace {
                             .flex_col()
                             .items_center()
                             .gap_2()
-                            .child(Icon::new(IconName::Monitor).size(px(28.)).text_color(rgb(palette.faint)))
+                            .child(Icon::new(IconName::Frame).size(px(28.)).text_color(rgb(palette.faint)))
                             .child(div().font_weight(gpui::FontWeight::MEDIUM).child(match machines.loaded {
                                 true => "No machines",
                                 false => "Looking for machines…",
@@ -888,7 +888,7 @@ impl Workspace {
                             row((index, machines.hosts.len()), palette)
                                 .child(
                                     Icon::new(match usage.node {
-                                        Some(_) => IconName::Server,
+                                        Some(_) => IconName::Network,
                                         None => IconName::Cpu,
                                     })
                                     .size(ICON_SIZE)
@@ -918,7 +918,7 @@ impl Workspace {
     ) -> AnyElement {
         let palette = self.palette;
         let icon = match node {
-            Some(_) => IconName::Server,
+            Some(_) => IconName::Network,
             None => IconName::Cpu,
         };
         let cards: Vec<AnyElement> = machines
@@ -1030,7 +1030,7 @@ impl Workspace {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(Icon::new(IconName::Monitor).size(px(28.)).text_color(rgb(palette.faint)))
+                            .child(Icon::new(IconName::Frame).size(px(28.)).text_color(rgb(palette.faint)))
                             .into_any_element(),
                     })
                     .child(div().absolute().top(px(8.)).left(px(8.)).child(state_chip(machine, palette))),
