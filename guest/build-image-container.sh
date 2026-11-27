@@ -38,7 +38,7 @@ virt-customize --network -a "$work_image" \
     --run-command 'grep -q "^varmint:" /etc/subuid && grep -q "^varmint:" /etc/subgid' \
     --run-command 'systemctl enable varmint-grow-root.service varmint-reclaim.timer' \
     --run-command 'passwd -l root' \
-    --run-command 'printf "varmint\n" > /etc/hostname' \
+    --run-command 'printf "vm\n" > /etc/hostname' \
     --run-command 'truncate -s 0 /etc/machine-id' \
     --run-command 'rm -f /var/lib/dbus/machine-id /etc/ssh/ssh_host_* /usr/local/libexec/varmint-provision' \
     --run-command 'rm -rf /var/lib/cloud/* /etc/systemd/system/getty@tty1.service.d /etc/systemd/system/serial-getty@*.service.d' \
