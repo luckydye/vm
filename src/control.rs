@@ -293,7 +293,12 @@ fn relay(mut reader: BufReader<UnixStream>, writer: UnixStream, session: &Sessio
 
         let result = loop {
             match protocol::read_frame(&mut reader) {
-                Ok(Some(frame)) if matches!(frame.kind, kind::DATA | kind::EOF | kind::RESIZE) => {
+                Ok(Some(frame))
+                    if matches!(
+                        frame.kind,
+                        kind::DATA | kind::EOF | kind::RESIZE | kind::RESIZE_PIXELS
+                    ) =>
+                {
                     agent.send(&Frame::new(stream, frame.kind, frame.payload))
                 }
                 Ok(Some(frame)) if pty && matches!(frame.kind, kind::CLIPBOARD_TEXT | kind::CLIPBOARD_IMAGE) => {

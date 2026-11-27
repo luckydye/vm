@@ -194,7 +194,7 @@ class PtyStream(Stream):
             try:
                 fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack(
                     "HHHH", request["rows"], request["cols"],
-                    request.get("pixel_height", 0), request.get("pixel_width", 0)))
+                    request.get("pixel_width", 0), request.get("pixel_height", 0)))
                 become(account)
                 os.execvpe(argv[0], argv, user_environment(account, request["terminal"]))
             finally:
