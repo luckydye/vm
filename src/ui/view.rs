@@ -757,7 +757,7 @@ impl Workspace {
             .overflow_y_scroll()
             .px(px(20.))
             .pb(px(20.))
-            .child(div().max_w(px(880.)).mx_auto().flex().flex_col().gap(px(20.)).child(
+            .child(div().w_full().max_w(px(880.)).mx_auto().flex().flex_col().gap(px(20.)).child(
                 div()
                     .flex()
                     .flex_col()
@@ -779,7 +779,7 @@ impl Workspace {
                                 "Each machine is a disposable Debian desktop that starts in about a second.",
                             ))
                             .into_any_element(),
-                        false => div().flex().flex_wrap().gap_4().children(cards).into_any_element(),
+                        false => div().flex().flex_wrap().justify_center().gap_4().children(cards).into_any_element(),
                     }),
             )
             .child(div().flex().flex_col().gap_2p5().child(heading("New machine", palette)).child(composer))
@@ -815,6 +815,16 @@ impl Workspace {
         let name = machine.name.clone();
         let hardware = &machine.vm.hardware;
         let folders = machine.folders();
+        let preview = self.thumbnails.read(cx).frames.get(&machine.name).cloned();
+        // The guest's own shape, so its screen fits the preview instead of
+        // overflowing it when it is not 16:9.
+        let ratio = match &preview {
+            Some(frame) => {
+                let size = frame.size(0);
+                size.width.0 as f32 / size.height.0 as f32
+            }
+            None => hardware.width as f32 / hardware.height as f32,
+        };
         let specs = format!(
             "{} CPUs · {} GiB · {} GiB disk{}",
             hardware.cpus,
@@ -824,9 +834,8 @@ impl Workspace {
         );
         div()
             .id(SharedString::from(format!("overview-{name}")))
-            .flex_basis(px(248.))
-            .flex_grow_1()
-            .max_w(px(400.))
+            .w(px(280.))
+            .flex_none()
             .min_w(px(0.))
             .flex()
             .flex_col()
@@ -841,12 +850,13 @@ impl Workspace {
                 div()
                     .relative()
                     .w_full()
-                    .aspect_ratio(16. / 9.)
+                    .aspect_ratio(ratio)
+                    .overflow_hidden()
                     .border_b_1()
                     .border_color(rgb(palette.border))
                     .bg(rgb(palette.window))
-                    .child(match self.thumbnails.read(cx).frames.get(&machine.name) {
-                        Some(frame) => img(frame.clone()).size_full().object_fit(ObjectFit::Cover).into_any_element(),
+                    .child(match preview {
+                        Some(frame) => img(frame).size_full().object_fit(ObjectFit::Cover).into_any_element(),
                         None => div()
                             .size_full()
                             .flex()
