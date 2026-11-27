@@ -39,14 +39,15 @@ impl Thumbnails {
         self.watches.clear();
     }
 
-    /// Keeps a preview of each of `running`, and forgets the rest.
-    pub fn follow(&mut self, running: &[String], cx: &mut Context<Self>) {
+    /// Keeps a preview of each of `running`, and of `fading`, whose cards are
+    /// still leaving, and forgets the rest.
+    pub fn follow(&mut self, running: &[String], fading: &[String], cx: &mut Context<Self>) {
         self.frames.retain(|name, frame| {
-            let keep = running.contains(name);
-            if !keep {
+            let shown = running.contains(name) || fading.contains(name);
+            if !shown {
                 cx.drop_image(frame.clone(), None);
             }
-            keep
+            shown
         });
         self.watches.retain(|name, _| running.contains(name));
         for name in running {

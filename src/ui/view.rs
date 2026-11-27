@@ -23,10 +23,10 @@ use crate::{
     virtio::input::keys::{BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, KEY_LEFTALT, KEY_LEFTCTRL, KEY_LEFTMETA, KEY_LEFTSHIFT},
 };
 use gpui::{
-    AnyElement, Bounds, Context, Entity, ExternalPaths, FocusHandle, Focusable, Hsla, KeyDownEvent, KeyUpEvent,
-    Keystroke, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ObjectFit, PathPromptOptions, Pixels, ScrollDelta, ScrollEvent, SharedString, Subscription, Window, canvas, div,
-    img, prelude::*, px, rgb, rgba, size,
+    Animation, AnimationExt, AnyElement, Bounds, Context, Entity, ExternalPaths, FocusHandle, Focusable, Hsla,
+    KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ObjectFit, PathPromptOptions, Pixels, ScrollDelta, ScrollEvent, SharedString, Subscription, Window,
+    canvas, div, ease_out_quint, img, prelude::*, px, rgb, rgba, size,
 };
 use gpui_component::{
     Icon, Sizable, ThemeMode, WindowExt,
@@ -41,7 +41,11 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     path::PathBuf,
     rc::Rc,
+    time::{Duration, Instant},
 };
+
+/// How long a machine card takes to fade in or out.
+const CARD_FADE: Duration = Duration::from_millis(220);
 
 /// What a key press sends the guest: a character through its US layout, or a
 /// named key that keeps the modifiers held.
@@ -103,10 +107,26 @@ struct Resizing {
     axis: Axis,
 }
 
+/// A machine that left the overview, still on screen for its card to fade out.
+struct Departing {
+    machine: Machine,
+    /// Unique per departure, so a card that comes back starts a new animation.
+    animation: u64,
+    until: Instant,
+}
+
 pub struct Workspace {
     machines: Entity<Machines>,
     /// The overview's screen previews of the running machines.
     thumbnails: Entity<Thumbnails>,
+    /// The machines shown last, to tell which appeared or left.
+    shown: Vec<Machine>,
+    /// When each machine appeared, so its card fades in once per appearance.
+    appearances: HashMap<String, u64>,
+    /// Machines whose cards are fading out after they left.
+    departing: Vec<Departing>,
+    /// The last animation number, which makes every fade unique.
+    animations: u64,
     /// The machine shown in the main pane.
     selected: Option<String>,
     /// The selected machine's screen, while it runs.
@@ -169,6 +189,10 @@ impl Workspace {
         Self {
             machines,
             thumbnails,
+            shown: Vec::new(),
+            appearances: HashMap::new(),
+            departing: Vec::new(),
+            animations: 0,
             selected: None,
             display: None,
             ports,
@@ -252,7 +276,7 @@ impl Workspace {
     /// Keeps a page for each running machine, and the selected machine's
     /// screen open while its page shows it.
     fn follow_machines(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (loaded, found, running, selected, local_running) = {
+        let (loaded, found, running, selected, local_running, current) = {
             let machines = self.machines.read(cx);
             let is_running = |name: &str| machines.find(name).is_some_and(|machine| machine.vm.running);
             let running: HashSet<String> = machines
@@ -269,8 +293,12 @@ impl Workspace {
                 .collect();
             let found = self.selected.as_deref().is_some_and(|name| machines.find(name).is_some());
             let selected = self.selected.clone().filter(|name| is_running(name));
-            (machines.loaded, found, running, selected, local_running)
+            (machines.loaded, found, running, selected, local_running, machines.machines.clone())
         };
+        // A card fades in when its machine appears, and out when it leaves.
+        if loaded {
+            self.track_appearances(current, cx);
+        }
         // Forwards end with their machine, whether it stopped or is gone.
         if loaded {
             // Off the UI thread, as stopping a forward waits for its listener to close.
@@ -288,7 +316,9 @@ impl Workspace {
         match self.selected.is_none() {
             true => {
                 let previewed = running.iter().cloned().collect::<Vec<_>>();
-                self.thumbnails.update(cx, |thumbnails, cx| thumbnails.follow(&previewed, cx));
+                let fading: Vec<String> =
+                    self.departing.iter().map(|departing| departing.machine.name.clone()).collect();
+                self.thumbnails.update(cx, |thumbnails, cx| thumbnails.follow(&previewed, &fading, cx));
             }
             false => self.thumbnails.update(cx, |thumbnails, _| thumbnails.pause()),
         }
@@ -322,6 +352,55 @@ impl Workspace {
         self.ports.update(cx, |ports, cx| ports.follow(ports_machine, cx));
         self.show_appearances(cx);
         cx.notify();
+    }
+
+    fn next_animation(&mut self) -> u64 {
+        self.animations += 1;
+        self.animations
+    }
+
+    /// Notes which machines appeared and left since the listing before, so a
+    /// card fades in once and a card that left can fade out before it goes.
+    fn track_appearances(&mut self, current: Vec<Machine>, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        for machine in &current {
+            if self.shown.iter().any(|old| old.name == machine.name) {
+                continue;
+            }
+            let animation = self.next_animation();
+            self.appearances.insert(machine.name.clone(), animation);
+            // A machine that came back while its card faded starts afresh.
+            self.departing.retain(|departing| departing.machine.name != machine.name);
+        }
+        let leaving: Vec<Machine> = self
+            .shown
+            .iter()
+            .filter(|old| !current.iter().any(|machine| machine.name == old.name))
+            .filter(|old| !self.departing.iter().any(|departing| departing.machine.name == old.name))
+            .cloned()
+            .collect();
+        let mut departed = false;
+        for machine in leaving {
+            let animation = self.next_animation();
+            self.departing.push(Departing { machine, animation, until: now + CARD_FADE });
+            departed = true;
+        }
+        if departed {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(CARD_FADE + Duration::from_millis(32)).await;
+                this.update(cx, |this, cx| {
+                    let before = this.departing.len();
+                    this.departing.retain(|departing| Instant::now() < departing.until);
+                    if this.departing.len() != before {
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
+        self.departing.retain(|departing| now < departing.until);
+        self.shown = current;
     }
 
     /// Moves the dragged divider to `position`.
@@ -747,17 +826,31 @@ impl Workspace {
     fn render_overview(&self, cx: &mut Context<Self>) -> AnyElement {
         let palette = self.palette;
         let listed = self.machines.read(cx).machines.clone();
-        let cards: Vec<AnyElement> = listed.iter().map(|machine| self.render_overview_card(machine, cx)).collect();
+        let mut entries: Vec<(&Machine, Option<u64>)> = listed.iter().map(|machine| (machine, None)).collect();
+        entries.extend(self.departing.iter().map(|departing| (&departing.machine, Some(departing.animation))));
+        let mut grouped: Vec<(Option<&str>, Vec<(&Machine, Option<u64>)>)> = Vec::new();
+        for entry in entries {
+            let node = entry.0.node.as_deref();
+            match grouped.iter_mut().find(|(group, _)| *group == node) {
+                Some((_, machines)) => machines.push(entry),
+                None => grouped.push((node, vec![entry])),
+            }
+        }
+        for (_, machines) in &mut grouped {
+            machines.sort_by(|a, b| a.0.name.cmp(&b.0.name));
+        }
+        let empty = grouped.is_empty();
+        let groups: Vec<AnyElement> =
+            grouped.into_iter().map(|(node, machines)| self.render_overview_group(node, &machines, cx)).collect();
         let composer = self.render_composer(cx);
         let machines = self.machines.read(cx);
-        let empty = cards.is_empty();
         div()
             .id("overview")
             .flex_1()
             .overflow_y_scroll()
             .px(px(20.))
             .pb(px(20.))
-            .child(div().w_full().max_w(px(880.)).mx_auto().flex().flex_col().gap(px(20.)).child(
+            .child(div().w_full().max_w(px(900.)).mx_auto().flex().flex_col().gap(px(20.)).child(
                 div()
                     .flex()
                     .flex_col()
@@ -779,7 +872,7 @@ impl Workspace {
                                 "Each machine is a disposable Debian desktop that starts in about a second.",
                             ))
                             .into_any_element(),
-                        false => div().flex().flex_wrap().justify_center().gap_4().children(cards).into_any_element(),
+                        false => div().flex().flex_col().gap_5().children(groups).into_any_element(),
                     }),
             )
             .child(div().flex().flex_col().gap_2p5().child(heading("New machine", palette)).child(composer))
@@ -793,7 +886,14 @@ impl Workspace {
                         .child(card(palette).children(machines.hosts.iter().enumerate().map(|(index, usage)| {
                             let used = usage.host.used_bytes as f64 / usage.host.memory_bytes as f64;
                             row((index, machines.hosts.len()), palette)
-                                .child(Icon::new(IconName::Cpu).size(ICON_SIZE).text_color(rgb(palette.muted)))
+                                .child(
+                                    Icon::new(match usage.node {
+                                        Some(_) => IconName::Server,
+                                        None => IconName::Cpu,
+                                    })
+                                    .size(ICON_SIZE)
+                                    .text_color(rgb(palette.muted)),
+                                )
                                 .child(div().flex_1().child(usage.node.clone().unwrap_or_else(|| "This computer".to_owned())))
                                 .child(div().text_size(SMALL_TEXT_SIZE).text_color(rgb(palette.muted)).child(format!(
                                     "{} CPUs · {} of {} memory",
@@ -808,9 +908,77 @@ impl Workspace {
             .into_any_element()
     }
 
+    /// The machines of one host under its name, joined by a faint rail so the
+    /// tree of this computer and its nodes stays visible but quiet.
+    fn render_overview_group(
+        &self,
+        node: Option<&str>,
+        machines: &[(&Machine, Option<u64>)],
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let palette = self.palette;
+        let icon = match node {
+            Some(_) => IconName::Server,
+            None => IconName::Cpu,
+        };
+        let cards: Vec<AnyElement> = machines
+            .iter()
+            .map(|(machine, leaving)| {
+                let card = self.render_overview_card(machine, cx);
+                match leaving {
+                    Some(animation) => card
+                        .with_animation(
+                            SharedString::from(format!("leaving-{}-{animation}", machine.name)),
+                            Animation::new(CARD_FADE).with_easing(ease_out_quint()),
+                            |card, delta| card.opacity(1.0 - delta),
+                        )
+                        .into_any_element(),
+                    None => {
+                        let appearance = self.appearances.get(&machine.name).copied().unwrap_or_default();
+                        card.with_animation(
+                            SharedString::from(format!("entering-{}-{appearance}", machine.name)),
+                            Animation::new(CARD_FADE).with_easing(ease_out_quint()),
+                            |card, delta| card.opacity(delta),
+                        )
+                        .into_any_element()
+                    }
+                }
+            })
+            .collect();
+        div()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .child(Icon::new(icon).size(px(12.)).text_color(rgb(palette.faint)))
+                    .child(
+                        div()
+                            .text_size(SMALL_TEXT_SIZE)
+                            .text_color(rgb(palette.muted))
+                            .child(node.unwrap_or("This computer").to_owned()),
+                    ),
+            )
+            .child(
+                div()
+                    .ml(px(6.))
+                    .border_l_1()
+                    .border_color(rgb(palette.divider))
+                    .pl(px(12.))
+                    .pt(px(8.))
+                    .flex()
+                    .flex_wrap()
+                    .gap_4()
+                    .children(cards),
+            )
+            .into_any_element()
+    }
+
     /// One machine of the overview: its latest screen over its name, folder and
     /// size, which opens the machine when clicked.
-    fn render_overview_card(&self, machine: &Machine, cx: &mut Context<Self>) -> AnyElement {
+    fn render_overview_card(&self, machine: &Machine, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
         let palette = self.palette;
         let name = machine.name.clone();
         let hardware = &machine.vm.hardware;
@@ -875,7 +1043,13 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(div().min_w_0().truncate().font_weight(gpui::FontWeight::MEDIUM).child(name.clone()))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .child(machine.short_name().to_owned()),
+                    )
                     .when(!folders.is_empty(), |body| {
                         body.child(
                             div()
@@ -891,7 +1065,6 @@ impl Workspace {
                     .child(div().text_size(SMALL_TEXT_SIZE).text_color(rgb(palette.faint)).truncate().child(specs)),
             )
             .on_click(cx.listener(move |this, _, window, cx| this.select(Some(name.clone()), window, cx)))
-            .into_any_element()
     }
 
     /// The new machine form: the name and project folder over a strip with
@@ -1834,6 +2007,11 @@ fn state_chip(machine: &Machine, palette: Palette) -> impl IntoElement {
         .text_color(rgb(0xf5f5f4))
         .child(status_dot(machine, palette))
         .child(state_label(machine))
+        .with_animation(
+            SharedString::from(format!("state-{}-{}", machine.name, state_label(machine))),
+            Animation::new(CARD_FADE).with_easing(ease_out_quint()),
+            |chip, delta| chip.opacity(delta),
+        )
 }
 
 fn status_dot(machine: &Machine, palette: Palette) -> impl IntoElement {
