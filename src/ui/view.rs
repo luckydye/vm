@@ -684,8 +684,12 @@ impl Workspace {
                     .flex_1()
                     .overflow_y_scroll()
                     .pb_3()
-                    .when(!running.is_empty(), |list| list.child(section_label("Running", palette)).children(running))
-                    .when(!stopped.is_empty(), |list| list.child(section_label("Stopped", palette)).children(stopped))
+                    .when(!running.is_empty(), |list| {
+                        list.child(section_label("Running", palette)).child(machine_rows(running))
+                    })
+                    .when(!stopped.is_empty(), |list| {
+                        list.child(section_label("Stopped", palette)).child(machine_rows(stopped))
+                    })
                     .when(shown.is_empty() && loaded, |list| {
                         list.child(div().px_2p5().pt_3().text_color(rgb(palette.faint)).child("No machines yet"))
                     }),
@@ -1773,6 +1777,12 @@ fn row((index, count): (usize, usize), palette: Palette) -> gpui::Div {
         .when(index > 0, |row| row.border_t_1().border_color(rgb(palette.divider)))
         .when(index == 0, |row| row.rounded_t(CARD_RADIUS))
         .when(index + 1 == count, |row| row.rounded_b(CARD_RADIUS))
+}
+
+/// Machine rows stacked with a hairline between them, so their rounded
+/// backgrounds never touch.
+fn machine_rows(rows: Vec<AnyElement>) -> impl IntoElement {
+    div().flex().flex_col().gap(px(1.)).children(rows)
 }
 
 fn nav_row(
