@@ -1272,7 +1272,7 @@ impl Workspace {
             .rounded(CARD_RADIUS)
             .border_1()
             .border_color(rgb(if focused { palette.faint } else { palette.border }))
-            .drag_over::<ExternalPaths>(|style, _, _, _| style.border_color(rgb(palette.text)))
+            .drag_over::<ExternalPaths>(move |style, _, _, _| style.border_color(rgb(palette.text)))
             .bg(rgb(palette.card))
             .overflow_hidden()
             .child(

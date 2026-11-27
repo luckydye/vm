@@ -1438,7 +1438,7 @@ pub(crate) fn clipboard_link(
             }
         }
     });
-    Ok(move |content| {
+    Ok(move |content: clipboard::Content| {
         protocol::write_frame(&mut writer, &content.into_frame(0))?;
         let error = answered
             .recv()
