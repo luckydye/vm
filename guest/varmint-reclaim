@@ -1,0 +1,9 @@
+#!/bin/sh
+# Reclaims a tenth of the memory on the kernel's LRU lists, oldest pages first:
+# cold page cache is dropped and cold program memory moves to zram. Free page
+# reporting then returns the freed memory to the host. A share of what the
+# guest holds, rather than of its RAM, so a guest that holds little keeps its
+# working set; repeated runs drain what stays unused.
+set -eu
+awk '/^(Active|Inactive)\((anon|file)\):/ { kib += $2 } END { print int(kib / 10) "K" }' /proc/meminfo \
+    > /sys/fs/cgroup/memory.reclaim

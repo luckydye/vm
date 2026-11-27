@@ -16,21 +16,16 @@ pub enum RuntimeInputEvent {
     PointerButton {
         button: u16,
         pressed: bool,
-        relative: bool,
     },
     Scroll {
         horizontal: bool,
         value: i32,
-        relative: bool,
-    },
-    RelativeMouseMotion {
-        dx: i32,
-        dy: i32,
     },
 }
 
 pub enum RuntimeEvent {
     NetRx(Vec<u8>),
+    BlkIo(virtio::IoCompletion),
     UartRx(u8),
     Input(RuntimeInputEvent),
     DisplayResized {
@@ -40,7 +35,9 @@ pub enum RuntimeEvent {
         logical_height: u32,
         refresh_millihertz: u32,
     },
+    /// Bytes for the clipboard port, see [`crate::clipboard::Guest`].
     Clipboard(Vec<u8>),
+    AgentRx(Vec<u8>),
 }
 
 pub struct RuntimeEventPump<'a> {
@@ -70,6 +67,9 @@ impl<'a> RuntimeEventPump<'a> {
 
     fn handle_event(&mut self, event: RuntimeEvent, pointer_move: &mut Option<(u32, u32, u32, u32)>) {
         match event {
+            RuntimeEvent::BlkIo(completion) => {
+                self.devices.blk.lock().unwrap().handle_external_event(&completion, self.mem);
+            }
             RuntimeEvent::NetRx(frame) => {
                 self.devices.net.lock().unwrap().handle_external_event(&frame, self.mem);
             }
@@ -95,7 +95,14 @@ impl<'a> RuntimeEventPump<'a> {
                     .console
                     .lock()
                     .unwrap()
-                    .handle_external_event(virtio::console::ExternalEvent::HostClipboard(&payload), self.mem);
+                    .handle_external_event(virtio::console::ExternalEvent::Clipboard(&payload), self.mem);
+            }
+            RuntimeEvent::AgentRx(bytes) => {
+                self.devices
+                    .console
+                    .lock()
+                    .unwrap()
+                    .handle_external_event(virtio::console::ExternalEvent::Agent(&bytes), self.mem);
             }
         }
     }
@@ -122,50 +129,19 @@ impl<'a> RuntimeEventPump<'a> {
                     .handle_external_event(ExternalInput::Key { code, pressed }, self.mem);
             }
             RuntimeInputEvent::PointerMove { .. } => unreachable!(),
-            RuntimeInputEvent::PointerButton {
-                button,
-                pressed,
-                relative,
-            } => {
-                if relative {
-                    self.devices
-                        .mouse
-                        .lock()
-                        .unwrap()
-                        .handle_external_event(ExternalInput::PointerButton { button, pressed }, self.mem);
-                } else {
-                    self.devices
-                        .tablet
-                        .lock()
-                        .unwrap()
-                        .handle_external_event(ExternalInput::PointerButton { button, pressed }, self.mem);
-                }
-            }
-            RuntimeInputEvent::Scroll {
-                horizontal,
-                value,
-                relative,
-            } => {
-                if relative {
-                    self.devices
-                        .mouse
-                        .lock()
-                        .unwrap()
-                        .handle_external_event(ExternalInput::Scroll { horizontal, value }, self.mem);
-                } else {
-                    self.devices
-                        .tablet
-                        .lock()
-                        .unwrap()
-                        .handle_external_event(ExternalInput::Scroll { horizontal, value }, self.mem);
-                }
-            }
-            RuntimeInputEvent::RelativeMouseMotion { dx, dy } => {
+            RuntimeInputEvent::PointerButton { button, pressed } => {
                 self.devices
-                    .mouse
+                    .tablet
                     .lock()
                     .unwrap()
-                    .handle_external_event(ExternalInput::RelMotion { dx, dy }, self.mem);
+                    .handle_external_event(ExternalInput::PointerButton { button, pressed }, self.mem);
+            }
+            RuntimeInputEvent::Scroll { horizontal, value } => {
+                self.devices
+                    .tablet
+                    .lock()
+                    .unwrap()
+                    .handle_external_event(ExternalInput::Scroll { horizontal, value }, self.mem);
             }
         }
     }
@@ -179,6 +155,13 @@ impl<'a> RuntimeEventPump<'a> {
             virtio::input::ExternalInput::AbsPosition { x, y, width, height },
             self.mem,
         );
+        // Hyprland ends no pointer frame after absolute motion, so Xwayland
+        // holds the move back and the next button lands where the pointer was.
+        // A relative step there and back ends the frame without moving.
+        let mut mouse = self.devices.mouse.lock().unwrap();
+        for dx in [1, -1] {
+            mouse.handle_external_event(virtio::input::ExternalInput::RelMotion { dx, dy: 0 }, self.mem);
+        }
     }
 }
 

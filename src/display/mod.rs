@@ -1,16 +1,37 @@
+#[cfg(target_os = "macos")]
 mod angle;
+mod capture;
+#[cfg(target_os = "macos")]
 mod iosurface;
-mod presenter;
 mod scanout;
-mod stats;
+#[cfg(target_os = "macos")]
+mod video;
+#[cfg(target_os = "linux")]
+#[path = "x264.rs"]
+mod video;
+#[cfg(target_os = "macos")]
+mod video_decode;
+#[cfg(target_os = "linux")]
+#[path = "avcodec.rs"]
+mod video_decode;
 
-pub use presenter::{PresentMode, Presenter};
+pub use capture::Capture;
 pub use scanout::ScanoutPublisher;
+pub use video::H264Encoder;
+pub use video_decode::H264Decoder;
+use std::sync::Condvar;
 use zerocopy::IntoBytes;
 
-#[derive(Clone, Copy)]
-pub enum DisplayEvent {
-    Changed,
+/// Signalled with the display's lock held whenever its sequence changes, so
+/// screen streams send a new frame at once rather than at their next tick.
+/// A VM process has one display.
+pub static PRESENTED: Condvar = Condvar::new();
+
+/// A decoded frame of a screen stream, in tightly packed BGRA rows.
+pub struct Decoded {
+    pub width: u32,
+    pub height: u32,
+    pub bgra: Vec<u8>,
 }
 
 #[derive(Clone, Copy)]
@@ -19,14 +40,6 @@ struct Rect {
     y: usize,
     width: usize,
     height: usize,
-}
-
-pub struct DisplayUpdate {
-    pub sequence: u64,
-    pub width: usize,
-    pub height: usize,
-    pub dirty_rect: (usize, usize, usize, usize),
-    pub iosurface_id: Option<u32>,
 }
 
 pub struct DisplayBuffer {
@@ -50,6 +63,35 @@ impl DisplayBuffer {
         }
     }
 
+    /// Changes whenever the guest presents a new frame.
+    pub fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    pub fn size(&self) -> (usize, usize) {
+        (self.width, self.height)
+    }
+
+    /// Returns `None` until the guest has configured a scanout.
+    pub fn capture(&self) -> Option<Capture> {
+        if self.width == 0 || self.height == 0 {
+            return None;
+        }
+        Some(match self.iosurface_id {
+            #[cfg(target_os = "macos")]
+            Some(id) => Capture::IOSurface {
+                id,
+                width: self.width,
+                height: self.height,
+            },
+            _ => Capture::Pixels {
+                pixels: self.pixels.clone(),
+                width: self.width,
+                height: self.height,
+            },
+        })
+    }
+
     fn resize(&mut self, width: usize, height: usize) {
         if self.width == width && self.height == height {
             return;
@@ -61,11 +103,12 @@ impl DisplayBuffer {
         self.dirty_rect = Some((0, 0, width, height));
         self.iosurface_id = None;
         self.sequence = self.sequence.wrapping_add(1);
+        PRESENTED.notify_all();
     }
 
-    fn publish_pixels(&mut self, data: &[u8], stride: usize, source: Rect, damage: Rect) -> bool {
+    fn publish_pixels(&mut self, data: &[u8], stride: usize, source: Rect, damage: Rect) {
         let Some((x, y, width, height)) = self.clip_damage(source, damage) else {
-            return false;
+            return;
         };
 
         let copy_src_x0 = source.x + x;
@@ -74,7 +117,7 @@ impl DisplayBuffer {
         let copy_src_y1 = copy_src_y0 + height;
 
         if data.len() < copy_src_y1 * stride {
-            return false;
+            return;
         }
 
         let dst_width = self.width;
@@ -86,16 +129,15 @@ impl DisplayBuffer {
         }
 
         self.publish_damage(None, (x, y, width, height));
-        true
     }
 
-    fn publish_iosurface(&mut self, iosurface_id: u32, source: Rect, damage: Rect) -> bool {
+    #[cfg(target_os = "macos")]
+    fn publish_iosurface(&mut self, iosurface_id: u32, source: Rect, damage: Rect) {
         let Some(dirty_rect) = self.clip_damage(source, damage) else {
-            return false;
+            return;
         };
 
         self.publish_damage(Some(iosurface_id), dirty_rect);
-        true
     }
 
     fn clip_damage(&self, source: Rect, damage: Rect) -> Option<(usize, usize, usize, usize)> {
@@ -128,42 +170,7 @@ impl DisplayBuffer {
             None => dirty_rect,
         });
         self.sequence = self.sequence.wrapping_add(1);
-    }
-
-    pub fn take_update(&mut self, last_sequence: u64, front: &mut Vec<u32>) -> Option<DisplayUpdate> {
-        if self.sequence == last_sequence {
-            return None;
-        }
-
-        let full = (0, 0, self.width, self.height);
-        let mut dirty_rect = self.dirty_rect.take().unwrap_or(full);
-
-        if front.len() != self.pixels.len() {
-            front.resize(self.pixels.len(), 0);
-            dirty_rect = full;
-        }
-
-        let (x, y, width, height) = dirty_rect;
-        let x = x.min(self.width);
-        let y = y.min(self.height);
-        let width = width.min(self.width.saturating_sub(x));
-        let height = height.min(self.height.saturating_sub(y));
-        let dirty_rect = (x, y, width, height);
-
-        if self.iosurface_id.is_none() && width != 0 && height != 0 {
-            for row in 0..height {
-                let offset = (y + row) * self.width + x;
-                front[offset..offset + width].copy_from_slice(&self.pixels[offset..offset + width]);
-            }
-        }
-
-        Some(DisplayUpdate {
-            sequence: self.sequence,
-            width: self.width,
-            height: self.height,
-            dirty_rect,
-            iosurface_id: self.iosurface_id,
-        })
+        PRESENTED.notify_all();
     }
 }
 

@@ -1,0 +1,35 @@
+#!/usr/bin/env python3
+"""Streams the pointer shape Hyprland shows, for `vm ui` to draw on the host."""
+import os
+import sys
+import time
+
+POLL = 0.05
+# A line now and then closes a read the host no longer waits for once the
+# screen closed, and lets a reopened one catch up.
+HEARTBEAT = 5.0
+PATH = os.path.join(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"), "varmint-cursor")
+
+
+def main():
+    last = None
+    printed = 0.0
+    while True:
+        try:
+            with open(PATH, encoding="utf-8") as file:
+                name = file.read().strip() or "default"
+        except OSError:
+            name = "default"
+        now = time.monotonic()
+        if name != last or now - printed >= HEARTBEAT:
+            print(name, flush=True)
+            last = name
+            printed = now
+        time.sleep(POLL)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (BrokenPipeError, KeyboardInterrupt):
+        pass

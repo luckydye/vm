@@ -57,7 +57,6 @@ const GL_NEAREST: i32 = 0x2600;
 const GL_FRAMEBUFFER: u32 = 0x8D40;
 const GL_COLOR_ATTACHMENT0: u32 = 0x8CE0;
 const GL_FRAMEBUFFER_COMPLETE: u32 = 0x8CD5;
-const GL_COLOR_BUFFER_BIT: u32 = 0x00004000;
 const GL_BGRA_EXT: u32 = 0x80E1;
 const GL_UNSIGNED_BYTE: u32 = 0x1401;
 const GL_VERTEX_SHADER: u32 = 0x8B31;
@@ -106,9 +105,6 @@ type GlGenFramebuffers = unsafe extern "C" fn(i32, *mut u32);
 type GlBindFramebuffer = unsafe extern "C" fn(u32, u32);
 type GlFramebufferTexture2D = unsafe extern "C" fn(u32, u32, u32, u32, i32);
 type GlCheckFramebufferStatus = unsafe extern "C" fn(u32) -> u32;
-type GlClearColor = unsafe extern "C" fn(f32, f32, f32, f32);
-type GlClear = unsafe extern "C" fn(u32);
-type GlFinish = unsafe extern "C" fn();
 type GlFlush = unsafe extern "C" fn();
 type GlDeleteTextures = unsafe extern "C" fn(i32, *const u32);
 type GlDeleteFramebuffers = unsafe extern "C" fn(i32, *const u32);
@@ -265,7 +261,6 @@ struct AngleCopySession {
     gl_framebuffer_texture_2d: GlFramebufferTexture2D,
     gl_check_framebuffer_status: GlCheckFramebufferStatus,
     gl_delete_framebuffers: GlDeleteFramebuffers,
-    gl_finish: GlFinish,
     gl_flush: GlFlush,
 
     gl_use_program: GlUseProgram,
@@ -337,7 +332,6 @@ impl AngleCopySession {
         let gl_check_framebuffer_status: GlCheckFramebufferStatus =
             unsafe { symbol(gles_lib, "glCheckFramebufferStatus")? };
         let gl_delete_framebuffers: GlDeleteFramebuffers = unsafe { symbol(gles_lib, "glDeleteFramebuffers")? };
-        let gl_finish: GlFinish = unsafe { symbol(gles_lib, "glFinish")? };
         let gl_flush: GlFlush = unsafe { symbol(gles_lib, "glFlush")? };
 
         let gl_create_shader: GlCreateShader = unsafe { symbol(gles_lib, "glCreateShader")? };
@@ -497,7 +491,6 @@ impl AngleCopySession {
             gl_framebuffer_texture_2d,
             gl_check_framebuffer_status,
             gl_delete_framebuffers,
-            gl_finish,
             gl_flush,
 
             gl_use_program,

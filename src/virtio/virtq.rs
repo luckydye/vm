@@ -2,8 +2,10 @@ use crate::{
     memory::GuestMemory,
     virtio::chain::{ChainData, Seg},
 };
-use applevisor::error::Result;
-use std::sync::atomic::{Ordering, fence};
+use std::{
+    io::Result,
+    sync::atomic::{Ordering, fence},
+};
 
 pub mod flags {
     pub const DESC_F_NEXT: u16 = 1;

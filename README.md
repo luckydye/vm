@@ -1,143 +1,103 @@
-<p align="left">
-  <img src="./assets/icon.png" width="100">
+<p align="center">
+  <img src="assets/icon.png" width="96" alt="vm">
 </p>
 
-# varmint
-Varmint is a lightweight virtual machine for Macs, built on top of Hypervisor.framework.
+<h1 align="center">vm</h1>
 
-The current focus is gaming and hardware-accelerated graphics. It boots a Debian arm64 guest with FEX, Steam and Proton, making it possible to run Windows and Linux games on Mac.
+<p align="center">
+  <strong>Disposable Linux VMs for coding agents.</strong><br>
+  A clean Linux machine in a second.
+</p>
 
-Windows games can use the Vulkan-based Venus graphics path or the experimental Neptune path for DirectX.
+<p align="center">
+  <a href="https://github.com/luckydye/vm/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/luckydye/vm?style=flat-square&amp;label=release&amp;labelColor=2d333b&amp;color=444c56"></a>
+  <a href="docs/getting-started.md#macos"><img alt="macOS 26+" src="https://img.shields.io/badge/macOS-26%2B-e6edf3?style=flat-square&amp;labelColor=2d333b"></a>
+  <a href="docs/getting-started.md#linux"><img alt="Linux KVM" src="https://img.shields.io/badge/Linux-KVM-e6edf3?style=flat-square&amp;labelColor=2d333b"></a>
+  <a href="docs/screen.md"><img alt="Wayland" src="https://img.shields.io/badge/Wayland-ui-d29922?style=flat-square&amp;labelColor=2d333b"></a>
+  <img alt="100% local" src="https://img.shields.io/badge/100%25%20local-no%20cloud-2d333b?style=flat-square">
+</p>
 
-## How to use
-1. Download the [latest release](https://github.com/kisasexypantera94/varmint/releases), extract it and move `Varmint.app` to Applications.
+<p align="center">
+  <img src="assets/ui.png" width="960" alt="vm ui with a VM screen, a terminal, open ports and hardware details">
+</p>
 
-   **Varmint requires macOS 26 or later.**
+`vm` starts a Debian desktop VM and deletes it when it stops. You drive it from the CLI: shells, commands, SSH, file sharing, screen and input. There is no network setup, no image management, and no cloud.
 
-2. Create a VM configuration:
-   ```bash
-   cat > "$HOME/fresh.varmint" <<'EOF'
-   format_version = 1
-
-   memory_mib = 16384
-   vcpus = 8
-
-   disk = "fresh.raw"
-   disk_size_gib = 24 # can be increased later
-   EOF
-   ```
-
-   The disk image will be created next to the configuration file. To expand it later, stop the VM and increase `disk_size_gib` before the next launch. Disk shrinking is not supported.
-
-3. Open Varmint and select `fresh.varmint`.
-   Since Varmint is not signed or notarized, macOS will block the first launch. Go to **System Settings → Privacy & Security**, click **Open Anyway** and confirm.
-
-4. Wait for Debian to start, create a user and password, then log in. Initial provisioning may take a few more minutes.
-
-5. Open **Applications → Games → Steam**, wait for Steam to finish setting up, then sign in and install a game.
+```sh
+vm=$(vm run --seed .:work --wait-network)     # a copy of this repo at ~/work
+vm run $vm -- sh -c 'cd work && exec claude'  # Claude Code inside
+vm pull $vm                                   # its commits come back as $vm/BRANCH
+vm stop $vm                                   # the VM and its disk are deleted
+```
 
 ## Features
 
-* hardware-accelerated Vulkan and OpenGL
-* experimental DirectX 11 support through Neptune
-* x86-64 support through FEX
-* Windows games through Proton
-* audio, networking and input
-* shared clipboard
-* Retina and high-refresh display modes
+- **Starts in about a second.** `vm run` clones the base image with copy-on-write. The first run unpacks it; later runs take milliseconds.
+- **Deleted when you stop.** `vm stop` deletes the VM and its disk. `--persist` keeps a named VM across restarts.
+- **Choose how files enter.** `--seed` copies a directory into the VM one way. `--mount` shares a host directory live. Seeds suit agents, mounts suit working in the VM yourself.
+- **The tools are preinstalled.** Debian, mise, Claude Code, OpenCode, passwordless `sudo` and podman are in the base image. Agent tokens come from your shell, never as arguments.
+- **Commits come back as branches.** `vm pull $vm` fetches the VM's branches into your repo as `$vm/BRANCH`. You review and push from the host with your own git credentials.
+- **A desktop when you need one.** `vm ui` opens a window with the screen, mouse, keyboard, sound and clipboard. `vm screenshot`, `vm click` and `vm type` drive it from scripts.
 
-## Games
+## Install
 
-Compatibility varies between games and graphics paths.
+Every [release](https://github.com/luckydye/vm/releases/latest) ships `vm.pkg` for macOS and a tarball for Linux.
 
-DirectX 9 games, along with some early DirectX 11 games, currently have the best chance of working through DXVK and Venus.
-
-Newer DirectX 11 games can run either through Venus or Neptune, but compatibility is less predictable.
-
-DirectX 12 support is experimental and has not been tested extensively yet.
-
-See [Running games in Varmint](docs/games/common.md) for general setup and troubleshooting.
-
-The games below have been tested. Click a game name for its tested configuration and game-specific setup notes.
-
-| Game                                                                                    | Status | Setup Difficulty |
-| --------------------------------------------------------------------------------------- | -----: | ---------------: |
-| [The Witcher 3: Wild Hunt](docs/games/the-witcher-3.md)                                 |      ✅ |               🟢 |
-| [The Witcher: Enhanced Edition](docs/games/the-witcher-enhanced-edition.md)             |      ✅ |               🟢 |
-| [Dragon's Dogma: Dark Arisen](docs/games/dragons-dogma-dark-arisen.md)                  |      ✅ |               🟡 |
-| [Fallout: New Vegas](docs/games/fallout-new-vegas.md)                                   |      ✅ |               🟢 |
-| [Fallout 3](docs/games/fallout-3.md)                                                    |      ✅ |               🟢 |
-| [Subnautica](docs/games/subnautica.md)                                                  |      ✅ |               🟢 |
-| [Portal 1-2](docs/games/portal.md)                                                      |      ✅ |               🟢 |
-| [Team Fortress 2](docs/games/team-fortress-2.md)                                        |      ✅ |               🟢 |
-| [Half-Life 2](docs/games/half-life-2.md)                                                |      ✅ |               🟢 |
-| [Dishonored](docs/games/dishonored.md)                                                  |      ✅ |               🟢 |
-| [Deus Ex: Human Revolution](docs/games/deus-ex-human-revolution.md)                     |      ✅ |               🟢 |
-| [SCP – Containment Breach](docs/games/scp-containment-breach.md)                        |      ✅ |               🟢 |
-| [L.A. Noire](docs/games/la-noire.md)                                                    |      ✅ |               🟠 |
-| [Vampire: The Masquerade - Bloodlines](docs/games/vampire-the-masquerade-bloodlines.md) |      ✅ |               🟡 |
-| [A Plague Tale: Innocence](docs/games/a-plague-tale-innocence.md)                       |      ✅ |               🟢 |
-| [Garry's Mod](docs/games/garrys-mod.md)                                                 |      ✅ |               🟢 |
-| [Red Comrades 2: For the Great Justice. Reloaded](docs/games/red-comrades-reloaded.md)  |      ✅ |               🟢 |
-| [Red Comrades Save the Galaxy: Reloaded](docs/games/red-comrades-reloaded.md)           |      ✅ |               🟢 |
-| [Counter-Strike 2](docs/games/counter-strike-2.md)                                      |      ✅ |               🟡 |
-| [Stoneshard](docs/games/stoneshard.md)                                                  |      ✅ |               🟢 |
-| [Assassin's Creed II](docs/games/assassins-creed-2.md)                                  |      ✅ |               🟢 |
-| [SnowRunner](docs/games/snowrunner.md)                                                  |      ✅ |               🟢 |
-| [Grand Theft Auto IV](docs/games/grand-theft-auto-iv.md)                                |      ✅ |               🟡 |
-| [SAND: Raiders of Sophie](docs/games/sand-raiders-of-sophie.md)                         |      ✅ |               🟢 |
-| [Muck](docs/games/muck.md)                                                              |      ✅ |               🟢 |
-| [Burglin' Gnomes](docs/games/burglin-gnomes.md)                                         |      ✅ |               🟢 |
-| [Grounded](docs/games/grounded.md)                                                      |      ✅ |               🟢 |
-| [Deep Rock Galactic](docs/games/deep-rock-galactic.md)                                  |      ✅ |               🟢 |
-| [DARK SOULS II: Scholar of the First Sin](docs/games/dark-souls-2-sotfs.md)             |      ✅ |               🟢 |
-| [Assassin's Creed Odyssey](docs/games/assassins-creed-odyssey.md)                       |      ✅ |               🟢 |
-| [The Elder Scrolls V: Skyrim Special Edition](docs/games/skyrim-special-edition.md)     |      ✅ |               🟢 |
-
-## Demos
-|                                                       The Witcher 3: Wild Hunt                                                       |                                                       Dragon's Dogma: Dark Arisen                                                       |
-| :----------------------------------------------------------------------------------------------------------------------------------: | :-------------------------------------------------------------------------------------------------------------------------------------: |
-| [![The Witcher 3: Wild Hunt](https://img.youtube.com/vi/44vA4ao50Ng/maxresdefault.jpg)](https://www.youtube.com/watch?v=44vA4ao50Ng) | [![Dragon's Dogma: Dark Arisen](https://img.youtube.com/vi/MofyWR6YVBw/maxresdefault.jpg)](https://www.youtube.com/watch?v=MofyWR6YVBw) |
-
-|                                                       Fallout: New Vegas                                                       |                                                       Subnautica                                                       |
-| :----------------------------------------------------------------------------------------------------------------------------: | :--------------------------------------------------------------------------------------------------------------------: |
-| [![Fallout: New Vegas](https://img.youtube.com/vi/fEr_Hq2IWoA/maxresdefault.jpg)](https://www.youtube.com/watch?v=fEr_Hq2IWoA) | [![Subnautica](https://img.youtube.com/vi/l5Vk417vImU/maxresdefault.jpg)](https://www.youtube.com/watch?v=l5Vk417vImU) |
-
-## Graphics
-
-DirectX 11 through Neptune:
-
-```text
-guest DirectX 11 => Mesa Neptune => virglrenderer => DXMT => Metal
-```
-
-Vulkan:
-
-```text
-guest Vulkan => Mesa Venus => virglrenderer => MoltenVK => Metal
-```
-
-OpenGL:
-
-```text
-guest OpenGL => Mesa VirGL => virglrenderer => ANGLE => Metal
-```
-
-Neptune is currently the preferred path for supported DirectX 11 games. Venus remains the general-purpose Vulkan path and is used by DXVK and other Vulkan applications.
-
-## Building from source
-Requires macOS 26 or later, Xcode, Rust and Docker.
+**macOS 26+ on Apple Silicon**
 
 ```sh
-brew install cmake meson ninja pkg-config python
-make app
+curl -LO https://github.com/luckydye/vm/releases/latest/download/vm.pkg
+sudo installer -pkg vm.pkg -target /
 ```
 
-## Acknowledgements
-Varmint relies on several forks maintained by the UTM project, particularly in the graphics stack.
+The package is unsigned. Install it from a terminal.
 
-Huge thanks to the UTM contributors for making this work possible.
+**Linux with KVM on arm64 or x86-64**
 
-## Resources
-* [Booting AArch64 Linux](https://docs.kernel.org/arch/arm64/booting.html)
-* [VIRTIO](https://docs.oasis-open.org/virtio/virtio/v1.3/csd01/virtio-v1.3-csd01.html)
+```sh
+curl -LO https://github.com/luckydye/vm/releases/latest/download/vm-linux-$(uname -m).tar.gz
+sudo tar -xzf vm-linux-$(uname -m).tar.gz -C /usr/local --strip-components=1
+sudo apt install libvirglrenderer1 virgl-server libx264-164 libopus0 libpulse0 libsqlite3-0 passt \
+  libavcodec61 libfontconfig1 libwayland-client0 libxkbcommon-x11-0 libvulkan1   # libavcodec60 on Ubuntu 24.04
+sudo usermod -aG kvm $USER
+```
+
+VMs are reflink clones, so `~/.vm` must be on APFS, Btrfs or XFS.
+
+`vm help` lists every command. `vm COMMAND --help` shows one with its options and examples.
+
+## Platform support
+
+| Platform | Status | Notes |
+| --- | --- | --- |
+| macOS 26+ on Apple Silicon | Supported | `vm.pkg`, Hypervisor.framework |
+| Linux on arm64 or x86-64 | Supported | KVM through `/dev/kvm` |
+| Linux Wayland | Supported | `vm ui` runs on Wayland |
+| Linux X11 | Not supported for `vm ui` | The CLI works; `vm ui` needs Wayland |
+| Windows | Not supported | No Windows build |
+| Intel Macs | Not supported | Apple Silicon only |
+
+## Shortcuts
+
+| Keys | Where | Action |
+| --- | --- | --- |
+| `⌘B` / `Ctrl+B` | `vm ui` | Hide or show the sidebar |
+| `Ctrl+V` | `vm ui`, `vm screen`, shells | Paste the host clipboard into the guest |
+| `Ctrl+]` | `vm screen` | Detach |
+
+Files dragged onto a pane from the host are uploaded to `/tmp/files` in the guest. A terminal gets their paths as if typed, and the screen pastes them into the focused program.
+
+## Docs
+
+* [Getting started](docs/getting-started.md): install, first VM, seeds, mounts, getting work back.
+* [VMs](docs/vms.md), [shells](docs/shells.md), [files](docs/files.md)
+* [Shared store](docs/store.md), [your own commands](docs/commands.md)
+* [Screen and input](docs/screen.md)
+* [Nodes](docs/nodes.md) and [remote provisioning](docs/serve.md)
+* [Telemetry](docs/telemetry.md)
+* [Building from source](docs/building.md)
+* [Credits](docs/credits.md)
+
+## License
+
+GPL-3.0-only. See [LICENSE](LICENSE).

@@ -1,0 +1,32 @@
+#!/bin/sh
+# Writes the global instruction files of Claude Code, Codex and OpenCode from
+# the user's guidelines and this VM's environment briefing.
+#
+# The guidelines live in ~/.config/varmint/AGENTS.md, which no agent reads on
+# its own, so a seed carries that one file and every agent gets the same text.
+# A file whose content is already current is left alone, so restarts do not
+# churn its mtime.
+set -eu
+
+home=${1:-$HOME}
+guidelines=$home/.config/varmint/AGENTS.md
+briefing=/usr/local/share/varmint/AGENTS.md
+composed=$(mktemp)
+trap 'rm -f "$composed"' EXIT
+
+for file in .claude/CLAUDE.md .codex/AGENTS.md .config/opencode/AGENTS.md; do
+    target=$home/$file
+    mkdir -p "$(dirname "$target")"
+
+    if [ -f "$guidelines" ]; then
+        cat "$guidelines" > "$composed"
+        printf '\n' >> "$composed"
+    else
+        : > "$composed"
+    fi
+    cat "$briefing" >> "$composed"
+
+    if [ ! -f "$target" ] || ! cmp -s "$composed" "$target"; then
+        cat "$composed" > "$target"
+    fi
+done

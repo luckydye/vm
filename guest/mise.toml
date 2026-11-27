@@ -1,0 +1,7 @@
+# Tools preinstalled for the guest user, as mise's system-wide config.
+[tools]
+claude = "latest"
+# The registry's opencode entry uses npm for 2.x, whose postinstall needs node.
+# aqua installs the standalone binary instead. GitHub's "latest" release is
+# still 1.x, so track the current major explicitly.
+"aqua:anomalyco/opencode" = "2"

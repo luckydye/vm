@@ -1,0 +1,151 @@
+#!/bin/sh
+# Paints this VM's desktop in the host's light or dark appearance.
+#
+# `vm ui` runs this in the guest when the host's appearance changes, and when
+# the machine starts. It writes the desktop's configs and repaints the programs
+# that are already running.
+set -eu
+
+case "${1:-}" in
+    light) theme=light ;;
+    dark) theme=dark ;;
+    *) echo "usage: varmint-appearance light|dark" >&2; exit 2 ;;
+esac
+
+config=$HOME/.config
+mkdir -p "$config/hypr" "$config/foot" "$config/fuzzel" "$config/gtk-3.0" "$config/gtk-4.0"
+
+if [ "$theme" = dark ]; then
+    prefer_dark=1
+    background=0xff111111
+    active_border='rgba(a3a3a3ff)'
+    inactive_border='rgba(29292bff)'
+    selection=2f2f32
+    selection_text=f5f5f4
+    accent=34d399
+    fuzzel_background=1b1b1b
+    fuzzel_text=f5f5f4
+    fuzzel_prompt=a3a3a3
+    fuzzel_border=29292b
+else
+    prefer_dark=0
+    background=0xfff2f2f3
+    active_border='rgba(1b1b1eff)'
+    inactive_border='rgba(dedee1ff)'
+    selection=e2e2e5
+    selection_text=1b1b1e
+    accent=16a34a
+    fuzzel_background=ffffff
+    fuzzel_text=1b1b1e
+    fuzzel_prompt=6b6b70
+    fuzzel_border=dedee1
+fi
+
+# The compositor's background and window borders, now and after restarts.
+cat > "$config/hypr/varmint-appearance.conf" <<EOF
+# Written by varmint-appearance; the host's light or dark appearance.
+misc {
+    background_color = $background
+}
+
+general {
+    col.active_border = $active_border
+    col.inactive_border = $inactive_border
+}
+EOF
+
+# Both terminal themes, with the one to use for new windows.
+{
+    printf '[main]\ninitial-color-theme=%s\n\n' "$theme"
+    cat <<'EOF_DARK'
+[colors-dark]
+background=0b0b0b
+foreground=ffffff
+regular0=484f58
+regular1=ff7b72
+regular2=3fb950
+regular3=d29922
+regular4=58a6ff
+regular5=bc8cff
+regular6=39c5cf
+regular7=b1bac4
+bright0=6e7681
+bright1=ffa198
+bright2=56d364
+bright3=e3b341
+bright4=79c0ff
+bright5=d2a8ff
+bright6=56d4dd
+bright7=f0f6fc
+selection-foreground=f5f5f4
+selection-background=2f2f32
+EOF_DARK
+    printf '\n'
+    cat <<'EOF_LIGHT'
+[colors-light]
+background=ffffff
+foreground=24292f
+regular0=24292f
+regular1=cf222e
+regular2=116329
+regular3=4d2d00
+regular4=0969da
+regular5=8250df
+regular6=1b7c83
+regular7=6e7781
+bright0=57606a
+bright1=a40e26
+bright2=1a7f37
+bright3=633c01
+bright4=218bff
+bright5=a475f9
+bright6=3192aa
+bright7=8c959f
+selection-foreground=1b1b1e
+selection-background=e2e2e5
+EOF_LIGHT
+} > "$config/foot/foot.ini"
+
+cat > "$config/fuzzel/fuzzel.ini" <<EOF
+# Written by varmint-appearance; the host's light or dark appearance.
+[colors]
+background=$fuzzel_background
+text=$fuzzel_text
+prompt=$fuzzel_prompt
+input=$fuzzel_text
+match=$accent
+selection=$selection
+selection-text=$selection_text
+selection-match=$accent
+counter=$fuzzel_prompt
+border=$fuzzel_border
+EOF
+
+for version in 3.0 4.0; do
+    cat > "$config/gtk-$version/settings.ini" <<EOF
+[Settings]
+gtk-theme-name=Adwaita
+gtk-application-prefer-dark-theme=$prefer_dark
+EOF
+done
+
+# Running terminals switch to their matching theme.
+if [ "$theme" = dark ]; then
+    signal=USR1
+else
+    signal=USR2
+fi
+pkill -"$signal" -x foot || true
+pkill -"$signal" -x footclient || true
+
+# GTK apps and Chromium follow the color scheme through the session bus.
+if [ -S "$XDG_RUNTIME_DIR/bus" ] && command -v gsettings >/dev/null 2>&1; then
+    DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus" \
+        gsettings set org.gnome.desktop.interface color-scheme "prefer-$theme" || true
+fi
+
+# Repaint the running compositor. A machine still booting fails here, so
+# `vm ui` tries again.
+hyprctl keyword misc:background_color "$background" >/dev/null
+hyprctl keyword general:col.active_border "$active_border" >/dev/null
+hyprctl keyword general:col.inactive_border "$inactive_border" >/dev/null

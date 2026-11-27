@@ -49,17 +49,6 @@ pub struct ScopedIOSurface {
 }
 
 impl ScopedIOSurface {
-    pub fn lookup(id: u32, width: u32, height: u32) -> Option<Self> {
-        let surface = ObjcIOSurfaceRef::lookup(id)?;
-
-        Some(Self {
-            surface,
-            width,
-            height,
-            id,
-        })
-    }
-
     pub fn new_bgra(width: u32, height: u32) -> Option<Self> {
         if width == 0 || height == 0 {
             return None;
